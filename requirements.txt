@@ -1,0 +1,10 @@
+fastapi
+pydantic
+uvicorn
+pydantic-settings
+python-dotenv
+SQLAlchemy
+psycopg2-binary
+colorlog
+cryptography
+gunicorn

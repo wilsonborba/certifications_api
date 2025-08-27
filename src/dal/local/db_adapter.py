@@ -1,0 +1,103 @@
+from sqlalchemy import create_engine, inspect, Table, MetaData, select, insert, update, delete
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import NoSuchTableError
+from contextlib import contextmanager
+from src.core.settings import app_settings
+
+
+class DBAdapter:
+    """
+    Database Adapter for local or dynamic DB operations.
+    Provides engine access, safe connection context, reflection, and CRUD methods.
+    """
+
+    def __init__(self, engine: Engine = None):
+        settings = app_settings()
+        self.engine = engine or create_engine(settings.accredit_db.uri())
+
+    def get_engine(self) -> Engine:
+        return self.engine
+
+    @contextmanager
+    def connect(self):
+        conn = self.engine.connect()
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    def get_inspector(self):
+        return inspect(self.engine)
+
+    def reflect_table(self, table_name: str, schema: str = None) -> Table:
+        metadata = MetaData()
+        try:
+            return Table(table_name, metadata, autoload_with=self.engine, schema=schema)
+        except NoSuchTableError:
+            raise ValueError(f"Table '{table_name}' not found in the database.")
+
+    # ------- CRUD operations -------- #
+
+    def read_all(self, table_name: str, schema: str = None):
+        table = self.reflect_table(table_name, schema)
+        stmt = select(table)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(stmt).mappings()]
+
+    def read_by_id(self, table_name: str, id_value, id_column: str = "id", schema: str = None):
+        table = self.reflect_table(table_name, schema)
+        stmt = select(table).where(table.c[id_column] == id_value)
+        with self.connect() as conn:
+            return conn.execute(stmt).mappings().first()
+
+    def insert_row(self, table_name: str, data: dict, schema: str = None):
+        table = self.reflect_table(table_name, schema)
+        stmt = insert(table).values(**data)
+        with self.connect() as conn:
+            result = conn.execute(stmt)
+            conn.commit()
+            return result.inserted_primary_key
+
+    def update_row(self, table_name: str, id_value, data: dict, id_column: str = "id", schema: str = None):
+        table = self.reflect_table(table_name, schema)
+        stmt = update(table).where(table.c[id_column] == id_value).values(**data)
+        with self.connect() as conn:
+            result = conn.execute(stmt)
+            conn.commit()
+            return result.rowcount
+
+    def delete_row(self, table_name: str, id_value, id_column: str = "id", schema: str = None):
+        table = self.reflect_table(table_name, schema)
+        stmt = delete(table).where(table.c[id_column] == id_value)
+        with self.connect() as conn:
+            result = conn.execute(stmt)
+            conn.commit()
+            return result.rowcount
+
+    # ------- Introspection (optional) ------- #
+
+    def list_tables(self, schema: str = None):
+        return self.get_inspector().get_table_names(schema=schema)
+
+    def get_columns(self, table_name: str, schema: str = None):
+        return self.get_inspector().get_columns(table_name, schema=schema)
+
+
+
+# adapter = DBAdapter()
+
+# # Read all users
+# users = adapter.read_all("users")
+
+# # Insert a row
+# adapter.insert_row("users", {"name": "Alice", "email": "alice@example.com"})
+
+# # Update a row
+# adapter.update_row("users", id_value=1, data={"email": "new@example.com"})
+
+# # Delete a row
+# adapter.delete_row("users", id_value=1)
+
+# # Schema inspection
+# print(adapter.list_tables())
+# print(adapter.get_columns("users"))
