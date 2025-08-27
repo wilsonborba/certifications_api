@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### 🚀 Features
 
 - *(route)* First route implementation created
+- *(route)* Route with source item payload loaded
 
 ### ⚙️ Miscellaneous Tasks
 

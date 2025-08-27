@@ -48,7 +48,8 @@ class DBAdapter:
         table = self.reflect_table(table_name, schema)
         stmt = select(table).where(table.c[id_column] == id_value)
         with self.connect() as conn:
-            return conn.execute(stmt).mappings().first()
+            row = conn.execute(stmt).mappings().first()
+            return dict(row) if row is not None else None
 
     def insert_row(self, table_name: str, data: dict, schema: str = None):
         table = self.reflect_table(table_name, schema)
