@@ -11,21 +11,12 @@ class MyResponse(BaseModel):
     - https://fastapi.tiangolo.com/tutorial/response-status-code/
 
     """
-    status: int
     message: Optional[str] = None
     data: Optional[Any] = None
 
-    def __init__(self, status: str, message: Optional[str] = None, data: Optional[dict] = None):
-        super().__init__(status=status, message=message, data=data)
+    def __init__(self,  message: Optional[str] = None, data: Optional[dict] = None):
+        super().__init__( message=message, data=data)
 
 
-    def to_dict(self) -> dict:
-        """
-        Convert the response model to a dictionary.
-        """
-        return {
-            "status": self.status,
-            "message": self.message,
-            "data": self.data
-        }
+
     

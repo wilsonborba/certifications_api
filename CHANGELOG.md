@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [unreleased]
 
+### 🚀 Features
+
+- *(route)* First route implementation created
+
 ### ⚙️ Miscellaneous Tasks
 
 - *(env)* Initial structure of app created
