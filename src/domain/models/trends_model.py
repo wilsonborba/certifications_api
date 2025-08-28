@@ -6,7 +6,7 @@ class TrendsModel:
     item_name: str
     page: int 
     per_page: int 
-    trends: list[dict] 
+    topics: list[dict] 
     has_more:  dict[str, bool]
     updated_at: str | None = None
 

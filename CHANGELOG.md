@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 - *(route)* Route with source item payload loaded
 - *(route)* Added a reddit api route trends
 - *(adapter)* Improve the agnostic trend model answer
+- *(env)* Changed the name of trend to topic
 
 ### ⚙️ Miscellaneous Tasks
 

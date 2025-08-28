@@ -130,7 +130,7 @@ class RedditAdapter(BaseAdapter):
         return trends, next_after
 
     # ----- public: unified, numeric pagination -----
-    def get_trends(
+    def get_topics(
         self,
         *,
         page: int = 1,
@@ -174,7 +174,7 @@ class RedditAdapter(BaseAdapter):
             any_has_more = any_has_more or has_more
 
         return {
-            "trends": merged,
+            "topics": merged,
             "page": page,
             "per_page": per_page,
             "has_more": any_has_more,

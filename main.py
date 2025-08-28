@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from src.presentation.routes.source_item_route import source_item_router
-from src.presentation.routes.trends_route import app_trends_router
+from src.presentation.routes.topics_route import app_topics_router
 
 
 
@@ -27,6 +27,6 @@ app.include_router(
 )
 
 app.include_router(
-    app_trends_router,
-    tags=["app_trends"]
+    app_topics_router,
+    tags=["app_topics"]
 )

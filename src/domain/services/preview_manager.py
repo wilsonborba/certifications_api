@@ -66,7 +66,7 @@ class PreviewManager:
 
         return db_item
     
-    def get_trends(
+    def get_topics(
         self,
         item_name: str,
         *,
@@ -80,19 +80,19 @@ class PreviewManager:
                 item_name=item_name,
                 page=page,
                 per_page=per_page,
-                trends=[],
+                topics=[],
                 has_more=False,
                 updated_at=datetime.now(timezone.utc).isoformat(),
                 source_name=None,
             ).to_dict()
 
-        res = adapter.get_trends(page=page, per_page=per_page, **adapter_kwargs)
+        res = adapter.get_topics(page=page, per_page=per_page, **adapter_kwargs)
 
         return TrendsModel(
             item_name=res.get("item_name", item_name),
             page=res.get("page", page),
             per_page=res.get("per_page", per_page),
-            trends=res.get("trends", []),
+            topics=res.get("topics", []),
             has_more=bool(res.get("has_more")),
             updated_at=res.get("fetched_at", datetime.now(timezone.utc).isoformat()),
             source_name=res.get("source_name"),

@@ -14,7 +14,7 @@ class BaseAdapter(ABC):
         pass
 
     @abstractmethod
-    def get_trends(
+    def get_topics(
         self,
         *,
         page: int = 1,          # numeric, 1-based

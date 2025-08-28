@@ -101,7 +101,7 @@ class StackExchangeOverflowAdapter(BaseAdapter):
         return res
 
     # ------------ unified: get_trends ------------
-    def get_trends(
+    def get_topics(
         self,
         *,
         page: int = 1,
@@ -142,11 +142,11 @@ class StackExchangeOverflowAdapter(BaseAdapter):
         # optional: attach best/worst answer IDs
         qid_to_best_worst = self._fetch_answers_for_questions(question_ids) if question_ids else {}
 
-        trends: List[Dict[str, Any]] = []
+        topics: List[Dict[str, Any]] = []
         for q in combined:
             qid = q.get("question_id")
             best_id, worst_id = qid_to_best_worst.get(qid, (None, None))
-            trends.append({
+            topics.append({
                 "type": "question",
                 "question_id": qid,
                 "title": q.get("title"),
@@ -165,7 +165,7 @@ class StackExchangeOverflowAdapter(BaseAdapter):
         has_more = bool(recent_raw.get("has_more")) or bool(top_raw.get("has_more"))
 
         return {
-            "trends": trends,
+            "topics": topics,
             "page": page,
             "per_page": per_page,
             "has_more": has_more,
