@@ -1,6 +1,10 @@
 
 
 
+from src.dal.remote.aws_whitepaper_services_adapter import AwsWhitepaperServicesAdapter
+from src.dal.remote.killedbygoogle_adapter import KilledByGoogleAdapter
+from src.dal.remote.companies_marketcap_adapter import CompaniesMarketCapAdapter
+from src.dal.remote.hackernews_adapter import HackerNewsAdapter
 from src.dal.remote.chesscom_adapter import ChessComAdapter
 from src.dal.remote.stackexchange_adapter import StackExchangeOverflowAdapter
 from src.dal.remote.reddit_adapter import RedditAdapter
@@ -12,6 +16,11 @@ class AdapterFactory:
         "reddit": RedditAdapter,
         "stack_exchange_overflow": StackExchangeOverflowAdapter,
         "chess_com": ChessComAdapter,
+        "hacker_news": HackerNewsAdapter,
+        # "meetup": MeetupAdapter,  # Placeholder for future implementation (waiting for API access)
+        "companies_marketcap": CompaniesMarketCapAdapter,
+        "killed_by_google": KilledByGoogleAdapter,
+        "aws_whitepaper_services": AwsWhitepaperServicesAdapter
     }
 
     @classmethod

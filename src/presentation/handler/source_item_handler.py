@@ -1,7 +1,7 @@
 
 from src.dal.remote.factory import AdapterFactory
 from src.domain.services.preview_manager import PreviewManager
-from src.core.logs import info
+from src.core.logs import info, debug
 
 preview_manager = PreviewManager()
 
@@ -22,11 +22,17 @@ def get_all_item_data():
             info(f"Source '{f}' not found in the database.")
             preview = preview_manager.get_item_preview(f)
             if preview:
-                preview_manager.db_adapter.insert_row(
+                data_to_insert = preview.to_dict()
+                
+                result = preview_manager.db_adapter.insert_row(
                 "accredit_sourceitem",
-                preview.to_dict()
+                data_to_insert
                 )
-                all_items.append(preview.to_dict())
+
+
+                data_to_insert["id"] = result[0] 
+                all_items.append(data_to_insert)
+
             else:
                 continue
         else:

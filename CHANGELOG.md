@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 - *(adapter)* Improve the agnostic trend model answer
 - *(env)* Changed the name of trend to topic
 - *(adapter)* Added chess.com adapter
+- *(adapter)* Added many adapters
 
 ### ⚙️ Miscellaneous Tasks
 

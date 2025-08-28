@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # StackExchange API settings
     STACKEXCHANGEOVERFLOW_API_KEY: str | None = None  # Optional, but helps with
 
+    # Meetup API settings
+    MEETUP_ACCESS_TOKEN: str | None = None  # OAuth2 Bearer token
+
     @property
     def accredit_db(self) -> DatabaseConfig:
         return DatabaseConfig(
