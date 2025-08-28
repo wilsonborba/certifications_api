@@ -1,6 +1,7 @@
 
 
 
+from src.dal.remote.chesscom_adapter import ChessComAdapter
 from src.dal.remote.stackexchange_adapter import StackExchangeOverflowAdapter
 from src.dal.remote.reddit_adapter import RedditAdapter
 from src.core.logs import error
@@ -10,6 +11,7 @@ class AdapterFactory:
     adapters = {
         "reddit": RedditAdapter,
         "stack_exchange_overflow": StackExchangeOverflowAdapter,
+        "chess_com": ChessComAdapter,
     }
 
     @classmethod

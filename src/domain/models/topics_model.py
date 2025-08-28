@@ -1,7 +1,7 @@
 from dataclasses import asdict, dataclass, field
 
 @dataclass
-class TrendsModel:
+class TopicModel:
     source_name: str
     item_name: str
     page: int 

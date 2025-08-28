@@ -2,7 +2,7 @@
 
 
 from datetime import datetime, timezone
-from src.domain.models.trends_model import TrendsModel
+from src.domain.models.topics_model import TopicModel
 from src.dal.remote.factory import AdapterFactory
 from src.dal.local.db_adapter import DBAdapter
 
@@ -76,7 +76,7 @@ class PreviewManager:
     ) -> dict[str, any]:
         adapter = self.adapters_factory.get_adapter(item_name)
         if not adapter:
-            return TrendsModel(
+            return TopicModel(
                 item_name=item_name,
                 page=page,
                 per_page=per_page,
@@ -88,7 +88,7 @@ class PreviewManager:
 
         res = adapter.get_topics(page=page, per_page=per_page, **adapter_kwargs)
 
-        return TrendsModel(
+        return TopicModel(
             item_name=res.get("item_name", item_name),
             page=res.get("page", page),
             per_page=res.get("per_page", per_page),

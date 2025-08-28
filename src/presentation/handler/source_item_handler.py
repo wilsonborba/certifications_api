@@ -8,7 +8,7 @@ preview_manager = PreviewManager()
 factory = AdapterFactory()
 
 def get_all_sources_data():
-    return preview_manager.get_all_sources()
+    return set(preview_manager.get_all_sources())
 
 
 def get_all_item_data():

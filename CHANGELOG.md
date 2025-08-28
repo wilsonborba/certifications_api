@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 - *(route)* Added a reddit api route trends
 - *(adapter)* Improve the agnostic trend model answer
 - *(env)* Changed the name of trend to topic
+- *(adapter)* Added chess.com adapter
 
 ### ⚙️ Miscellaneous Tasks
 
