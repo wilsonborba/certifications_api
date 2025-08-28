@@ -28,10 +28,13 @@ def get_specific_item_data(item_name):
     if not db_data:
         info(f"Source '{item_name}' not found in the database.")
         preview = preview_manager.get_item_preview(item_name)
-        preview_manager.db_adapter.insert_row(
+        if preview:
+            preview_manager.db_adapter.insert_row(
             "accredit_sourceitem",
             preview.to_dict()
-        )
-        return preview.to_dict()
+            )
+            return preview.to_dict()
+        else:
+            return None
     
     return db_data

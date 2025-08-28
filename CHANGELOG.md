@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 
 - *(route)* First route implementation created
 - *(route)* Route with source item payload loaded
+- *(route)* Added a reddit api route trends
 
 ### ⚙️ Miscellaneous Tasks
 

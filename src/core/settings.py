@@ -24,6 +24,15 @@ class Settings(BaseSettings):
     # Development flag
     development_mode: bool = True
 
+
+    # Reddit API settings
+
+    REDDIT_CLIENT_ID: str | None = None
+    REDDIT_CLIENT_SECRET: str | None = None  # keep None if using installed app grant
+    REDDIT_DEVICE_ID: str | None = None      # if installed app, set any stable string
+    REDDIT_SCOPE: str = "read"
+    REDDIT_USER_AGENT: str 
+
     @property
     def accredit_db(self) -> DatabaseConfig:
         return DatabaseConfig(
@@ -38,6 +47,7 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"  # Optional with load_dotenv, but good for pydantic to know
+
 
 # Singleton
 @lru_cache()
