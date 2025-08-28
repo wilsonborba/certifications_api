@@ -13,5 +13,30 @@ class BaseAdapter(ABC):
     def get_preview(self) -> PreviewModel:
         pass
 
+    @abstractmethod
+    def get_trends(
+        self,
+        *,
+        page: int = 1,          # numeric, 1-based
+        per_page: int = 30,     # unified page size
+        **kwargs: Any           # adapter-specific (e.g., time_window, tagged, etc.)
+    ) -> Dict[str, Any]:
+        """
+        MUST return the unified structure:
+
+        {
+          "trends": [ ... normalized objects ... ],
+          "page": <int>,
+          "per_page": <int>,
+          "has_more": <bool>,              # whether page+1 likely exists
+          "fetched_at": <iso8601>,
+          "item_name": <adapter item_name>,
+          "source_name": <adapter source_name>
+        }
+
+        NO adapter-specific fields here. Keep those internal.
+        """
+        ...
+
 
 

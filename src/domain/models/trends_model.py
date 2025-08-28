@@ -2,10 +2,10 @@ from dataclasses import asdict, dataclass, field
 
 @dataclass
 class TrendsModel:
+    source_name: str
     item_name: str
     page: int 
-    per_page: int
-    kinds: list[str] 
+    per_page: int 
     trends: list[dict] 
     has_more:  dict[str, bool]
     updated_at: str | None = None

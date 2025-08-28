@@ -1,19 +1,41 @@
 
-
-import datetime
+from src.dal.remote.factory import AdapterFactory
 from src.domain.services.preview_manager import PreviewManager
 from src.core.logs import info
 
 preview_manager = PreviewManager()
 
-
+factory = AdapterFactory()
 
 def get_all_sources_data():
     return preview_manager.get_all_sources()
 
 
 def get_all_item_data():
-    return preview_manager.get_all_items()
+    # db_data = preview_manager.get_all_items()
+
+    all_items = []
+
+    for f in factory.adapters.keys():
+        db_data = preview_manager.get_item(f)
+        if not db_data:
+            info(f"Source '{f}' not found in the database.")
+            preview = preview_manager.get_item_preview(f)
+            if preview:
+                preview_manager.db_adapter.insert_row(
+                "accredit_sourceitem",
+                preview.to_dict()
+                )
+                all_items.append(preview.to_dict())
+            else:
+                continue
+        else:
+            all_items.append(db_data)
+    
+    return all_items
+                
+
+    
 
 
 def get_specific_source_data(source_name):

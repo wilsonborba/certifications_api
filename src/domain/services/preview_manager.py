@@ -72,59 +72,28 @@ class PreviewManager:
         *,
         page: int = 1,
         per_page: int = 45,
-        kinds: list[str] | None = None,
-        time_window: str | None = None,  # used for kind="top"
-        ) -> dict[str, any]:
-        """
-        Build a numeric page by walking Reddit's cursor pagination per kind.
-        Stateless: walks (page-1) times to reach the page for each kind.
-        """
-        assert page >= 1, "page must be >= 1"
-        assert per_page >= 1, "per_page must be >= 1"
-
+        **adapter_kwargs,   # adapter-specific knobs if needed (e.g., time_window, tagged)
+    ) -> dict[str, any]:
         adapter = self.adapters_factory.get_adapter(item_name)
-        kinds = kinds or ["top", "hot", "communities"]
+        if not adapter:
+            return TrendsModel(
+                item_name=item_name,
+                page=page,
+                per_page=per_page,
+                trends=[],
+                has_more=False,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+                source_name=None,
+            ).to_dict()
 
-        # Even split; last bucket gets the remainder
-        base = per_page // len(kinds)
-        remainder = per_page % len(kinds)
-        limits = [base + (1 if i < remainder else 0) for i in range(len(kinds))]
-
-        results = []
-        has_more_map: dict[str, bool] = {}
-
-        for idx, kind in enumerate(kinds):
-            limit = limits[idx]
-            after = None
-
-            # Walk to the requested numeric page for this kind
-            for _ in range(page - 1):
-                res = adapter.get_trends(kind=kind, limit=limit, after=after, time_window=time_window)
-                after = res.get("after")
-                if not after:
-                    break  # no more pages for this kind
-
-            # Now fetch the page we actually want
-            res = adapter.get_trends(kind=kind, limit=limit, after=after, time_window=time_window)
-            items = res.get("items", [])
-            results.extend(items)
-            has_more_map[kind] = bool(res.get("after"))
-
-        # return {
-        #     "page": page,
-        #     "per_page": per_page,
-        #     "kinds": kinds,
-        #     "items": results,        # flat list (already mixed in order: top, hot, communities)
-        #     "has_more": has_more_map # tells the client whether “next page” likely exists per kind
-        # }
+        res = adapter.get_trends(page=page, per_page=per_page, **adapter_kwargs)
 
         return TrendsModel(
-            item_name=item_name,
-            page=page,
-            per_page=per_page,
-            kinds=kinds,
-            trends=results,
-            has_more=has_more_map,
-            updated_at=datetime.now(timezone.utc).isoformat(),
+            item_name=res.get("item_name", item_name),
+            page=res.get("page", page),
+            per_page=res.get("per_page", per_page),
+            trends=res.get("trends", []),
+            has_more=bool(res.get("has_more")),
+            updated_at=res.get("fetched_at", datetime.now(timezone.utc).isoformat()),
+            source_name=res.get("source_name"),
         ).to_dict()
-        

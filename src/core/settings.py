@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     REDDIT_SCOPE: str = "read"
     REDDIT_USER_AGENT: str 
 
+    # StackExchange API settings
+    STACKEXCHANGEOVERFLOW_API_KEY: str | None = None  # Optional, but helps with
+
     @property
     def accredit_db(self) -> DatabaseConfig:
         return DatabaseConfig(
