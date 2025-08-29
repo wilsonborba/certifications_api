@@ -10,3 +10,4 @@ cryptography
 gunicorn
 requests
 beautifulsoup4
+boto3

@@ -1,7 +1,7 @@
 
 
 
-from src.dal.remote.aws_whitepaper_services_adapter import AwsWhitepaperServicesAdapter
+from src.dal.remote.aws.aws_infra_catalog_adapter import  AwsInfraCatalogAdapter # AwsWhitepaperServicesAdapter
 from src.dal.remote.killedbygoogle_adapter import KilledByGoogleAdapter
 from src.dal.remote.companies_marketcap_adapter import CompaniesMarketCapAdapter
 from src.dal.remote.hackernews_adapter import HackerNewsAdapter
@@ -20,7 +20,8 @@ class AdapterFactory:
         # "meetup": MeetupAdapter,  # Placeholder for future implementation (waiting for API access)
         "companies_marketcap": CompaniesMarketCapAdapter,
         "killed_by_google": KilledByGoogleAdapter,
-        "aws_whitepaper_services": AwsWhitepaperServicesAdapter
+        # "aws_whitepaper_services": AwsWhitepaperServicesAdapter # have a api that is better than scraping
+        "aws_infra_catalog": AwsInfraCatalogAdapter
     }
 
     @classmethod

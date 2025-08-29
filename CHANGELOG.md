@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - *(env)* Changed the name of trend to topic
 - *(adapter)* Added chess.com adapter
 - *(adapter)* Added many adapters
+- *(adapter)* Added aws catalog api adapters
 
 ### ⚙️ Miscellaneous Tasks
 

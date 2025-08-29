@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from src.domain.models.topics_model import TopicModel
 from src.dal.remote.factory import AdapterFactory
 from src.dal.local.db_adapter import DBAdapter
-
+from src.core.logs import error, debug
 
 class PreviewManager:
     def __init__(self):
@@ -75,7 +75,9 @@ class PreviewManager:
         **adapter_kwargs,   # adapter-specific knobs if needed (e.g., time_window, tagged)
     ) -> dict[str, any]:
         adapter = self.adapters_factory.get_adapter(item_name)
+        
         if not adapter:
+            error(f"No adapter found for source: {item_name}")
             return TopicModel(
                 item_name=item_name,
                 page=page,

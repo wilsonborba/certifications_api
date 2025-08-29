@@ -36,8 +36,13 @@ class Settings(BaseSettings):
     # StackExchange API settings
     STACKEXCHANGEOVERFLOW_API_KEY: str | None = None  # Optional, but helps with
 
-    # Meetup API settings
-    MEETUP_ACCESS_TOKEN: str | None = None  # OAuth2 Bearer token
+    # Meetup API settings (does not provided need a pro subscription)
+    # MEETUP_ACCESS_TOKEN: str | None = None  # OAuth2 Bearer token
+
+    # aws 
+    AWS_ACCESS_KEY_ID: str
+    AWS_SECRET_ACCESS_KEY: str
+    AWS_REGION: str = "ap-southeast-1"
 
     @property
     def accredit_db(self) -> DatabaseConfig:
