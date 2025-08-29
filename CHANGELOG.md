@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 - *(adapter)* Added chess.com adapter
 - *(adapter)* Added many adapters
 - *(adapter)* Added aws catalog api adapters
+- *(adapter)* Added  dev.to adapter
 
 ### ⚙️ Miscellaneous Tasks
 

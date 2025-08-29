@@ -1,6 +1,7 @@
 
 
 
+from src.dal.remote.devto_adapter import DevToAdapter
 from src.dal.remote.aws.aws_infra_catalog_adapter import  AwsInfraCatalogAdapter # AwsWhitepaperServicesAdapter
 from src.dal.remote.killedbygoogle_adapter import KilledByGoogleAdapter
 from src.dal.remote.companies_marketcap_adapter import CompaniesMarketCapAdapter
@@ -21,7 +22,8 @@ class AdapterFactory:
         "companies_marketcap": CompaniesMarketCapAdapter,
         "killed_by_google": KilledByGoogleAdapter,
         # "aws_whitepaper_services": AwsWhitepaperServicesAdapter # have a api that is better than scraping
-        "aws_infra_catalog": AwsInfraCatalogAdapter
+        "aws_infra_catalog": AwsInfraCatalogAdapter,
+        "devto": DevToAdapter,
     }
 
     @classmethod
