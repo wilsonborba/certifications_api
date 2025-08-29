@@ -16,6 +16,7 @@ All notable changes to this project will be documented in this file.
 - *(adapter)* Added aws catalog api adapters
 - *(adapter)* Added  dev.to adapter
 - *(adapter)* Added  product hunt adapter
+- *(adapter)* Added  exploit-db adapter
 
 ### ⚙️ Miscellaneous Tasks
 

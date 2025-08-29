@@ -2,6 +2,7 @@
 
 
 
+from src.dal.remote.exploitdb_adapter import ExploitDBAdapter
 from src.dal.remote.producthunt_adapter import ProductHuntAdapter
 from src.dal.remote.devto_adapter import DevToAdapter
 from src.dal.remote.aws.aws_infra_catalog_adapter import  AwsInfraCatalogAdapter # AwsWhitepaperServicesAdapter
@@ -26,7 +27,8 @@ class AdapterFactory:
         # "aws_whitepaper_services": AwsWhitepaperServicesAdapter # have a api that is better than scraping
         "aws_infra_catalog": AwsInfraCatalogAdapter,
         "devto": DevToAdapter,
-        "product_hunt": ProductHuntAdapter
+        "product_hunt": ProductHuntAdapter,
+        "exploitdb": ExploitDBAdapter,
     }
 
     @classmethod
