@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     AWS_SECRET_ACCESS_KEY: str
     AWS_REGION: str = "ap-southeast-1"
 
+    # Product Hunt API settings
+    PRODUCTHUNT_DEVELOPER_TOKEN: str        # Bearer developer token (from Product Hunt app)
+    PRODUCTHUNT_USER_AGENT: str = "quiz-certify/1.0 (+https://asodya.com)"
+
     @property
     def accredit_db(self) -> DatabaseConfig:
         return DatabaseConfig(
