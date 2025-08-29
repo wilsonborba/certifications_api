@@ -2,6 +2,9 @@
 
 
 
+from src.dal.remote.worldbankgov_adapter import WorldbankgovAdapter
+from src.dal.remote.countriesnow_adapter import CountriesnowAdapter
+from src.dal.remote.blsgov_adapter import BlsgovAdapter
 from src.dal.remote.exploitdb_adapter import ExploitDBAdapter
 from src.dal.remote.producthunt_adapter import ProductHuntAdapter
 from src.dal.remote.devto_adapter import DevToAdapter
@@ -29,6 +32,9 @@ class AdapterFactory:
         "devto": DevToAdapter,
         "product_hunt": ProductHuntAdapter,
         "exploitdb": ExploitDBAdapter,
+        "blsgov": BlsgovAdapter,
+        "countriesnow": CountriesnowAdapter,
+        "worldbankgov": WorldbankgovAdapter,
     }
 
     @classmethod
