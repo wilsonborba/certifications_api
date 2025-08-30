@@ -2,6 +2,7 @@
 
 
 
+from src.dal.remote.sat_adapter import SatAdapter
 from src.dal.remote.enem_adapter import EnemAdapter
 from src.dal.remote.worldbankgov_adapter import WorldbankgovAdapter
 from src.dal.remote.countriesnow_adapter import CountriesnowAdapter
@@ -37,6 +38,7 @@ class AdapterFactory:
         "countriesnow": CountriesnowAdapter,
         "worldbankgov": WorldbankgovAdapter,
         "enem": EnemAdapter,
+        "sat": SatAdapter,
     }
 
     @classmethod

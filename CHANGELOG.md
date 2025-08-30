@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 - *(adapter)* Added  exploit-db adapter
 - *(adapter)* Added about public_and_gov adapter
 - *(adapter)* Added about public_and_gov enem adapter
+- *(adapter)* Added about public_and_gov sat adapter
 
 ### ⚙️ Miscellaneous Tasks
 

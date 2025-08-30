@@ -77,7 +77,7 @@ def main() -> None:
             
             if payload is not None:
                 total_added += 1
-                print(f"\rAdicionado {total_added:,}: {k.year} #{k.index}", end="")
+                print(f"\rAdded {total_added:,}: {k.year} #{k.index}", end="")
                 results.append(payload)
 
     # salva JSONL (debug/portável)
