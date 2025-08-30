@@ -217,7 +217,7 @@ class MeetupAdapter(BaseAdapter):
             "page": page,
             "per_page": per_page,
             "has_more": bool(has_more and len(topics) >= per_page),
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
             "item_name": self.item_name,
             "source_name": self.source_name,
         }

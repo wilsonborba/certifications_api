@@ -29,7 +29,7 @@ class BaseAdapter(ABC):
           "page": <int>,
           "per_page": <int>,
           "has_more": <bool>,              # whether page+1 likely exists
-          "fetched_at": <iso8601>,
+          "updated_at": <iso8601>,
           "item_name": <adapter item_name>,
           "source_name": <adapter source_name>
         }

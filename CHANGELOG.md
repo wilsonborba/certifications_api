@@ -18,6 +18,7 @@ All notable changes to this project will be documented in this file.
 - *(adapter)* Added  product hunt adapter
 - *(adapter)* Added  exploit-db adapter
 - *(adapter)* Added about public_and_gov adapter
+- *(adapter)* Added about public_and_gov enem adapter
 
 ### ⚙️ Miscellaneous Tasks
 

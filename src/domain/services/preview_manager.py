@@ -96,6 +96,6 @@ class PreviewManager:
             per_page=res.get("per_page", per_page),
             topics=res.get("topics", []),
             has_more=bool(res.get("has_more")),
-            updated_at=res.get("fetched_at", datetime.now(timezone.utc).isoformat()),
+            updated_at=res.get("updated_at", datetime.now(timezone.utc).isoformat()),
             source_name=res.get("source_name"),
         ).to_dict()

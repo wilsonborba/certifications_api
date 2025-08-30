@@ -84,7 +84,7 @@ class CountriesnowAdapter(BaseAdapter):
             "page": page,
             "per_page": per_page,
             "has_more": len(flat) > end,
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
             "item_name": self.item_name,
             "source_name": self.source_name,
         }
