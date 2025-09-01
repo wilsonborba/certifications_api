@@ -16,3 +16,4 @@ feedparser
 pandas
 pyarrow
 fastparquet
+httpx

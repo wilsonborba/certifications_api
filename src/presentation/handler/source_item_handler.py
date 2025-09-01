@@ -1,9 +1,9 @@
 
 from src.dal.remote.factory import AdapterFactory
-from src.domain.services.preview_manager import PreviewManager
+from src.domain.services.quiz_manager import QuizManager
 from src.core.logs import info, debug
 
-preview_manager = PreviewManager()
+preview_manager = QuizManager()
 
 factory = AdapterFactory()
 

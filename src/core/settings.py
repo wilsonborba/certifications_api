@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     PRODUCTHUNT_DEVELOPER_TOKEN: str        # Bearer developer token (from Product Hunt app)
     PRODUCTHUNT_USER_AGENT: str = "quiz-certify/1.0 (+https://asodya.com)"
 
+    # Gemini
+
+    GEMINI_API_KEY: str | None = None
+
     @property
     def accredit_db(self) -> DatabaseConfig:
         return DatabaseConfig(

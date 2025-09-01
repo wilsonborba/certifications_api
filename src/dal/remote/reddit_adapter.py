@@ -17,6 +17,9 @@ class RedditAdapter(BaseAdapter):
     item_name = "reddit"
     source_name = "apps"
 
+    _token: Optional[str] = None
+    _token_expiry: float = 0.0
+
     def get_preview(self) -> PreviewModel:
         return PreviewModel(
             mode=EnumMode.PLAYFUL,
@@ -26,9 +29,19 @@ class RedditAdapter(BaseAdapter):
             item_img="https://res.cloudinary.com/dhncdmb2t/image/upload/v1756293205/reddit_logo_t93flf.png",
             updated_at=datetime.now(timezone.utc).isoformat()
         )
+    
+    def instructions(self) -> str:
+        return (
+            "You are given a Reddit post with comments. "
+            "Your goal is to create fun, playful, and non-controversial quiz questions based on the content. "
+            "Focus on who said what, general reactions, or funny, widely agreeable observations. "
+            "Avoid questions that depend on subjective opinions or controversial interpretations. "
+            "Keep the questions clear, light, and grounded in the content. "
+            "All questions should be understandable and answerable by most users based on the provided context. "
+            "Use a casual and fun tone. If needed, reference the post title or author to ground the question."
+    )
 
-    _token: Optional[str] = None
-    _token_expiry: float = 0.0
+
 
     @property
     def _ua(self) -> str:
@@ -72,7 +85,7 @@ class RedditAdapter(BaseAdapter):
         data = self._get(path, params=params).get("data", {}) or {}
         return data.get("children", []), data.get("after")
 
-    # ----- per-kind helpers -----
+
     def _kind_communities(self, *, limit: int, after: str | None) -> tuple[list[dict], str | None]:
         children, next_after = self._page("/subreddits/popular", limit=limit, after=after, sr_detail="true")
         trends: list[dict] = []
@@ -80,7 +93,10 @@ class RedditAdapter(BaseAdapter):
             d = c.get("data", {}) or {}
             trends.append({
                 "type": "subreddit",
+                "topic_type": "subreddit",
+                "input_identification": d.get("name"),  # e.g., t5_2qh33
                 "name": d.get("display_name_prefixed") or d.get("display_name"),
+                "display_name": d.get("display_name"),
                 "title": d.get("title"),
                 "subscribers": d.get("subscribers"),
                 "url": f"https://www.reddit.com{d.get('url')}" if d.get("url") else None,
@@ -96,10 +112,13 @@ class RedditAdapter(BaseAdapter):
             d = c.get("data", {}) or {}
             trends.append({
                 "type": "post",
+                "topic_type": "post",
+                "input_identification": d.get("name"),  # e.g., t3_abc123
                 "title": d.get("title"),
                 "subreddit": d.get("subreddit_name_prefixed"),
                 "score": d.get("score"),
                 "num_comments": d.get("num_comments"),
+                "permalink": d.get("permalink"),
                 "url": f"https://www.reddit.com{d.get('permalink')}" if d.get("permalink") else d.get("url"),
                 "created_utc": d.get("created_utc"),
                 "author": d.get("author"),
@@ -116,10 +135,13 @@ class RedditAdapter(BaseAdapter):
             d = c.get("data", {}) or {}
             trends.append({
                 "type": "post",
+                "topic_type": "post",
+                "input_identification": d.get("name"),  # e.g., t3_abc123
                 "title": d.get("title"),
                 "subreddit": d.get("subreddit_name_prefixed"),
                 "score": d.get("score"),
                 "num_comments": d.get("num_comments"),
+                "permalink": d.get("permalink"),
                 "url": f"https://www.reddit.com{d.get('permalink')}" if d.get("permalink") else d.get("url"),
                 "created_utc": d.get("created_utc"),
                 "author": d.get("author"),
@@ -128,6 +150,158 @@ class RedditAdapter(BaseAdapter):
                 "time_window": t,
             })
         return trends, next_after
+
+    
+    def get_input(
+        self,
+        *,
+        input_identification: str | None = None,
+        topic_type: str | None = None,
+        permalink_or_url: str | None = None,
+        comments_limit: int = 20,
+        depth: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        Fetch a full context for a topic previously returned by get_topics.
+        - For posts (t3_*): returns post fields + top-level comments (up to comments_limit).
+        - For subreddits (t5_*): returns 'about' + a small 'hot' listing.
+        You may also pass a permalink/URL instead of input_identification.
+        """
+        assert comments_limit >= 0 and depth >= 0
+
+        # Helper to GET with auth
+        def _g(path: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+            return self._get(path, params=params or {})
+
+        # If permalink provided, try to resolve ID/type
+        # e.g., /r/AskReddit/comments/abc123/some_title/
+        if not input_identification and permalink_or_url:
+            # Reddit supports /api/info by url:
+            #   GET /api/info.json?url=https://www.reddit.com/r/.../comments/abc123/...
+            # (We can pass the absolute URL or the permalink)
+            url_param = permalink_or_url
+            # ensure absolute URL (oauth host accepts full www.reddit.com URL)
+            if url_param.startswith("/"):
+                url_param = f"https://www.reddit.com{url_param}"
+            info = _g("/api/info", params={"url": url_param})
+            children = (info.get("data") or {}).get("children") or []
+            if children:
+                d = (children[0] or {}).get("data") or {}
+                input_identification = d.get("name")  # t3_...
+                topic_type = "post" if (input_identification or "").startswith("t3_") else None
+
+        if not input_identification:
+            return {"error": "missing input_identification and permalink_or_url"}
+
+        # POSTS (t3_*)
+        if input_identification.startswith("t3_") or topic_type == "post":
+            # 1) Basic post info via /api/info?id=t3_xxx
+            info = _g("/api/info", params={"id": input_identification})
+            children = (info.get("data") or {}).get("children") or []
+            if not children:
+                return {"error": "post not found", "input_identification": input_identification}
+            post = (children[0] or {}).get("data") or {}
+            # 2) Comments via /comments/{id}.json
+            base36 = input_identification.split("_", 1)[1]
+            # parameters: depth, limit
+            # Note: comments endpoint returns a 2-element array: [post, comments]
+            comments_resp = self._get(f"/comments/{base36}.json", params={
+                "limit": max(0, min(comments_limit, 200)),
+                "depth": depth,
+                "threaded": False,
+                "sort": "top",
+            })
+            comments_list: list[dict] = []
+            try:
+                listing = comments_resp[1]  # second element is comments listing
+                for c in (listing.get("data") or {}).get("children") or []:
+                    if c.get("kind") != "t1":
+                        continue
+                    cd = (c.get("data") or {})
+                    comments_list.append({
+                        "id": cd.get("name"),            # t1_xxx
+                        "author": cd.get("author"),
+                        "body": cd.get("body"),
+                        "score": cd.get("score"),
+                        "created_utc": cd.get("created_utc"),
+                        "replies_count": len(((cd.get("replies") or {}).get("data") or {}).get("children") or []) if isinstance(cd.get("replies"), dict) else 0,
+                    })
+            except Exception:
+                pass
+
+            return {
+                # "topic_type": "post",
+                "input_identification": input_identification,
+                "input_data": {
+                    "post": {
+                    "id": post.get("name"),
+                    "title": post.get("title"),
+                    "selftext": post.get("selftext"),
+                    "selftext_html": post.get("selftext_html"),
+                    "author": post.get("author"),
+                    "subreddit": post.get("subreddit_name_prefixed"),
+                    "permalink": post.get("permalink"),
+                    "url": f"https://www.reddit.com{post.get('permalink')}" if post.get("permalink") else post.get("url"),
+                    "score": post.get("score"),
+                    "num_comments": post.get("num_comments"),
+                    "created_utc": post.get("created_utc"),
+                    "over_18": post.get("over_18"),
+                    "thumbnail": post.get("thumbnail") if (post.get("thumbnail") or "").startswith("http") else None,
+                    "media": post.get("media") or post.get("secure_media"),
+                    "preview": post.get("preview"),
+                },
+                "comments": comments_list,
+                },
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        # SUBREDDITS (t5_*)
+        if input_identification.startswith("t5_") or topic_type == "subreddit":
+            # /api/info?id=t5_xxx -> basic about data (but not all about fields)
+            info = _g("/api/info", params={"id": input_identification})
+            children = (info.get("data") or {}).get("children") or []
+            if not children:
+                return {"error": "subreddit not found", "input_identification": input_identification}
+            sd = (children[0] or {}).get("data") or {}
+            display = sd.get("display_name")
+            # richer about:
+            about = _g(f"/r/{display}/about")
+            # a few hot posts:
+            hot_children, _ = self._page(f"/r/{display}/hot", limit=10, after=None)
+            hot = []
+            for c in hot_children:
+                d = (c.get("data") or {})
+                hot.append({
+                    "topic_type": "post",
+                    "input_identification": d.get("name"),
+                    "title": d.get("title"),
+                    "permalink": d.get("permalink"),
+                    "url": f"https://www.reddit.com{d.get('permalink')}" if d.get("permalink") else d.get("url"),
+                    "author": d.get("author"),
+                    "score": d.get("score"),
+                    "num_comments": d.get("num_comments"),
+                    "thumbnail": d.get("thumbnail") if (d.get("thumbnail") or "").startswith("http") else None,
+                })
+            return {
+                # "topic_type": "subreddit",
+                "input_identification": input_identification,
+                "input_data": {
+                "about": (about.get("data") or {}),
+                "hot": hot
+                },
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        return {
+            
+            "input_identification": input_identification,
+
+            "input_data": {
+            },
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+
 
     # ----- public: unified, numeric pagination -----
     def get_topics(
@@ -182,3 +356,38 @@ class RedditAdapter(BaseAdapter):
             "item_name": self.item_name,
             "source_name": self.source_name,
         }
+
+    def generate_context(self, input_data: Dict[str, Any], amount_question: int = 10) -> str:
+        post = input_data.get("post", {})
+        comments = input_data.get("comments", [])
+        title = post.get("title", "")
+        subreddit = post.get("subreddit", "Unknown")
+        post_body = post.get("selftext", "")
+        permalink = post.get("permalink", "")
+
+        context = f"Reddit post title: {title}\n"
+        context += f"Subreddit: {subreddit}\n"
+        context += f"Post body:\n{post_body.strip() or '[no text]'}\n\n"
+        context += f"Top Comments:\n"
+
+        for comment in comments[:10]:  # Limit comments for prompt size
+            author = comment.get("author", "unknown")
+            body = comment.get("body", "").strip()
+            score = comment.get("score", 0)
+            context += f"- {author} ({score} upvotes): {body}\n"
+
+        context += f"\nGenerate {amount_question} quiz questions in JSON format based only on this content. "
+        context += "Output must be in this exact JSON structure:\n"
+        context += """
+            {
+            "questions": [
+                {
+                "question": "...",
+                "correct_answer": "...",
+                "options": ["...", "...", "...", "..."],
+                "justification": "..."
+                }
+            ]
+            }
+            """
+        return context

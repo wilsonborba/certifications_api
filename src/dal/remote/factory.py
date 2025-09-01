@@ -2,8 +2,9 @@
 
 
 
-from src.dal.remote.sat_adapter import SatAdapter
-from src.dal.remote.enem_adapter import EnemAdapter
+from src.dal.remote.questions.jsq_adapter import JsQuestionsAdapter
+from src.dal.remote.questions.sat_adapter import SatAdapter
+from src.dal.remote.questions.enem_adapter import EnemAdapter
 from src.dal.remote.worldbankgov_adapter import WorldbankgovAdapter
 from src.dal.remote.countriesnow_adapter import CountriesnowAdapter
 from src.dal.remote.blsgov_adapter import BlsgovAdapter
@@ -39,6 +40,8 @@ class AdapterFactory:
         "worldbankgov": WorldbankgovAdapter,
         "enem": EnemAdapter,
         "sat": SatAdapter,
+        "js-questions": JsQuestionsAdapter,
+        
     }
 
     @classmethod

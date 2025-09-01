@@ -1,8 +1,8 @@
 
-from src.domain.services.preview_manager import PreviewManager
+from src.domain.services.quiz_manager import QuizManager
 from src.core.logs import info, debug, error
 
-preview_manager = PreviewManager()
+preview_manager = QuizManager()
 
 
 def get_topics_from_app(item_name, *, page: int, per_page: int):

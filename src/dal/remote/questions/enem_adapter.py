@@ -66,7 +66,7 @@ class EnemAdapter(BaseAdapter):
 
         here = Path(__file__).resolve()
         candidates = [
-            here.parent.parent / "local" / "data" / "enem_questions.parquet",
+            here.parent.parent.parent / "local" / "data" / "enem_questions.parquet",
             Path.cwd() / "data" / "enem_questions.parquet",
         ]
         repo_like = here.parents[3] if len(here.parents) >= 4 else here.parents[-1]
@@ -176,7 +176,6 @@ class EnemAdapter(BaseAdapter):
             "per_page": per_page,
             "has_more": page < num_pages,
             "total": total,
-            "num_pages": num_pages,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "item_name": self.item_name,
             "source_name": self.source_name,

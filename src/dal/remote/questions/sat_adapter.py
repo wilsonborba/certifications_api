@@ -65,7 +65,7 @@ class SatAdapter(BaseAdapter):
         # 3) fallbacks relative to this file
         here = Path(__file__).resolve()
         candidates = [
-            here.parent.parent / "local" / "data" / "sat_questions.parquet",
+            here.parent.parent.parent / "local" / "data" / "sat_questions.parquet",
             Path.cwd() / "data" / "sat_questions.parquet",
             (here.parents[3] if len(here.parents) >= 4 else here.parents[-1]) / "data" / "sat_questions.parquet",
         ]
@@ -159,7 +159,6 @@ class SatAdapter(BaseAdapter):
             "per_page": per_page,
             "has_more": page < num_pages,
             "total": total,
-            "num_pages": num_pages,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "item_name": self.item_name,
             "source_name": self.source_name,

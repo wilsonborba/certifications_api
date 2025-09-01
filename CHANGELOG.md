@@ -20,6 +20,7 @@ All notable changes to this project will be documented in this file.
 - *(adapter)* Added about public_and_gov adapter
 - *(adapter)* Added about public_and_gov enem adapter
 - *(adapter)* Added about public_and_gov sat adapter
+- *(ai)* Created a client to create a quiz
 
 ### ⚙️ Miscellaneous Tasks
 
