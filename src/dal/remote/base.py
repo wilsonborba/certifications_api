@@ -9,6 +9,27 @@ from src.domain.models.preview_model import PreviewModel
 
 class BaseAdapter(ABC):
 
+
+    
+    def context_output_structure(self, amount_question: int) -> str:
+        
+        context = f"\nGenerate {amount_question} quiz questions in JSON format."
+        context += "Output must be in this exact JSON structure:\n"
+        context += """
+            {
+            "questions": [
+                {
+                "question": "...",
+                "correct_answer": "...",
+                "options": ["...", "...", "...", "..."],
+                "justification": "..."
+                }
+            ]
+            }
+            """
+        
+        return context
+
     @abstractmethod
     def get_preview(self) -> PreviewModel:
         pass

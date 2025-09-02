@@ -376,18 +376,5 @@ class RedditAdapter(BaseAdapter):
             score = comment.get("score", 0)
             context += f"- {author} ({score} upvotes): {body}\n"
 
-        context += f"\nGenerate {amount_question} quiz questions in JSON format based only on this content. "
-        context += "Output must be in this exact JSON structure:\n"
-        context += """
-            {
-            "questions": [
-                {
-                "question": "...",
-                "correct_answer": "...",
-                "options": ["...", "...", "...", "..."],
-                "justification": "..."
-                }
-            ]
-            }
-            """
+        context += self.context_output_structure(amount_question=amount_question)
         return context
