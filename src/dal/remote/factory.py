@@ -27,7 +27,7 @@ class AdapterFactory:
         "stack_exchange_overflow": StackExchangeOverflowAdapter,
         "chess_com": ChessComAdapter,
         "hacker_news": HackerNewsAdapter,
-        # "meetup": MeetupAdapter,  # Placeholder for future implementation (waiting for API access)
+       
         "companies_marketcap": CompaniesMarketCapAdapter,
         "killed_by_google": KilledByGoogleAdapter,
         # "aws_whitepaper_services": AwsWhitepaperServicesAdapter # have a api that is better than scraping

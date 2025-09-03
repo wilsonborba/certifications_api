@@ -28,6 +28,7 @@ All notable changes to this project will be documented in this file.
 - *(ai)* Devto adapter and gemini ai working together
 - *(ai)* Exploitdb adapter and gemini ai working together
 - *(ai)* Hackernews adapter and gemini ai working together
+- *(ai)* Killedbygoogle adapter and gemini ai working together
 
 ### ⚙️ Miscellaneous Tasks
 

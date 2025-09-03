@@ -319,7 +319,7 @@ class HackerNewsAdapter(BaseAdapter):
         if input_identification is None:
             return {
                 "input_identification": "",
-                "input_data": {"error": "missing_input_identification"},
+                "input_data": {},
                 "updated_at": now_iso,
             }
 
@@ -328,7 +328,7 @@ class HackerNewsAdapter(BaseAdapter):
         except ValueError:
             return {
                 "input_identification": str(input_identification),
-                "input_data": {"error": "invalid_story_id"},
+                "input_data": {},
                 "updated_at": now_iso,
             }
 
@@ -340,7 +340,7 @@ class HackerNewsAdapter(BaseAdapter):
         if not item:
             return {
                 "input_identification": str(sid),
-                "input_data": {"error": "not_found"},
+                "input_data": {},
                 "updated_at": now_iso,
             }
 
