@@ -24,6 +24,7 @@ All notable changes to this project will be documented in this file.
 - *(ai)* Blsgov adapter and gemini ai working together
 - *(ai)* Chess.com adapter and gemini ai working together
 - *(ai)* Companies_marketcap adapter and gemini ai working together
+- *(ai)* Countriesnow adapter and gemini ai working together
 
 ### ⚙️ Miscellaneous Tasks
 
