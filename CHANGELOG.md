@@ -22,6 +22,7 @@ All notable changes to this project will be documented in this file.
 - *(adapter)* Added about public_and_gov sat adapter
 - *(ai)* Created a client to create a quiz
 - *(ai)* Blsgov adapter and gemini ai working together
+- *(ai)* Chess.com adapter and gemini ai working together
 
 ### ⚙️ Miscellaneous Tasks
 

@@ -91,7 +91,7 @@ class BlsgovAdapter(BaseAdapter):
 
         topics = [
             {
-                "id": self._to_series_id(area_code),                 # e.g., CUURS49ASA0
+                "input_identification": self._to_series_id(area_code),                 # e.g., CUURS49ASA0
                 "name": area_name,                                   # display city/metro
                 "description": "United States",                      # BLS CPI scope
                 "url": f"https://data.bls.gov/timeseries/{self._to_series_id(area_code)}",

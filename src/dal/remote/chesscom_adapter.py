@@ -8,6 +8,8 @@ from bs4 import BeautifulSoup
 
 from src.dal.remote.base import BaseAdapter
 from src.domain.models.preview_model import PreviewModel, EnumMode
+from src.core.logs import error
+from urllib.parse import urlparse
 
 CHESS_API_BASE = "https://api.chess.com/pub"
 CHESS_NEWS_BASE = "https://www.chess.com/news"
@@ -21,6 +23,8 @@ class ChessComAdapter(BaseAdapter):
     """
     item_name = "chess_com"
     source_name = "apps"
+
+
 
     # ---------- Preview ----------
     def get_preview(self) -> PreviewModel:
@@ -44,6 +48,21 @@ class ChessComAdapter(BaseAdapter):
         r = requests.get(url, params=params or {}, timeout=15, headers={"User-Agent": "quiz-certify/1.0"})
         r.raise_for_status()
         return BeautifulSoup(r.text, "html.parser")
+    
+    def _news_id_from_url(self, url: str) -> Optional[str]:
+        """
+        From https://www.chess.com/news/view/<slug>[?…]
+        return '<slug>' as the stable input_identification.
+        """
+        try:
+            p = urlparse(url if url.startswith("http") else f"https://www.chess.com{url}")
+            parts = [x for x in p.path.split("/") if x]
+            # expect ["news", "view", "<slug>", ...]
+            if len(parts) >= 3 and parts[0] == "news" and parts[1] == "view":
+                return parts[2]
+        except Exception:
+            pass
+        return None
 
     # ---------- Official API: leaderboards ----------
     def _fetch_leaderboards(self) -> List[Dict[str, Any]]:
@@ -62,6 +81,7 @@ class ChessComAdapter(BaseAdapter):
                 players.append({
                     "type": "player",
                     "category": cat,
+                    "input_identification": p.get("username"),
                     "username": p.get("username"),
                     "title": p.get("title"),           # e.g., GM/IM/FM
                     "score": p.get("score"),           # leaderboard points
@@ -137,6 +157,7 @@ class ChessComAdapter(BaseAdapter):
 
             news.append({
                 "type": "news",
+                "input_identification": self._news_id_from_url(url),
                 "title": title,
                 "url": url,
                 "author": author,
@@ -170,6 +191,7 @@ class ChessComAdapter(BaseAdapter):
 
                 news.append({
                     "type": "news",
+                    "input_identification": self._news_id_from_url(url),
                     "title": title,
                     "url": url,
                     "author": author,
@@ -229,3 +251,312 @@ class ChessComAdapter(BaseAdapter):
             "item_name": self.item_name,
             "source_name": self.source_name,
         }
+
+    # ---------- Input: full item fetch ----------
+    def get_input(
+        self,
+        *,
+        input_identification: str | None = None,
+        topic_type: str | None = None,
+        url: str | None = None,
+        username: str | None = None,
+        max_paragraphs: int = 18,
+        **_: Any,
+    ) -> Dict[str, Any]:
+        """
+        Resolve and return a full item payload for a topic previously listed by `get_topics`.
+
+        Supported IDs:
+          - News article: use the article `url` as input_identification (or pass via `url`).
+          - Player: use the chess.com `username` as input_identification (or pass via `username`).
+
+        Returns:
+          {
+            "input_identification": "...",
+            "input_data": {...},      # normalized, useful for question writing
+            "updated_at": "...iso..."
+          }
+        """
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # ---- Resolve identification + type ----
+        ident = input_identification
+
+        if topic_type == "news" or (url and "/news" in url) or (ident and isinstance(ident, str) and "/" not in ident and ident.strip()):
+            # NEWS branch
+            if not url:
+                # If we only got the slug (preferred), build the canonical URL
+                if ident and "/" not in ident:
+                    url = f"{CHESS_NEWS_BASE}/view/{ident}"
+                else:
+                    url = ident  # ident may already be a full URL
+
+            ident = url
+            if not ident:
+                error("Missing URL for news article input")
+                return {"input_identification": "", "input_data": {}, "updated_at": now_iso}
+
+            try:
+                soup = self._get_html(ident)
+            except Exception as e:
+                error(f"Failed to fetch news article at {ident}: {e}")
+                return {"input_identification": ident, "input_data": {}, "updated_at": now_iso}
+
+            # Extract content
+            title = None
+            h = soup.select_one('[data-testid="post-title"], .post-view-title, h1')
+            if h:
+                title = h.get_text(strip=True)
+
+            # author
+            author = None
+            a_el = soup.select_one("a.post-view-meta-username, a.post-preview-meta-username")
+            if a_el:
+                author = a_el.get("title") or a_el.get_text(strip=True)
+
+            # published
+            published = None
+            t_el = soup.select_one("div.post-view-meta time, div.post-preview-meta-time time, time[datetime]")
+            if t_el:
+                published = (t_el.get("datetime") or t_el.get_text(strip=True) or "").strip()
+
+            # hero image (best-effort)
+            hero = None
+            hero_el = soup.select_one('figure img, .post-view-hero img, img[src*="news"]')
+            if hero_el and hero_el.get("src"):
+                hero = hero_el["src"]
+
+            # main text content: collect paragraphs and bullet items
+            body_blocks: list[str] = []
+            # prefer a main content container
+            main = soup.select_one(".post-view-component, article, main") or soup
+            # common content selectors
+            for p in main.select("p"):
+                txt = p.get_text(" ", strip=True)
+                if txt:
+                    body_blocks.append(txt)
+            # list items (sometimes key facts are in lists)
+            for li in main.select("li"):
+                txt = li.get_text(" ", strip=True)
+                if txt:
+                    body_blocks.append(f"• {txt}")
+
+            # Trim to avoid huge prompts
+            if max_paragraphs > 0:
+                body_blocks = body_blocks[:max_paragraphs]
+
+            input_data = {
+                "type": "news",
+                "title": title,
+                "url": ident,
+                "author": author,
+                "published": published,
+                "hero_image": hero,
+                "key_points": body_blocks,
+            }
+
+            return {
+                "input_identification": ident,
+                "input_data": input_data,
+                "updated_at": now_iso,
+            }
+
+        # If the caller already told us it's a player
+        if topic_type == "player":
+            username = username or ident
+        # Or try to detect from looks (no /news in URL and non-empty -> treat as username)
+        if username:
+            ident = username
+
+        # PLAYER branch
+        if ident:
+            # Normalize username casing (Chess.com usernames are case-insensitive)
+            uname = (ident or "").strip().lstrip("@")
+            if not uname:
+                return {"input_identification": "", "input_data": {"error": "missing username"}, "updated_at": now_iso}
+
+            profile = None
+            stats = None
+            country_name = None
+            try:
+                profile = self._get_json(f"{CHESS_API_BASE}/player/{uname}")
+            except Exception as e:
+                return {"input_identification": uname, "input_data": {"error": f"profile_fetch_failed: {e}"}, "updated_at": now_iso}
+
+            try:
+                stats = self._get_json(f"{CHESS_API_BASE}/player/{uname}/stats")
+            except Exception:
+                stats = {}
+
+            # Optionally resolve country name
+            try:
+                c_url = (profile or {}).get("country")
+                if c_url:
+                    c = self._get_json(c_url)
+                    country_name = c.get("name")
+            except Exception:
+                country_name = None
+
+            # Pull friendly ratings snapshot
+            def _rate(block: dict | None):
+                if not isinstance(block, dict):
+                    return None
+                last = (block.get("last") or {}).get("rating")
+                best = (block.get("best") or {}).get("rating")
+                rec = block.get("record") or {}
+                return {
+                    "last": last,
+                    "best": best,
+                    "wins": rec.get("win"),
+                    "losses": rec.get("loss"),
+                    "draws": rec.get("draw"),
+                }
+
+            ratings = {
+                "blitz": _rate(stats.get("chess_blitz")),
+                "rapid": _rate(stats.get("chess_rapid")),
+                "bullet": _rate(stats.get("chess_bullet")),
+                "daily": _rate(stats.get("chess_daily")),
+                "tactics": (stats.get("tactics", {}) or {}).get("highest", {}),
+                "puzzles_rush": (stats.get("puzzle_rush", {}) or {}).get("best", {}),
+            }
+
+            input_data = {
+                "type": "player",
+                "username": profile.get("username") or uname,
+                "title": profile.get("title"),
+                "name": profile.get("name"),
+                "status": profile.get("status"),
+                "country": country_name or profile.get("country"),
+                "joined": profile.get("joined"),
+                "last_online": profile.get("last_online"),
+                "avatar": profile.get("avatar"),
+                "url": profile.get("url"),
+                "fide": profile.get("fide"),
+                "ratings": ratings,
+            }
+
+            return {
+                "input_identification": uname,
+                "input_data": input_data,
+                "updated_at": now_iso,
+            }
+
+        # Fallback (nothing resolved)
+        return {
+            "input_identification": input_identification or "",
+            "input_data": {"error": "unable_to_resolve_input"},
+            "updated_at": now_iso,
+        }
+
+    # ---------- Instructions: concise & creativity-friendly ----------
+    def instructions(self) -> str:
+        """
+        Short, flexible guidance for writing quiz questions from Chess.com news or player stats.
+        Encourages creativity while keeping facts precise and verifiable from the provided context.
+        """
+        return (
+            "You will receive either (A) a Chess.com news article (title, author, published date, key points), "
+            "or (B) a player profile with current ratings and records. Write engaging quiz questions that can fit "
+            "either playful or serious modes:\n"
+            "\n"
+            "• Stay factual: numbers, dates, names, results, titles, and ratings must match the context exactly.\n"
+            "• Creativity welcome: you may add fun phrasing or analogies, but never change facts.\n"
+            "• External knowledge is okay only if it is standard chess knowledge AND clearly consistent with the context; "
+            "do not contradict or fill gaps with guesses.\n"
+            "• Good question ideas: identify key facts, compare ratings or streaks, ‘which month/score/title’, cause/effect described "
+            "in the article, who/what/when/where, ordering (highest→lowest ratings), and short scenario questions grounded in the data.\n"
+            "• Avoid: speculation about future events, personal judgments, sensitive private info, or unverifiable claims.\n"
+            "• Keep wording clear, neutral, and concise; each question should be answerable using the provided context."
+        )
+
+    # ---------- Generate textual context for the quiz model ----------
+    def generate_context(self, input_data: Dict[str, Any], amount_question: int = 10) -> str:
+        """
+        Create a compact, readable text context from the item returned by get_input(),
+        then append the required context_output_structure(amount_question=...).
+        """
+        t = (input_data or {}).get("type") or (input_data.get("post", {}) or {}).get("type")  # safety
+        lines: list[str] = []
+
+        if t == "news":
+            title = input_data.get("title")
+            url = input_data.get("url")
+            author = input_data.get("author")
+            published = input_data.get("published")
+            hero = input_data.get("hero_image")
+            key_points = input_data.get("key_points") or []
+
+            lines.append("Chess.com News Context")
+            if title:     lines.append(f"Title: {title}")
+            if author:    lines.append(f"Author: {author}")
+            if published: lines.append(f"Published: {published}")
+            if url:       lines.append(f"URL: {url}")
+            if hero:      lines.append(f"Image: {hero}")
+            lines.append("")
+            lines.append("Key points (verbatim facts from the article):")
+            for p in key_points:
+                lines.append(f"- {p}")
+
+        elif t == "player":
+            username = input_data.get("username")
+            title = input_data.get("title")
+            name = input_data.get("name")
+            status = input_data.get("status")
+            country = input_data.get("country")
+            joined = input_data.get("joined")
+            last_online = input_data.get("last_online")
+            url = input_data.get("url")
+            fide = input_data.get("fide")
+            ratings = input_data.get("ratings") or {}
+
+            def _fmt_rate(lbl: str, r: dict | None) -> str:
+                if not isinstance(r, dict):
+                    return f"{lbl}: n/a"
+                last = r.get("last")
+                best = r.get("best")
+                wl = []
+                if r.get("wins") is not None:   wl.append(f"W {r.get('wins')}")
+                if r.get("losses") is not None: wl.append(f"L {r.get('losses')}")
+                if r.get("draws") is not None:  wl.append(f"D {r.get('draws')}")
+                record = f" ({', '.join(wl)})" if wl else ""
+                last_s = f"{last}" if last is not None else "n/a"
+                best_s = f"{best}" if best is not None else "n/a"
+                return f"{lbl}: last {last_s}, best {best_s}{record}"
+
+            lines.append("Chess.com Player Context")
+            lines.append(f"Username: {username or 'n/a'}")
+            if name:      lines.append(f"Name: {name}")
+            if title:     lines.append(f"Title: {title}")
+            if fide:      lines.append(f"FIDE: {fide}")
+            if country:   lines.append(f"Country: {country}")
+            if status:    lines.append(f"Account status: {status}")
+            if joined:    lines.append(f"Joined (epoch): {joined}")
+            if last_online: lines.append(f"Last online (epoch): {last_online}")
+            if url:       lines.append(f"Profile: {url}")
+            lines.append("")
+            lines.append("Ratings snapshot:")
+            lines.append(_fmt_rate("Blitz", ratings.get("blitz")))
+            lines.append(_fmt_rate("Rapid", ratings.get("rapid")))
+            lines.append(_fmt_rate("Bullet", ratings.get("bullet")))
+            lines.append(_fmt_rate("Daily", ratings.get("daily")))
+            # Optional extras
+            tac = ratings.get("tactics")
+            if tac:
+                lines.append(f"Tactics best: {tac.get('rating', 'n/a')} (score: {tac.get('score', 'n/a')})")
+            pr = ratings.get("puzzles_rush")
+            if pr:
+                lines.append(f"Puzzle Rush best: {pr.get('score', 'n/a')} in {pr.get('total_attempts', 'n/a')} attempts")
+        else:
+            # Unknown type—print whatever is present to remain helpful
+            lines.append("Chess context (untyped)")
+            for k, v in (input_data or {}).items():
+                lines.append(f"- {k}: {v}")
+
+        lines.append("")
+        lines.append("Guidance: Ask about facts explicitly present here (names, dates, results, ratings, key points).")
+        lines.append("You may write playful or serious questions, but keep numbers/dates precise and avoid speculation.")
+
+        context = "\n".join(lines)
+        context += self.context_output_structure(amount_question=amount_question)
+        return context
