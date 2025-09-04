@@ -9,7 +9,6 @@ from src.dal.remote.worldbankgov_adapter import WorldbankgovAdapter
 from src.dal.remote.countriesnow_adapter import CountriesnowAdapter
 from src.dal.remote.blsgov_adapter import BlsgovAdapter
 from src.dal.remote.exploitdb_adapter import ExploitDBAdapter
-from src.dal.remote.producthunt_adapter import ProductHuntAdapter
 from src.dal.remote.devto_adapter import DevToAdapter
 from src.dal.remote.aws.aws_infra_catalog_adapter import  AwsInfraCatalogAdapter # AwsWhitepaperServicesAdapter
 from src.dal.remote.killedbygoogle_adapter import KilledByGoogleAdapter
@@ -33,7 +32,7 @@ class AdapterFactory:
         # "aws_whitepaper_services": AwsWhitepaperServicesAdapter # have a api that is better than scraping
         "aws_infra_catalog": AwsInfraCatalogAdapter,
         "devto": DevToAdapter,
-        "product_hunt": ProductHuntAdapter,
+
         "exploitdb": ExploitDBAdapter,
         "blsgov": BlsgovAdapter,
         "countriesnow": CountriesnowAdapter,
