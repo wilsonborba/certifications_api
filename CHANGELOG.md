@@ -30,6 +30,7 @@ All notable changes to this project will be documented in this file.
 - *(ai)* Hackernews adapter and gemini ai working together
 - *(ai)* Killedbygoogle adapter and gemini ai working together
 - *(ai)* Adapters and gemini ai working together
+- *(ai)* Wikipedia adapter and gemini ai working together
 
 ### ⚙️ Miscellaneous Tasks
 

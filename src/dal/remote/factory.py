@@ -17,6 +17,7 @@ from src.dal.remote.hackernews_adapter import HackerNewsAdapter
 from src.dal.remote.chesscom_adapter import ChessComAdapter
 from src.dal.remote.stackexchange_adapter import StackExchangeOverflowAdapter
 from src.dal.remote.reddit_adapter import RedditAdapter
+from src.dal.remote.wikipedia_adapter import WikipediaAdapter
 from src.core.logs import error
 
 class AdapterFactory:
@@ -40,6 +41,7 @@ class AdapterFactory:
         "enem": EnemAdapter,
         "sat": SatAdapter,
         "js-questions": JsQuestionsAdapter,
+        "wikipedia": WikipediaAdapter,
         
     }
 
