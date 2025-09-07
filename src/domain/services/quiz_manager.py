@@ -107,10 +107,9 @@ class QuizManager:
         self,
         item_name: str,
         input_identification: str,
-        **adapter_kwargs,   # adapter-specific knobs if needed (e.g., time_window, tagged)
+        **adapter_kwargs,
     ) -> dict[str, any]:
         adapter = self.adapters_factory.get_adapter(item_name)
-        
         if not adapter:
             error(f"No adapter found for source: {item_name}")
             return InputModel(
@@ -121,16 +120,59 @@ class QuizManager:
                 updated_at=datetime.now(timezone.utc).isoformat(),
             ).to_dict()
 
-        res = adapter.get_input(input_identification=input_identification, **adapter_kwargs)
+        # 1) find SourceItem row
+        source_item_db = self.db_adapter.read_where_one(
+            "accredit_sourceitem",
+            {"item_name": item_name}
+        )
+        if not source_item_db:
+            error(f"Source item not found in DB for item_name: {item_name}")
+            return InputModel(
+                source_name=item_name,
+                item_name=item_name,
+                input_identification=input_identification,
+                input_data=None,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            ).to_dict()
+
+        source_item_id = source_item_db["id"]
+        source_name = source_item_db.get("source_name", item_name)
+        item_name_from_db = source_item_db.get("item_name", item_name)
+
+        # 2) try cache in accredit_input
+        row = self.db_adapter.read_where_one(
+            "accredit_input",
+            {"source_item_id": source_item_id, "input_identification": input_identification}
+        )
+        if row:
+            debug(f"Input found in DB for {item_name} - {input_identification}")
+            return InputModel(
+                source_name=source_name,
+                item_name=item_name_from_db,
+                input_identification=row.get("input_identification", input_identification),
+                input_data=row.get("input_data", None),
+                updated_at=row.get("updated_at", datetime.now(timezone.utc).isoformat()),
+            ).to_dict()
+
+        # 3) fetch from adapter and persist
+        debug(f"Input NOT found in DB for {item_name} - {input_identification}. Fetching from source...")
+        response_from_adapter = adapter.get_input(input_identification=input_identification, **adapter_kwargs)
+
+        inserted_pk = self.db_adapter.insert_row("accredit_input", {
+            "source_item_id": source_item_id,
+            "input_identification": input_identification,
+            "input_data": response_from_adapter.get("input_data", None),
+            "updated_at": response_from_adapter.get("updated_at", datetime.now(timezone.utc).isoformat()),
+        })
 
         return InputModel(
-            source_name=item_name,
-            item_name=item_name,
+            source_name=source_name,
+            item_name=item_name_from_db,
             input_identification=input_identification,
-            input_data=res.get("input_data", None),
-            updated_at=res.get("updated_at", datetime.now(timezone.utc).isoformat()),
+            input_data=response_from_adapter.get("input_data", None),
+            updated_at=response_from_adapter.get("updated_at", datetime.now(timezone.utc).isoformat()),
         ).to_dict()
-    
+        
     async def generate_context(
             self,
             

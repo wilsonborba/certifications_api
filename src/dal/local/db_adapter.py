@@ -1,8 +1,9 @@
-from sqlalchemy import create_engine, inspect, Table, MetaData, select, insert, update, delete
+from sqlalchemy import create_engine, inspect, Table, MetaData, select, insert, update, delete, and_
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import NoSuchTableError
 from contextlib import contextmanager
 from src.core.settings import app_settings
+
 
 
 class DBAdapter:
@@ -43,6 +44,36 @@ class DBAdapter:
         stmt = select(table)
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(stmt).mappings()]
+        
+    def read_where_many(self, table_name: str, where: dict, *, limit: int | None = None, offset: int | None = None,
+                    order_by: list | None = None, schema: str = None):
+        """
+        Return multiple rows as list[dict], matching all equality conditions in `where`.
+        Optional: order_by = [table.c["col1"].asc(), table.c["col2"].desc(), ...]
+        """
+        table = self.reflect_table(table_name, schema)
+        condition = and_(*[table.c[k] == v for k, v in where.items()])
+        stmt = select(table).where(condition)
+        if order_by:
+            stmt = stmt.order_by(*order_by)
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        if offset is not None:
+            stmt = stmt.offset(offset)
+        with self.connect() as conn:
+            return [dict(r) for r in conn.execute(stmt).mappings().all()]    
+        
+    def read_where_one(self, table_name: str, where: dict, schema: str = None):
+        """
+        Return a single row as dict or None, matching all equality conditions in `where`.
+        """
+        table = self.reflect_table(table_name, schema)
+        condition = and_(*[table.c[k] == v for k, v in where.items()])
+        stmt = select(table).where(condition).limit(1)
+        with self.connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+            return dict(row) if row is not None else None
+
 
     def read_by_id(self, table_name: str, id_value, id_column: str = "id", schema: str = None):
         table = self.reflect_table(table_name, schema)

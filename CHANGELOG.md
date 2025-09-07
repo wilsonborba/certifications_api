@@ -31,6 +31,7 @@ All notable changes to this project will be documented in this file.
 - *(ai)* Killedbygoogle adapter and gemini ai working together
 - *(ai)* Adapters and gemini ai working together
 - *(ai)* Wikipedia adapter and gemini ai working together
+- *(ai)* Input save at db or get from adapter working
 
 ### ⚙️ Miscellaneous Tasks
 
