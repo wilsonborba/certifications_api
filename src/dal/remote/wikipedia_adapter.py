@@ -411,3 +411,5 @@ class WikipediaAdapter(BaseAdapter):
 
         context.append(self.context_output_structure(amount_question=amount_question))
         return "\n".join(context)
+    
+    

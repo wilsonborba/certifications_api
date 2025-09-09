@@ -3,7 +3,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import NoSuchTableError
 from contextlib import contextmanager
 from src.core.settings import app_settings
-
+from src.core.logs import error
 
 
 class DBAdapter:
@@ -15,6 +15,16 @@ class DBAdapter:
     def __init__(self, engine: Engine = None):
         settings = app_settings()
         self.engine = engine or create_engine(settings.accredit_db.uri())
+        try:
+            from pgvector.sqlalchemy import Vector
+            from sqlalchemy.dialects.postgresql import base as pg_base
+            # Teach SQLAlchemy that the postgres type name "vector" maps to pgvector's Vector
+            pg_base.ischema_names['vector'] = Vector
+        except Exception as e:
+            # If pgvector isn't installed or something odd happens, we just skip registration;
+            # you'll still have the text-similarity fallback.
+            error(f"pgvector import/registration failed: {e}")
+            pass
 
     def get_engine(self) -> Engine:
         return self.engine

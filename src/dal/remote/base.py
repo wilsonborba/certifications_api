@@ -19,10 +19,11 @@ class BaseAdapter(ABC):
             {
             "questions": [
                 {
-                "question": "...",
-                "correct_answer": "...",
-                "options": ["...", "...", "...", "..."],
-                "justification": "..."
+                "question": "string",
+                "correct_answer": "string",
+                "options": ["string", "string", "string", "string"],
+                "justification": "string",
+                "difficulty": integer (1 to 6, based on Bloom’s Taxonomy levels)
                 }
             ]
             }
@@ -59,5 +60,21 @@ class BaseAdapter(ABC):
         """
         ...
 
+    @abstractmethod
+    def get_input(self) -> Dict[str, Any]:
+        """
+        Fetch the canonical input for a specific topic.
+        """
+        ...
 
+    
+    @abstractmethod
+    def generate_context(self, input_data: Dict[str, Any], amount_question) -> str:
+        """
+        Generate a context string from the input data.
+        """
+        ...
 
+    
+
+        

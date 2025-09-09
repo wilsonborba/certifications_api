@@ -295,3 +295,37 @@ class GeminiClient:
             return r.json()
         except Exception:
             raise GeminiError(r.status_code, {"message": "Invalid JSON in response"})
+
+    async def embed_text(
+        self,
+        text: str,
+        *,
+        model: str = "text-embedding-004",   # Google’s current text embedding model
+        task_type: str | None = None,        # optional; e.g. "RETRIEVAL_DOCUMENT"
+    ) -> list[float]:
+        """
+        Calls the Gemini embeddings API and returns a single vector (list of floats).
+        """
+        if not text:
+            return []
+
+        url = f"{self.cfg.base_url}/v1beta/models/{model}:embedContent"
+        body = {
+            "content": {
+                "parts": [{"text": text}]
+            }
+        }
+        if task_type:
+            body["taskType"] = task_type
+
+        # embeds use API key in query param too
+        params = {"key": self.cfg.api_key}
+        headers = {"Content-Type": "application/json"}
+        resp = await self._request_json("POST", url, headers=headers, params=params, json=body)
+
+        # Response shape:
+        # {"embedding": {"values": [float, float, ...]}}
+        emb = ((resp or {}).get("embedding") or {}).get("values")
+        if not isinstance(emb, list):
+            raise GeminiError(500, {"message": "Invalid embedding response"})
+        return emb
