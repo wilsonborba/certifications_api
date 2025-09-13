@@ -128,3 +128,11 @@ class JsQuestionsAdapter(BaseAdapter):
         if qnum in self._df.index:
             return self._df.loc[qnum].to_dict()
         return {}
+
+    def generate_context():
+
+        ...
+
+    def get_input():
+
+        ...

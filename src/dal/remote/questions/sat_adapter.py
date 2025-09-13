@@ -170,3 +170,11 @@ class SatAdapter(BaseAdapter):
         if uid in self._df.index:
             return self._df.loc[uid].to_dict()
         return {}
+
+    def generate_context():
+
+        ...
+
+    def get_input():
+
+        ...

@@ -38,9 +38,9 @@ class AdapterFactory:
         "blsgov": BlsgovAdapter,
         "countriesnow": CountriesnowAdapter,
         "worldbankgov": WorldbankgovAdapter,
-        "enem": EnemAdapter,
-        "sat": SatAdapter,
-        "js-questions": JsQuestionsAdapter,
+        #"enem": EnemAdapter,
+        #"sat": SatAdapter,
+        #"js-questions": JsQuestionsAdapter,
         "wikipedia": WikipediaAdapter,
         
     }

@@ -28,7 +28,7 @@ class BlsgovAdapter(BaseAdapter):
             source_name=self.source_name,
             has_topic=True,
             item_name=self.item_name,
-            item_img="https://upload.wikimedia.org/wikipedia/commons/5/59/Seal_of_the_United_States_Bureau_of_Labor_Statistics.svg",
+            item_img="https://res.cloudinary.com/dhncdmb2t/image/upload/v1757763640/Bureau_of_Labor_Statistics_logo_m1qamx.png",
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
 

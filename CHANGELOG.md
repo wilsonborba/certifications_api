@@ -33,6 +33,7 @@ All notable changes to this project will be documented in this file.
 - *(ai)* Wikipedia adapter and gemini ai working together
 - *(ai)* Input save at db or get from adapter working
 - *(question)* Generating/querying/saving question db/gemini implemented
+- *(items)* Load items to front end for test
 
 ### ⚙️ Miscellaneous Tasks
 

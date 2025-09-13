@@ -180,3 +180,11 @@ class EnemAdapter(BaseAdapter):
             "item_name": self.item_name,
             "source_name": self.source_name,
         }
+    
+    def generate_context():
+
+        ...
+
+    def get_input():
+
+        ...
