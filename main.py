@@ -4,6 +4,7 @@ from src.presentation.routes.source_item_route import source_item_router
 from src.presentation.routes.topics_route import app_topics_router
 from src.presentation.routes.input_route import input_router
 from src.presentation.routes.context_route import context_router
+from src.presentation.routes.pdf_route import pdf_router
 
 
 
@@ -41,4 +42,9 @@ app.include_router(
 app.include_router(
     context_router,
     tags=["context"]
+)
+
+app.include_router(
+    pdf_router,
+    tags=["pdf"]
 )
