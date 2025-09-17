@@ -36,6 +36,7 @@ All notable changes to this project will be documented in this file.
 - *(items)* Load items to front end for test
 - *(pdf)* Created a route to accept pdf and return the full topic
 - *(pdf)* Improved the return code and messages from errors
+- *(pdf)* Added redis adapter to cache the topic book extraction
 
 ### ⚙️ Miscellaneous Tasks
 

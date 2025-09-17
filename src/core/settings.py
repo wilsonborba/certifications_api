@@ -52,6 +52,10 @@ class Settings(BaseSettings):
 
     GEMINI_API_KEY: str | None = None
 
+    # REDIS
+    REDIS_URL: str = "redis://127.0.0.1:6379/0"
+    REDIS_NAMESPACE: str = "accredit_api:"
+
     @property
     def accredit_db(self) -> DatabaseConfig:
         return DatabaseConfig(

@@ -8,7 +8,7 @@ from src.core.logs import error
 pdf_router = APIRouter()
 
 @pdf_router.post("/pdf/topic", response_model=MyResponse)
-async def ingest_pdf(response: Response,
+async def get_topic_pdf(response: Response,
     file: UploadFile = File(..., description="PDF file"),
     ocr_force: bool = False,
     ocr_lang: str = "eng",
@@ -72,3 +72,11 @@ async def ingest_pdf(response: Response,
         response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
         error(f"Internal server error: {e}")
         return MyResponse(data=None, message="Internal server error...")
+    
+@pdf_router.get("/pdf/input/{document_id}", response_model=MyResponse)
+async def get_pdf_input(response: Response,
+                        selected_pages: str = Query(..., description="Selected pages in format '1,2,5-10'"),
+                        ):
+    # This is a placeholder for the actual implementation
+    response.status_code = status.HTTP_200_OK
+    return MyResponse(data={"message": "PDF input retrieved successfully."})

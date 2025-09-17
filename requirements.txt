@@ -24,3 +24,5 @@ pillow
 pytesseract
 clamd
 yara-python
+redis
+msgpack-python
