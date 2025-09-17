@@ -34,6 +34,8 @@ All notable changes to this project will be documented in this file.
 - *(ai)* Input save at db or get from adapter working
 - *(question)* Generating/querying/saving question db/gemini implemented
 - *(items)* Load items to front end for test
+- *(pdf)* Created a route to accept pdf and return the full topic
+- *(pdf)* Improved the return code and messages from errors
 
 ### ⚙️ Miscellaneous Tasks
 

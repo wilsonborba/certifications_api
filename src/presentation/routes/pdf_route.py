@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 
 from src.dal.local.pdf_adapter import PdfAdapter, PdfParser
 from ..handler.responses import MyResponse
+from src.core.logs import error
 
 pdf_router = APIRouter()
 
@@ -17,7 +18,8 @@ async def ingest_pdf(response: Response,
 ):
     # quick content-type hint (adapter also verifies PDF header)
     if file.content_type and file.content_type not in ("application/pdf", "application/octet-stream"):
-        raise HTTPException(status_code=415, detail="Only PDF uploads are supported.")
+        response.status_code = status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+        return MyResponse(data=None, message="Only PDF uploads are supported.")
 
     try:
         raw = await file.read()
@@ -30,16 +32,15 @@ async def ingest_pdf(response: Response,
         yara_result = adapter.yara_scan(rules_path=None)         # set a rules file if you have one
 
         if av_result.get("status") == "FOUND":
-            raise HTTPException(
-                status_code=400,
-                detail=f"Malware detected by {av_result['engine']}: {av_result.get('signature')}"
-            )
-        
+            error(f"Malware detected by {av_result['engine']}: {av_result.get('signature')}")
+            response.status_code = status.HTTP_409_CONFLICT
+            return MyResponse(data=None, message=f"Malware detected...")
+
         if yara_result.get("matches"):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Malware detected by YARA: {', '.join(yara_result.get('matches', []))}"
-            )
+            error(f"Malware detected by YARA: {', '.join(yara_result.get('matches', []))}")
+            response.status_code = status.HTTP_409_CONFLICT
+            return MyResponse(data=None, message=f"Malware detected...")
+            
 
         meta = adapter.get_metadata()
         scan_score = adapter.scan_ratio()
@@ -64,8 +65,10 @@ async def ingest_pdf(response: Response,
     except ValueError as e:
         # from adapter.validate() or your own checks
         response.status_code = status.HTTP_400_BAD_REQUEST
-        return MyResponse(data=None, message=str(e))
+        error(f"PDF ingestion error: {e}")
+        return MyResponse(data=None, message=f"A bad request was made, please check your input...")
     except Exception as e:
         # unexpected errors
         response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
-        return MyResponse(data=None, message="Internal server error: " + str(e))
+        error(f"Internal server error: {e}")
+        return MyResponse(data=None, message="Internal server error...")
