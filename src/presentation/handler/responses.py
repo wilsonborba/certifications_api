@@ -3,6 +3,16 @@ from fastapi import status
 from pydantic import BaseModel
 
 
+class MalwareDetectedError(Exception):
+    """Custom exception for malware detection."""
+    pass
+
+class UnsupportedFileTypeError(Exception):
+    """Custom exception for unsupported file types."""
+    pass
+
+
+
 class MyResponse(BaseModel):
     """
     Base response model for API responses.

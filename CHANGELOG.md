@@ -37,6 +37,7 @@ All notable changes to this project will be documented in this file.
 - *(pdf)* Created a route to accept pdf and return the full topic
 - *(pdf)* Improved the return code and messages from errors
 - *(pdf)* Added redis adapter to cache the topic book extraction
+- *(pdf)* Added route to get specific inputs (pages) based on a temporary memory 30min
 
 ### ⚙️ Miscellaneous Tasks
 

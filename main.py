@@ -25,7 +25,15 @@ async def lifespan(app: FastAPI):
 
 
 
-app = FastAPI(root_path="/", root_path_in_servers=False, redirect_slashes=True)
+app = FastAPI(
+    root_path="/", 
+    root_path_in_servers=False, 
+    redirect_slashes=True,
+    title="Accredit API",
+    description="API for Accredit application",
+    version="0.1.0",
+    lifespan=lifespan
+    )
 
 
 
