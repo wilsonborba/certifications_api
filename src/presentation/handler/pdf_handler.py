@@ -2,10 +2,10 @@
 
 
 
-from fastapi import UploadFile
+from fastapi import Request, UploadFile
 
-from src.presentation.handler.responses import MalwareDetectedError, UnsupportedFileTypeError
-from src.dal.local.pdf_adapter import PdfAdapter, PdfParser
+from src.presentation.handler.responses import DocumentNotFoundError, InvalidTotalPagesError, MalwareDetectedError, UnsupportedFileTypeError
+from src.dal.local.pdf_adapter import PdfAdapter, PdfScan, PdfParser
 from src.core.logs import error
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -33,75 +33,7 @@ async def cache_set(cache: RedisAdapter, document_id: str, payload: Dict[str, An
     key = cache.k(CACHE_PREFIX, document_id)
     await cache.set(key, payload, ex=CACHE_TTL_SEC)
 
-def parse_page_selector(select: str | None, total_pages: int) -> List[int]:
-    """
-    Accepts formats like:
-      - "all" or "" -> all pages
-      - "1,3,5-7"
-      - "2-"
-      - "-4"
-    Returns 1-based unique sorted pages, clamped to [1..total_pages].
-    """
-    if not select or select.strip().lower() == "all":
-        return list(range(1, total_pages + 1))
 
-    pages: set[int] = set()
-    for part in select.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            a, b = part.split("-", 1)
-            a = a.strip(); b = b.strip()
-            start = int(a) if a else 1
-            end   = int(b) if b else total_pages
-            if start > end:
-                start, end = end, start
-            for p in range(start, end + 1):
-                if 1 <= p <= total_pages:
-                    pages.add(p)
-        else:
-            try:
-                p = int(part)
-                if 1 <= p <= total_pages:
-                    pages.add(p)
-            except ValueError:
-                # ignore junk silently or raise — here we raise to be strict
-                raise ValueError(f"Invalid page token: '{part}'")
-    return sorted(pages) or []
-
-def filter_payload_by_pages(payload: Dict[str, Any], pages: List[int]) -> Dict[str, Any]:
-    """
-    Given the cached payload (exact structure you return from /pdf/ingest),
-    keep only the requested pages in:
-      - parsed.elements (by el['page'])
-      - parsed.chunks (include chunk if any overlap with requested pages)
-    """
-    parsed = payload.get("parsed", {})
-    elements = parsed.get("elements", [])
-    chunks   = parsed.get("chunks", [])
-
-    # filter elements
-    el_sel = [el for el in elements if int(el.get("page") or 0) in pages]
-
-    # filter chunks: include if any page overlaps
-    ch_sel = []
-    for ch in chunks:
-        ch_pages = ch.get("pages") or []
-        if any(int(p) in pages for p in ch_pages):
-            ch_sel.append(ch)
-
-    out = dict(payload)
-    out["parsed"] = dict(parsed)
-    out["parsed"]["elements"] = el_sel
-    out["parsed"]["chunks"]   = ch_sel
-    out["selection"] = {
-        "requested_pages": pages,
-        "total_pages": int(payload.get("metadata", {}).get("pages") or 0),
-        "elements_count": len(el_sel),
-        "chunks_count": len(ch_sel),
-    }
-    return out
 
 
 async def  get_topic_from_pdf(
@@ -111,45 +43,49 @@ async def  get_topic_from_pdf(
     ocr_dpi: int = 300,
     max_chars: int = 8000,
     overlap_chars: int = 400,
+    cache: RedisAdapter = None,
 ):
-    if file.content_type and file.content_type not in ("application/pdf", "application/octet-stream"):
-        raise UnsupportedFileTypeError("Unsupported file type. Please upload a PDF file.")
+    pdf_adapter = await PdfAdapter.from_upload(file)
 
-    raw = await file.read() 
+    try:
+        topic = pdf_adapter.get_topics(
+            ocr_force=ocr_force,
+            ocr_lang=ocr_lang,
+            ocr_dpi=ocr_dpi,
+            max_chars=max_chars,
+            overlap_chars=overlap_chars,
+        )
 
-    # 1) Adapt: validate + metadata + scan detection
-    adapter = PdfAdapter(raw, file.filename)
-    adapter.validate()
+        await cache_set(cache, pdf_adapter.document_id, topic)
 
-    av_result = adapter.av_scan_clamav()                     # {"status": CLEAN|FOUND|UNKNOWN, ...}
-    yara_result = adapter.yara_scan(rules_path=None)         # set a rules file if you have one
+        return topic
+    
+    except UnsupportedFileTypeError as e:
+        error(f"Unsupported file type: {e}")
+        raise e
+    except MalwareDetectedError as e:
+        raise e
+    except Exception as e:
+        error(f"Error during PDF topic extraction: {e}")
+        raise ValueError("Failed to extract topics from PDF.")
+    
+async def get_input_from_pdf(request: Request, document_id: str, selected_pages: str = 'all'):
+    
+    pdf_adapter =  PdfAdapter()
 
-    if av_result.get("status") == "FOUND":
-        error(f"Malware detected by {av_result['engine']}: {av_result.get('signature')}")
-        raise MalwareDetectedError("Malware detected...")
+    cache = request.app.state.redis
+    found, cached, ttl = await cache_get(cache, document_id)
+    if not found or ttl == -2:
+        raise DocumentNotFoundError("Document ID not found in cache.")            
 
-    if yara_result.get("matches"):
-        error(f"Malware detected by YARA: {', '.join(yara_result.get('matches', []))}")
-        raise MalwareDetectedError("Malware detected...")
-        
-        
-
-    meta = adapter.get_metadata()
-    scan_score = adapter.scan_ratio()
-
-    # 2) Parse: structure + OCR (auto-enable if likely scanned or user forces)
-    parser = PdfParser(adapter.as_bytes_io(), adapter.filename)
-    parsed = parser.parse(
-        ocr_force=ocr_force or (scan_score >= 0.6),
-        ocr_lang=ocr_lang,
-        ocr_dpi=ocr_dpi,
-        max_chars=max_chars,
-        overlap_chars=overlap_chars,
+    total_pages = int(cached.get("metadata", {}).get("pages") or 0)
+    if total_pages <= 0:
+        raise InvalidTotalPagesError("Invalid total pages in cached document.")
+    
+    inputs = pdf_adapter.get_input(
+        selected_pages=selected_pages,
+        total_pages=total_pages,
+        cached=cached
     )
+    return inputs
 
-    payload = {
-        "metadata": {**meta, "scan_ratio": round(scan_score, 3)},
-        "parsed": parsed,  # contains: document_id, source, elements, chunks
-    }
-
-    return payload

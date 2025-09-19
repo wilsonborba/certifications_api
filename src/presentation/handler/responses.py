@@ -11,7 +11,13 @@ class UnsupportedFileTypeError(Exception):
     """Custom exception for unsupported file types."""
     pass
 
+class DocumentNotFoundError(Exception):
+    """Custom exception for document not found in cache."""
+    pass
 
+class InvalidTotalPagesError(Exception):
+    """Custom exception for invalid total pages in cached document."""
+    pass
 
 class MyResponse(BaseModel):
     """

@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Query, Request, Response, status, APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 
-from src.presentation.handler.pdf_handler import cache_get, cache_set, filter_payload_by_pages, get_topic_from_pdf, parse_page_selector
-from ..handler.responses import MalwareDetectedError, MyResponse, UnsupportedFileTypeError
+from src.presentation.handler.pdf_handler import  get_input_from_pdf, get_topic_from_pdf
+from ..handler.responses import DocumentNotFoundError, InvalidTotalPagesError, MalwareDetectedError, MyResponse, UnsupportedFileTypeError
 from src.core.logs import error
 
 pdf_router = APIRouter()
@@ -29,9 +29,8 @@ async def get_topic_pdf(
             ocr_dpi=ocr_dpi,
             max_chars=max_chars,
             overlap_chars=overlap_chars,
+            cache=cache,
         )
-        doc_id = payload["parsed"]["document_id"]
-        await cache_set(cache, doc_id, payload)
 
         
 
@@ -69,39 +68,42 @@ async def get_pdf_input(
     selected_pages: str = Query('all', description="Selected pages in format '1,2,5-10' or 'all'/'-4'/'2-'"),
 ):
     try:
-        cache = request.app.state.redis
-        found, cached, ttl = await cache_get(cache, document_id)
-        if not found or ttl == -2:
-            response.status_code = status.HTTP_404_NOT_FOUND
-            return MyResponse(data=None, message="Document not found or cache expired.")
-
-        total_pages = int(cached.get("metadata", {}).get("pages") or 0)
-        if total_pages <= 0:
-            response.status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
-            return MyResponse(data=None, message="Cached document has no page metadata.")
-
-        # Validate + compute pages
-        if selected_pages:
-            try:
-                pages = parse_page_selector(selected_pages, total_pages)
-            except ValueError as e:
-                response.status_code = status.HTTP_400_BAD_REQUEST
-                return MyResponse(data=None, message=str(e))
-
-        if not pages:
-            response.status_code = status.HTTP_400_BAD_REQUEST
-            return MyResponse(data=None, message="No valid pages selected.")
-
-        filtered = filter_payload_by_pages(cached, pages)
-
-
+        inputs = await get_input_from_pdf(
+            request=request,
+            document_id=document_id,
+            selected_pages=selected_pages,
+        )
 
         response.status_code = status.HTTP_200_OK
         return MyResponse(
-            data=filtered,
-            message=f"Returning {len(pages)} selected page(s)."
+            data=inputs,
+            message="PDF input retrieved successfully.",
         )
+    except ValueError as e:
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return MyResponse(data=None, message=f"A bad request was made, please check your input...")
+    except DocumentNotFoundError as e:
+        response.status_code = status.HTTP_404_NOT_FOUND
+        return MyResponse(data=None, message=str(e))
+    
+    except InvalidTotalPagesError as e:
+        response.status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+        return MyResponse(data=None, message=str(e))
+    
 
-    except Exception:
+    except Exception as e:
+        error(f"Internal server error: {e}")
         response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
         return MyResponse(data=None, message="Internal server error...")
+    
+
+@pdf_router.get("/pdf/context/{document_id}", response_class=JSONResponse)
+async def get_pdf_context(
+    response: Response,
+    request: Request,
+    document_id: str,
+    # selected
+    selected_pages: str = Query('all', description="Selected pages in format '1,2,5-10' or 'all'/'-4'/'2-'"),
+    mode: str = Query('both', description="Mode: playful, serious, both"),
+):
+   pass

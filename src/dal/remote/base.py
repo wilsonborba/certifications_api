@@ -30,6 +30,9 @@ class BaseAdapter(ABC):
             """
         
         return context
+    
+    def instructions(self) -> str:
+        pass
 
     @abstractmethod
     def get_preview(self) -> PreviewModel:

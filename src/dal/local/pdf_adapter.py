@@ -1,7 +1,9 @@
 # pip install pymupdf
+from datetime import datetime, timezone
 import io
 import subprocess
 import tempfile
+from fastapi import UploadFile
 import fitz  
 from uuid import uuid4
 import uuid
@@ -9,6 +11,9 @@ from typing import List, Dict, Any, Optional, Tuple
 from PIL import Image
 import pytesseract
 from unstructured.partition.pdf import partition_pdf
+from src.dal.remote.base import BaseAdapter
+from src.domain.models.preview_model import PreviewModel
+from src.presentation.handler.responses import MalwareDetectedError, UnsupportedFileTypeError
 from src.domain.models.pdf_model import  AntivirusScan, ElementAttrs, ParsedDocument, PdfChunk, PdfElement, PdfMetadata, YaraScan
 from src.core.logs import error
 try:
@@ -16,7 +21,7 @@ try:
 except Exception:
     clamd = None
 
-class PdfAdapter:
+class PdfScan:
     """
     Low-level adapter for PDF ingestion.
     - Validates input
@@ -153,9 +158,10 @@ class PdfParser:
     - Produces AI-ready JSON with elements + chunks
     """
 
-    def __init__(self, pdf_stream: io.BytesIO, filename: str):
+    def __init__(self, pdf_stream: io.BytesIO, filename: str, document_id: str = None):
         self.pdf_stream = pdf_stream
         self.filename = filename
+        self.document_id = document_id if document_id else str(uuid.uuid4())
 
     # ------------- Public API -------------
 
@@ -238,11 +244,11 @@ class PdfParser:
                     pages=[int(p) for p in (ch.get("pages") or [])],
                     section_path=list(ch.get("section_path") or []),
                     tokens_est=int(ch.get("tokens_est") or 0),
-                )
+                )   
             )
 
         doc = ParsedDocument(
-            document_id=str(uuid.uuid4()),
+            document_id=self.document_id,
             source=self.filename,
             elements=typed_elements,
             chunks=typed_chunks,
@@ -386,3 +392,196 @@ class PdfParser:
 
         flush()
         return blocks
+
+
+class PdfAdapter(BaseAdapter):
+
+    source_name = "pdf"
+    
+    def __init__(
+        self,
+        raw: bytes | None = None,
+        filename: str | None = None,
+        *,
+        upload: UploadFile | None = None,
+        document_id: str | None = None,
+    ):
+        # allow empty constructor
+        self.document_id = document_id or str(uuid.uuid4())
+        self.file = upload
+        self.raw = raw
+
+        # lazy: only build scanner/parser if we actually have bytes+filename
+        self.scanner: PdfScan | None = None
+        self.parser: PdfParser | None = None
+        if raw is not None and filename:
+            self.scanner = PdfScan(raw, filename)
+            self.parser = PdfParser(
+                self.scanner.as_bytes_io(),
+                self.scanner.filename,
+                document_id=self.document_id,
+            )
+
+    @classmethod
+    async def from_upload(cls, file: UploadFile) -> "PdfAdapter":
+        raw = await file.read()
+        return cls(raw, file.filename, upload=file)
+        
+    
+
+    def get_preview(self, mode):
+        return PreviewModel(
+            mode=mode,
+            source_name=self.source_name,
+            has_topic=False,
+            item_name=self.document_id,
+            item_img="https://res.cloudinary.com/dhncdmb2t/image/upload/v1756293205/reddit_logo_t93flf.png",
+            updated_at=datetime.now(timezone.utc).isoformat()
+        )
+
+    def instructions(self):
+        return (
+            "You are an expert at creating educational quiz questions from PDF documents. "
+            "Generate questions that test comprehension, critical thinking, and application of the material. "
+            "Ensure questions are clear, concise, and relevant to the content provided. "
+            "Avoid overly complex language; aim for clarity and accessibility. "
+            "Focus on key concepts, important details, and practical applications of the information in the document."
+        )
+
+    def get_topics(self, 
+        ocr_force: bool = False,
+        ocr_lang: str = "eng",
+        ocr_dpi: int = 300,
+        max_chars: int = 8000,
+        overlap_chars: int = 400
+        ):
+
+        if self.file.content_type and self.file.content_type not in ("application/pdf", "application/octet-stream"):
+            raise UnsupportedFileTypeError("Unsupported file type. Please upload a PDF file.")
+
+       
+
+        # 1) Adapt: validate + metadata + scan detection
+        self.scanner.validate()
+
+        av_result = self.scanner.av_scan_clamav()                     # {"status": CLEAN|FOUND|UNKNOWN, ...}
+        yara_result = self.scanner.yara_scan(rules_path=None)         # set a rules file if you have one
+
+        if av_result.get("status") == "FOUND":
+            error(f"Malware detected by {av_result['engine']}: {av_result.get('signature')}")
+            raise MalwareDetectedError("Malware detected...")
+
+        if yara_result.get("matches"):
+            error(f"Malware detected by YARA: {', '.join(yara_result.get('matches', []))}")
+            raise MalwareDetectedError("Malware detected...")
+            
+            
+
+        meta = self.scanner.get_metadata()
+        scan_score = self.scanner.scan_ratio()
+
+        # 2) Parse: structure + OCR (auto-enable if likely scanned or user forces)
+
+        parsed = self.parser.parse(
+            ocr_force=ocr_force or (scan_score >= 0.6),
+            ocr_lang=ocr_lang,
+            ocr_dpi=ocr_dpi,
+            max_chars=max_chars,
+            overlap_chars=overlap_chars,
+        )
+
+        payload = {
+            "metadata": {**meta, "scan_ratio": round(scan_score, 3)},
+            "parsed": parsed,  # contains: document_id, source, elements, chunks
+        }
+
+        return payload   
+    
+    def _parse_page_selector(self, select: str | None, total_pages: int) -> List[int]:
+        """
+        Accepts formats like:
+        - "all" or "" -> all pages
+        - "1,3,5-7"
+        - "2-"
+        - "-4"
+        Returns 1-based unique sorted pages, clamped to [1..total_pages].
+        """
+        if not select or select.strip().lower() == "all":
+            return list(range(1, total_pages + 1))
+
+        pages: set[int] = set()
+        for part in select.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                a, b = part.split("-", 1)
+                a = a.strip(); b = b.strip()
+                start = int(a) if a else 1
+                end   = int(b) if b else total_pages
+                if start > end:
+                    start, end = end, start
+                for p in range(start, end + 1):
+                    if 1 <= p <= total_pages:
+                        pages.add(p)
+            else:
+                try:
+                    p = int(part)
+                    if 1 <= p <= total_pages:
+                        pages.add(p)
+                except ValueError:
+                    # ignore junk silently or raise — here we raise to be strict
+                    raise ValueError(f"Invalid page token: '{part}'")
+        return sorted(pages) or []
+
+    def _filter_payload_by_pages(self, payload: Dict[str, Any], pages: List[int]) -> Dict[str, Any]:
+        """
+        Given the cached payload (exact structure you return from /pdf/ingest),
+        keep only the requested pages in:
+        - parsed.elements (by el['page'])
+        - parsed.chunks (include chunk if any overlap with requested pages)
+        """
+        parsed = payload.get("parsed", {})
+        elements = parsed.get("elements", [])
+        chunks   = parsed.get("chunks", [])
+
+        # filter elements
+        el_sel = [el for el in elements if int(el.get("page") or 0) in pages]
+
+        # filter chunks: include if any page overlaps
+        ch_sel = []
+        for ch in chunks:
+            ch_pages = ch.get("pages") or []
+            if any(int(p) in pages for p in ch_pages):
+                ch_sel.append(ch)
+
+        out = dict(payload)
+        out["parsed"] = dict(parsed)
+        out["parsed"]["elements"] = el_sel
+        out["parsed"]["chunks"]   = ch_sel
+        out["selection"] = {
+            "requested_pages": pages,
+            "total_pages": int(payload.get("metadata", {}).get("pages") or 0),
+            "elements_count": len(el_sel),
+            "chunks_count": len(ch_sel),
+        }
+        return out
+
+    def get_input(self, selected_pages: str | None, total_pages: int, cached) -> Dict[str, Any]:
+
+        if selected_pages:
+            try:
+                pages = self._parse_page_selector(selected_pages, total_pages)
+            except ValueError as e:
+                raise e
+
+        if not pages:
+            raise ValueError("No valid pages selected.")
+
+        filtered = self._filter_payload_by_pages(cached, pages)
+
+        return filtered
+    
+    def generate_context(self, input_data, amount_question):
+        return super().generate_context(input_data, amount_question)
+    
