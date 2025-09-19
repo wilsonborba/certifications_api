@@ -40,6 +40,7 @@ All notable changes to this project will be documented in this file.
 - *(pdf)* Added route to get specific inputs (pages) based on a temporary memory 30min
 - *(pdf)* Added dataclass to improve the pdf reading
 - *(pdf)* Organized the env lib for the Adapter for PDF
+- *(pdf)* Added a verifier ai injection command hacking
 
 ### ⚙️ Miscellaneous Tasks
 
