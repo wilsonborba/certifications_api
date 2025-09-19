@@ -38,6 +38,7 @@ All notable changes to this project will be documented in this file.
 - *(pdf)* Improved the return code and messages from errors
 - *(pdf)* Added redis adapter to cache the topic book extraction
 - *(pdf)* Added route to get specific inputs (pages) based on a temporary memory 30min
+- *(pdf)* Added dataclass to improve the pdf reading
 
 ### ⚙️ Miscellaneous Tasks
 

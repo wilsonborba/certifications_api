@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+
+# sudo systemctl enable --now clamav-freshclam
+# sudo systemctl enable --now clamav-daemon
+
+
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$SCRIPT_DIR/.."
 

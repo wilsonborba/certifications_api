@@ -9,6 +9,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from PIL import Image
 import pytesseract
 from unstructured.partition.pdf import partition_pdf
+from src.domain.models.pdf_model import  AntivirusScan, ElementAttrs, ParsedDocument, PdfChunk, PdfElement, PdfMetadata, YaraScan
 from src.core.logs import error
 try:
     import clamd
@@ -56,17 +57,18 @@ class PdfAdapter:
         if self._doc is None:
             self.open()
         meta = self._doc.metadata or {}
-        return {
-            "filename": self.filename,
-            "pages": self._doc.page_count,
-            "title": meta.get("title"),
-            "author": meta.get("author"),
-            "subject": meta.get("subject"),
-            "creation_date": meta.get("creationDate"),
-            "mod_date": meta.get("modDate"),
-            "producer": meta.get("producer"),
-            "encrypted": self._doc.is_encrypted,
-        }
+        m = PdfMetadata(
+        filename=self.filename,
+        pages=self._doc.page_count,
+        title=meta.get("title"),
+        author=meta.get("author"),
+        subject=meta.get("subject"),
+        creation_date=meta.get("creationDate"),
+        mod_date=meta.get("modDate"),
+        producer=meta.get("producer"),
+        encrypted=self._doc.is_encrypted,
+        )
+        return m.to_dict()
 
     def scan_ratio(self, sample_pages: int = 5) -> float:
         """
@@ -101,21 +103,15 @@ class PdfAdapter:
             self._doc.close()
 
     def av_scan_clamav(self, host: str = "127.0.0.1", port: int = 3310) -> Dict[str, Any]:
-        """
-        Scan the raw PDF bytes with ClamAV.
-        Returns: {"engine": "clamav", "status": "CLEAN|FOUND|UNKNOWN", "signature": str|None}
-        """
-        # Prefer daemon (clamd) if available
         if clamd:
             try:
                 cd = clamd.ClamdNetworkSocket(host=host, port=port)
                 res = cd.instream(io.BytesIO(self.raw_bytes))
                 status, sig = res.get('stream', ('UNKNOWN', None))
-                return {"engine": "clamav", "status": status, "signature": sig}
+                status = "CLEAN" if status == "OK" else status
+                return AntivirusScan(engine="clamav", status=status, signature=sig).to_dict()
             except Exception:
-                pass  # fall through to clamscan
-
-        # Fallback: shell out to clamscan (no daemon). Requires clamscan binary installed.
+                pass
         try:
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
                 tmp.write(self.raw_bytes); tmp.flush()
@@ -125,29 +121,25 @@ class PdfAdapter:
                 )
                 out = proc.stdout.strip()
                 if out.endswith(": OK"):
-                    return {"engine": "clamscan", "status": "CLEAN", "signature": None}
+                    return AntivirusScan(engine="clamscan", status="CLEAN", signature=None).to_dict()
                 if "FOUND" in out:
                     sig = out.split(":")[-1].replace("FOUND", "").strip() or "FOUND"
-                    return {"engine": "clamscan", "status": "FOUND", "signature": sig}
-                return {"engine": "clamscan", "status": "UNKNOWN", "signature": None}
+                    return AntivirusScan(engine="clamscan", status="FOUND", signature=sig).to_dict()
+                return AntivirusScan(engine="clamscan", status="UNKNOWN", signature=None).to_dict()
         except FileNotFoundError:
-            return {"engine": "clamav", "status": "UNKNOWN", "signature": None}
+            return AntivirusScan(engine="clamav", status="UNAVAILABLE", signature=None).to_dict()
 
     def yara_scan(self, rules_path: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Optional: run YARA rules against the PDF bytes.
-        Provide a rules file containing PDF-specific signatures.
-        """
         try:
             import yara
             if not rules_path:
-                return {"engine": "yara", "status": "SKIPPED", "matches": []}
+                return YaraScan(status="SKIPPED", matches=[]).to_dict()
             rules = yara.compile(filepath=rules_path)
             matches = rules.match(data=self.raw_bytes)
-            return {"engine": "yara", "status": "MATCH" if matches else "CLEAN",
-                    "matches": [m.rule for m in matches]}
+            status = "MATCH" if matches else "CLEAN"
+            return YaraScan(status=status, matches=[m.rule for m in matches]).to_dict()
         except Exception:
-            return {"engine": "yara", "status": "ERROR", "matches": []}
+            return YaraScan(status="ERROR", matches=[]).to_dict()
 
 
 
@@ -168,12 +160,12 @@ class PdfParser:
     # ------------- Public API -------------
 
     def parse(
-        self,
-        ocr_force: bool = False,
-        ocr_lang: str = "eng",
-        ocr_dpi: int = 300,
-        max_chars: int = 8000,
-        overlap_chars: int = 400,
+    self,
+    ocr_force: bool = False,
+    ocr_lang: str = "eng",
+    ocr_dpi: int = 300,
+    max_chars: int = 8000,
+    overlap_chars: int = 400,
     ) -> Dict[str, Any]:
         """
         ocr_force=True → OCR every page (useful for heavily scanned docs).
@@ -188,17 +180,17 @@ class PdfParser:
             infer_table_structure=True,
         )
 
+        # Element dicts (public shape preserved)
         elements_json = [self._element_to_dict(e) for e in elements]
         pages_with_text = self._pages_with_text(elements_json)
 
         # 2) OCR pass (forced or sparse pages)
-        ocr_extra_elements = []
+        ocr_extra_elements: List[Dict[str, Any]] = []
         with fitz.open(stream=self.pdf_stream.getvalue(), filetype="pdf") as doc:
             for page_no in range(doc.page_count):
                 need_ocr = ocr_force or (page_no + 1) not in pages_with_text
                 if not need_ocr:
                     continue
-
                 ocr_text, conf = self._ocr_page(doc, page_no, dpi=ocr_dpi, lang=ocr_lang)
                 if ocr_text.strip():
                     ocr_extra_elements.append({
@@ -211,34 +203,78 @@ class PdfParser:
         # 3) Merge OCR elements (append; caller may de-duplicate if desired)
         all_elements = self._merge_elements(elements_json, ocr_extra_elements)
 
-        # 4) Build chunks
-        chunks = self._chunk_elements(all_elements, max_chars=max_chars, overlap=overlap_chars)
+        # 4) Build chunks (dicts first to preserve current chunker)
+        chunks_dicts = self._chunk_elements(all_elements, max_chars=max_chars, overlap=overlap_chars)
 
-        return {
-            "document_id": str(uuid.uuid4()),
-            "source": self.filename,
-            "elements": all_elements,
-            "chunks": chunks,
-        }
+        # 5) Convert dicts → dataclasses → final dict (typed schema, same outward shape)
+        #    NOTE: assumes these are imported:
+        #    from src.dal.local.pdf_models import ElementAttrs, PdfElement, PdfChunk, ParsedDocument
+        typed_elements: List[PdfElement] = []
+        for el in all_elements:
+            attrs = el.get("attrs", {}) or {}
+            bbox = attrs.get("bbox")
+            bbox_tuple = tuple(bbox) if bbox else None
+            typed_elements.append(
+                PdfElement(
+                    type=el.get("type", ""),
+                    text=el.get("text", "") or "",
+                    page=el.get("page"),
+                    attrs=ElementAttrs(
+                        bbox=bbox_tuple,
+                        level=attrs.get("level"),
+                        table_markdown=attrs.get("table_markdown"),
+                        ocr=attrs.get("ocr"),
+                        ocr_confidence=attrs.get("ocr_confidence"),
+                    ),
+                )
+            )
+
+        typed_chunks: List[PdfChunk] = []
+        for ch in chunks_dicts:
+            typed_chunks.append(
+                PdfChunk(
+                    chunk_id=ch.get("chunk_id", str(uuid.uuid4())),
+                    text=ch.get("text", "") or "",
+                    pages=[int(p) for p in (ch.get("pages") or [])],
+                    section_path=list(ch.get("section_path") or []),
+                    tokens_est=int(ch.get("tokens_est") or 0),
+                )
+            )
+
+        doc = ParsedDocument(
+            document_id=str(uuid.uuid4()),
+            source=self.filename,
+            elements=typed_elements,
+            chunks=typed_chunks,
+        )
+        return doc.to_dict()
 
     # ------------- Internals -------------
 
     def _element_to_dict(self, el) -> Dict[str, Any]:
+        # -> now returns a dict built via PdfElement (keeps the public shape identical)
         typ = getattr(el, "category", None) or el.__class__.__name__
         page = getattr(el.metadata, "page_number", None)
-        d = {"type": typ, "text": (el.text or "").strip(), "page": page, "attrs": {}}
 
-        bbox = getattr(el, "coordinates", None)
-        if bbox and getattr(bbox, "points", None):
-            xs = [p[0] for p in bbox.points]
-            ys = [p[1] for p in bbox.points]
-            d["attrs"]["bbox"] = [min(xs), min(ys), max(xs), max(ys)]
+        # bbox
+        bbox = None
+        coords = getattr(el, "coordinates", None)
+        if coords and getattr(coords, "points", None):
+            xs = [p[0] for p in coords.points]
+            ys = [p[1] for p in coords.points]
+            bbox = (min(xs), min(ys), max(xs), max(ys))
 
-        # keep tables as markdown-ish for LLMs
-        if "Table" in typ:
-            d["attrs"]["table_markdown"] = el.text
-
-        return d
+        attrs = ElementAttrs(
+            bbox=bbox,
+            table_markdown=el.text if "Table" in typ else None,
+        )
+        model = PdfElement(
+            type=typ,
+            text=(el.text or "").strip(),
+            page=page,
+            attrs=attrs,
+        )
+        return model.to_dict()
 
     def _pages_with_text(self, elements: List[Dict[str, Any]]) -> set:
         pages = set()
@@ -292,10 +328,10 @@ class PdfParser:
         return merged
 
     def _chunk_elements(
-        self, elements: List[Dict[str, Any]], max_chars: int = 8000, overlap: int = 400
+    self, elements: List[Dict[str, Any]], max_chars: int = 8000, overlap: int = 400
     ) -> List[Dict[str, Any]]:
         buffer = ""
-        blocks = []
+        blocks: List[Dict[str, Any]] = []
         pages = set()
         section_path: List[str] = []
 
@@ -303,13 +339,14 @@ class PdfParser:
             nonlocal buffer, pages
             if not buffer.strip():
                 return
-            blocks.append({
-                "chunk_id": str(uuid.uuid4()),
-                "text": buffer.strip(),
-                "pages": sorted(list(pages)),
-                "section_path": section_path[-3:],  # shallow path
-                "tokens_est": len(buffer) // 4,
-            })
+            ch = PdfChunk(
+                chunk_id=str(uuid.uuid4()),
+                text=buffer.strip(),
+                pages=sorted(list(pages)),
+                section_path=section_path[-3:],
+                tokens_est=len(buffer) // 4,
+            )
+            blocks.append(ch.to_dict())
             buffer = ""
             pages = set()
 
@@ -320,7 +357,6 @@ class PdfParser:
 
             t = (el.get("type") or "").lower()
             txt = (el.get("text") or "").strip()
-
             if not txt:
                 continue
 
@@ -337,13 +373,14 @@ class PdfParser:
             if len(buffer) > max_chars:
                 cut = buffer[:max_chars]
                 overlap_txt = buffer[max_chars - overlap:]
-                blocks.append({
-                    "chunk_id": str(uuid.uuid4()),
-                    "text": cut.strip(),
-                    "pages": sorted(list(pages)),
-                    "section_path": section_path[-3:],
-                    "tokens_est": len(cut) // 4,
-                })
+                ch = PdfChunk(
+                    chunk_id=str(uuid.uuid4()),
+                    text=cut.strip(),
+                    pages=sorted(list(pages)),
+                    section_path=section_path[-3:],
+                    tokens_est=len(cut) // 4,
+                )
+                blocks.append(ch.to_dict())
                 buffer = overlap_txt
                 pages = set()
 
