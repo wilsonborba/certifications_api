@@ -41,6 +41,7 @@ All notable changes to this project will be documented in this file.
 - *(pdf)* Added dataclass to improve the pdf reading
 - *(pdf)* Organized the env lib for the Adapter for PDF
 - *(pdf)* Added a verifier ai injection command hacking
+- *(pdf)* Verifier about ai injection working
 
 ### ⚙️ Miscellaneous Tasks
 
