@@ -1,8 +1,8 @@
-from src.domain.services.quiz_manager import QuizManager
+from src.domain.services.quiz_api_manager import QuizAPIManager
 from src.core.logs import info, warning
 import json
 
-quiz_handler = QuizManager()
+quiz_handler = QuizAPIManager()
 
 async def get_context_from_app(item_name: str, input_identification: str, force_new_generation: bool, amount_question: int) -> dict:
     info(f"Fetching context for item: {item_name}, identification: {input_identification}")

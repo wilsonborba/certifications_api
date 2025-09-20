@@ -1,9 +1,9 @@
 
 from src.dal.remote.factory import AdapterFactory
-from src.domain.services.quiz_manager import QuizManager
+from src.domain.services.quiz_api_manager import QuizAPIManager
 from src.core.logs import info, debug
 
-preview_manager = QuizManager()
+preview_manager = QuizAPIManager()
 
 factory = AdapterFactory()
 

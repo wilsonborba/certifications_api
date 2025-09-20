@@ -2,8 +2,9 @@ from fastapi import APIRouter, Query, Request, Response, status, APIRouter, Uplo
 from fastapi.responses import JSONResponse
 
 from src.presentation.handler.pdf_handler import  get_context_from_pdf, get_input_from_pdf, get_topic_from_pdf
-from ..handler.responses import DocumentNotFoundError, InvalidTotalPagesError, MalwareDetectedError, MyResponse, UnsupportedFileTypeError
+from ..handler.responses import AIGenerationError, DocumentNotFoundError, InvalidTotalPagesError, MalwareDetectedError, MyResponse, UnsupportedFileTypeError
 from src.core.logs import error
+from src.dal.remote.gemini import GeminiError
 
 pdf_router = APIRouter()
 
@@ -118,6 +119,28 @@ async def get_pdf_context(
             data=ai_injection_result,
             message="PDF context retrieved successfully.",
         )
+    
+    except GeminiError as e:
+        # Map upstream → gateway-ish status
+        upstream = int(getattr(e, "status_code", 502) or 502)
+        mapped = 502 if upstream < 500 or upstream == 500 else (503 if upstream in (503,) else (504 if upstream == 504 else 502))
+        error(f"Gemini error [{upstream}]: {e.payload}")
+        response.status_code  = status.HTTP_503_SERVICE_UNAVAILABLE
+        # keep message generic (don’t leak upstream details to clients)
+        return MyResponse(
+            data=None,
+            message="Upstream AI service error. Please try again later."
+        )
+    
+    except AIGenerationError as e:
+        response.status_code  = status.HTTP_503_SERVICE_UNAVAILABLE
+        return MyResponse(data=None, message=str(e))
+    
+    except MalwareDetectedError as e:
+        response.status_code = status.HTTP_409_CONFLICT
+        return MyResponse(data=None, message=str(e))
+
+
     except ValueError as e:
         response.status_code = status.HTTP_400_BAD_REQUEST
         return MyResponse(data=None, message=f"A bad request was made, please check your input...")
@@ -128,8 +151,10 @@ async def get_pdf_context(
     except InvalidTotalPagesError as e:
         response.status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
         return MyResponse(data=None, message=str(e))
-    except Exception as e:
-        error(f"Internal server error: {e}")
+    
+    
+    except Exception as e:    
+        error(f"Internal server error [{type(e).__name__}]: {e!r}")
         response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
         return MyResponse(data=None, message="Internal server error...")
     

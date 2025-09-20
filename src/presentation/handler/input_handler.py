@@ -1,7 +1,7 @@
-from src.domain.services.quiz_manager import QuizManager
+from src.domain.services.quiz_api_manager import QuizAPIManager
 from src.core.logs import info, debug, error
 
-preview_manager = QuizManager()
+preview_manager = QuizAPIManager()
 
 def get_input_from_app(item_name: str, input_identification: str) -> dict:
     

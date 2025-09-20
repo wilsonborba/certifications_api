@@ -42,6 +42,8 @@ All notable changes to this project will be documented in this file.
 - *(pdf)* Organized the env lib for the Adapter for PDF
 - *(pdf)* Added a verifier ai injection command hacking
 - *(pdf)* Verifier about ai injection working
+- *(pdf)* Verifier about ai injection working
+- *(pdf)* Generating question from secure pdf created
 
 ### ⚙️ Miscellaneous Tasks
 

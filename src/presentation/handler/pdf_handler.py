@@ -4,9 +4,10 @@
 
 from fastapi import Request, UploadFile
 
+from src.domain.services.quiz_pdf_manager import QuizPDFManager
 from src.presentation.handler.responses import DocumentNotFoundError, InvalidTotalPagesError, MalwareDetectedError, UnsupportedFileTypeError
 from src.dal.local.pdf_adapter import PdfAdapter
-from src.core.logs import error
+from src.core.logs import error, debug
 from typing import List, Dict, Any, Optional, Tuple
 
 from src.dal.local.redis_adapter import RedisAdapter
@@ -14,7 +15,7 @@ from src.dal.local.redis_adapter import RedisAdapter
 CACHE_PREFIX = "topic:"
 CACHE_TTL_SEC = 30 * 60  # 30 minutes
 
-pdf_adapter_without_file =  PdfAdapter()
+quiz_pdf_manager = QuizPDFManager()
 
 
 async def cache_get(cache: RedisAdapter, document_id: str) -> Tuple[bool, Optional[Dict[str, Any]], int]:
@@ -41,17 +42,18 @@ async def cache_set(cache: RedisAdapter, document_id: str, payload: Dict[str, An
 
 async def  get_topic_from_pdf(
     file: UploadFile,
+    cache: RedisAdapter,
     ocr_force: bool = False,
     ocr_lang: str = "eng",
     ocr_dpi: int = 300,
     max_chars: int = 8000,
     overlap_chars: int = 400,
-    cache: RedisAdapter = None,
 ):
-    pdf_adapter = await PdfAdapter.from_upload(file)
+   
 
     try:
-        topic = pdf_adapter.get_topics(
+        topic = await quiz_pdf_manager.get_topics(
+            file=file,
             ocr_force=ocr_force,
             ocr_lang=ocr_lang,
             ocr_dpi=ocr_dpi,
@@ -59,7 +61,11 @@ async def  get_topic_from_pdf(
             overlap_chars=overlap_chars,
         )
 
-        await cache_set(cache, pdf_adapter.document_id, topic)
+        document_id = topic.get('parsed').get('document_id')
+        
+        debug(f"Caching topic for document_id {document_id} with TTL {CACHE_TTL_SEC} seconds")
+
+        await cache_set(cache, document_id, topic)
 
         return topic
     
@@ -76,29 +82,32 @@ async def get_input_from_pdf(request: Request, document_id: str, selected_pages:
     
     
     cache = request.app.state.redis
-    found, cached, ttl = await cache_get(cache, document_id)
+    found, input_data, ttl = await cache_get(cache, document_id)
     if not found or ttl == -2:
         raise DocumentNotFoundError("Document ID not found in cache.")            
 
-    total_pages = int(cached.get("metadata", {}).get("pages") or 0)
+    total_pages = int(input_data.get("metadata", {}).get("pages") or 0)
     if total_pages <= 0:
         raise InvalidTotalPagesError("Invalid total pages in cached document.")
     
-    inputs = pdf_adapter_without_file.get_input(
+    inputs = quiz_pdf_manager.get_input(
         selected_pages=selected_pages,
         total_pages=total_pages,
-        cached=cached
+        input_data=input_data
     )
     return inputs
 
 
 async def get_context_from_pdf(request: Request, document_id: str, selected_pages: str = 'all'):
     
-    inputs = await get_input_from_pdf(request, document_id, selected_pages)
+    input_data = await get_input_from_pdf(request, document_id, selected_pages)
 
-    ai_injection_result =  await pdf_adapter_without_file.check_ai_injection(cached=inputs)
+    response = await quiz_pdf_manager.generate_context(
+            input_data=input_data,
+            amount_question=10
+        )
 
-    return ai_injection_result
+    return response
 
 
 

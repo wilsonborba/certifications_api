@@ -19,6 +19,21 @@ class InvalidTotalPagesError(Exception):
     """Custom exception for invalid total pages in cached document."""
     pass
 
+class AIGenerationError(Exception):
+    """Custom exception for AI generation errors."""
+    pass
+
+
+
+
+
+
+
+
+
+
+
+
 class MyResponse(BaseModel):
     """
     Base response model for API responses.
