@@ -11,11 +11,11 @@ from typing import List, Dict, Any, Optional, Tuple
 from PIL import Image
 import pytesseract
 from unstructured.partition.pdf import partition_pdf
-from dal.remote.gemini import GeminiClient
+from src.dal.remote.gemini import GeminiClient
 from src.dal.remote.base import BaseAdapter
 from src.domain.models.preview_model import PreviewModel
 from src.presentation.handler.responses import MalwareDetectedError, UnsupportedFileTypeError
-from src.domain.models.pdf_model import  AiInjectionReport, AntivirusScan, ElementAttrs, ParsedDocument, PdfChunk, PdfElement, PdfMetadata, YaraScan
+from src.domain.models.pdf_model import  (AiInjectionReport, AntivirusScan, ElementAttrs, ParsedDocument, PdfChunk, PdfElement, PdfMetadata, YaraScan)
 from src.core.logs import error
 import os, time, re, json
 
@@ -593,6 +593,107 @@ class PdfAdapter(BaseAdapter):
 
         return filtered
     
+    def _extract_gemini_text(self, resp: Dict[str, Any]) -> str:
+        """Extract the first text string from Gemini generateContent response."""
+        try:
+            cands = (resp or {}).get("candidates") or []
+            if not cands:
+                return ""
+            parts = ((cands[0] or {}).get("content") or {}).get("parts") or []
+            if not parts:
+                return ""
+            return (parts[0] or {}).get("text") or ""
+        except Exception:
+            return ""
+
+    def _collect_text_for_scan(self, *, cached: Dict[str, Any] | None, max_chars: int) -> tuple[str, Dict[int, str]]:
+        """Build a compact evidence string '[p=1] ...' from cached payload (prefer chunks)."""
+        page_map: Dict[int, List[str]] = {}
+        if cached:
+            parsed = (cached.get("parsed") or {})
+            chunks = parsed.get("chunks") or []
+            if chunks:
+                for ch in chunks:
+                    txt = (ch.get("text") or "").strip()
+                    for p in (ch.get("pages") or []):
+                        page_map.setdefault(int(p), []).append(txt)
+            else:
+                for el in (parsed.get("elements") or []):
+                    txt = (el.get("text") or "").strip()
+                    p = int(el.get("page") or 0) or None
+                    if p and txt:
+                        page_map.setdefault(p, []).append(txt)
+
+        evidence_parts: List[str] = []
+        total = 0
+        for p in sorted(page_map.keys()):
+            joined = "\n".join(page_map[p])
+            snippet = joined[:2000]  # cap per page
+            part = f"[p={p}] {snippet}"
+            if total + len(part) > max_chars:
+                break
+            evidence_parts.append(part)
+            total += len(part)
+
+        evidence = "\n\n".join(evidence_parts)[:max_chars] if evidence_parts else ""
+        page_map_str: Dict[int, str] = {p: "\n".join(v) for p, v in page_map.items()}
+        return evidence, page_map_str
+
+    def _heuristic_hits(self, text: str) -> List[str]:
+        if not text:
+            return []
+        patterns = [
+            r"\bignore (all|any|the) (previous|above) instructions\b",
+            r"\boverride (system|developer) (instructions|prompt)\b",
+            r"\byou are now\b",
+            r"\bdisregard (all|any) (rules|instructions)\b",
+            r"\bprint (your|the) (system|hidden) prompt\b",
+            r"\bexfiltrat(e|ion)\b",
+            r"\bsend (this|the) data to\b",
+            r"\bdeveloper mode\b",
+            r"\bdo anything now\b",
+        ]
+        hits = []
+        for pat in patterns:
+            if re.search(pat, text, flags=re.IGNORECASE):
+                hits.append(pat)
+        return hits
+
+    def _pages_from_hits(self, indicators: List[str], page_map: Dict[int, str]) -> List[int]:
+        pages: List[int] = []
+        for p, body in page_map.items():
+            for ind in indicators:
+                try:
+                    if re.search(ind, body, flags=re.IGNORECASE):
+                        pages.append(p); break
+                except re.error:
+                    if ind.lower() in body.lower():
+                        pages.append(p); break
+        return sorted(set(pages))
+
+    def _quotes_from_hits(self, indicators: List[str], evidence: str) -> List[str]:
+        quotes: List[str] = []
+        for ind in indicators:
+            try:
+                for m in re.finditer(ind, evidence, flags=re.IGNORECASE):
+                    start = max(0, m.start() - 60)
+                    end = min(len(evidence), m.end() + 60)
+                    quotes.append(evidence[start:end].strip())
+            except re.error:
+                idx = evidence.lower().find(ind.lower())
+                if idx != -1:
+                    start = max(0, idx - 60)
+                    end = min(len(evidence), idx + len(ind) + 60)
+                    quotes.append(evidence[start:end].strip())
+        # dedupe + cap
+        seen, out = set(), []
+        for q in quotes:
+            if q not in seen:
+                seen.add(q); out.append(q)
+            if len(out) >= 20:
+                break
+        return out
+    
     async def check_ai_injection(
     self,
     *,
@@ -684,7 +785,7 @@ class PdfAdapter(BaseAdapter):
                 latency_ms=latency_ms,
                 model=(resp.get("model") if isinstance(resp, dict) else None),
                 raw=data,
-            )
+            ).to_dict()
 
         except Exception as e:
             latency_ms = int((time.perf_counter() - start) * 1000)
@@ -699,4 +800,7 @@ class PdfAdapter(BaseAdapter):
                 latency_ms=latency_ms,
                 model=None,
                 raw=None,
-            )
+            ).to_dict()
+        
+    def generate_context(self, input_data, amount_question):
+        return super().generate_context(input_data, amount_question)

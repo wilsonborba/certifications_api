@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Query, Request, Response, status, APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 
-from src.presentation.handler.pdf_handler import  get_input_from_pdf, get_topic_from_pdf
+from src.presentation.handler.pdf_handler import  get_context_from_pdf, get_input_from_pdf, get_topic_from_pdf
 from ..handler.responses import DocumentNotFoundError, InvalidTotalPagesError, MalwareDetectedError, MyResponse, UnsupportedFileTypeError
 from src.core.logs import error
 
@@ -106,4 +106,33 @@ async def get_pdf_context(
     selected_pages: str = Query('all', description="Selected pages in format '1,2,5-10' or 'all'/'-4'/'2-'"),
     mode: str = Query('both', description="Mode: playful, serious, both"),
 ):
-   pass
+    
+    try:
+        ai_injection_result = await get_context_from_pdf(
+            request=request,
+            document_id=document_id,
+            selected_pages=selected_pages
+        )
+        response.status_code = status.HTTP_200_OK
+        return MyResponse(
+            data=ai_injection_result,
+            message="PDF context retrieved successfully.",
+        )
+    except ValueError as e:
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return MyResponse(data=None, message=f"A bad request was made, please check your input...")
+    
+    except DocumentNotFoundError as e:
+        response.status_code = status.HTTP_404_NOT_FOUND
+        return MyResponse(data=None, message=str(e))
+    except InvalidTotalPagesError as e:
+        response.status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+        return MyResponse(data=None, message=str(e))
+    except Exception as e:
+        error(f"Internal server error: {e}")
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return MyResponse(data=None, message="Internal server error...")
+    
+
+
+   

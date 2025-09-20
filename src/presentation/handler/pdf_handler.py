@@ -5,7 +5,7 @@
 from fastapi import Request, UploadFile
 
 from src.presentation.handler.responses import DocumentNotFoundError, InvalidTotalPagesError, MalwareDetectedError, UnsupportedFileTypeError
-from src.dal.local.pdf_adapter import PdfAdapter, PdfScan, PdfParser
+from src.dal.local.pdf_adapter import PdfAdapter
 from src.core.logs import error
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -13,6 +13,9 @@ from src.dal.local.redis_adapter import RedisAdapter
 
 CACHE_PREFIX = "topic:"
 CACHE_TTL_SEC = 30 * 60  # 30 minutes
+
+pdf_adapter_without_file =  PdfAdapter()
+
 
 async def cache_get(cache: RedisAdapter, document_id: str) -> Tuple[bool, Optional[Dict[str, Any]], int]:
     """
@@ -71,8 +74,7 @@ async def  get_topic_from_pdf(
     
 async def get_input_from_pdf(request: Request, document_id: str, selected_pages: str = 'all'):
     
-    pdf_adapter =  PdfAdapter()
-
+    
     cache = request.app.state.redis
     found, cached, ttl = await cache_get(cache, document_id)
     if not found or ttl == -2:
@@ -82,10 +84,21 @@ async def get_input_from_pdf(request: Request, document_id: str, selected_pages:
     if total_pages <= 0:
         raise InvalidTotalPagesError("Invalid total pages in cached document.")
     
-    inputs = pdf_adapter.get_input(
+    inputs = pdf_adapter_without_file.get_input(
         selected_pages=selected_pages,
         total_pages=total_pages,
         cached=cached
     )
     return inputs
+
+
+async def get_context_from_pdf(request: Request, document_id: str, selected_pages: str = 'all'):
+    
+    inputs = await get_input_from_pdf(request, document_id, selected_pages)
+
+    ai_injection_result =  await pdf_adapter_without_file.check_ai_injection(cached=inputs)
+
+    return ai_injection_result
+
+
 
