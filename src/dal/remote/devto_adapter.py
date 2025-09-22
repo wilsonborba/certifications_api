@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 
 from src.dal.remote.base import BaseAdapter
 from src.domain.models.preview_model import PreviewModel, EnumMode
+from src.domain.models.indentifications_model import IdentificationsModel
 
 DEVTO_BASE = "https://dev.to"
 DEVTO_TAGS = f"{DEVTO_BASE}/tags"         # ?page=N
@@ -49,17 +50,10 @@ class DevToAdapter(BaseAdapter):
 
     # ---------- Parsing helpers ----------
     def _parse_tag_cards(self, soup: BeautifulSoup) -> List[Dict[str, Any]]:
-        """
-        Extract tag cards from /tags?page=N:
-          - slug (from /t/<slug>)
-          - display name
-          - short description (if present)
-        """
         topics: List[Dict[str, Any]] = []
 
         cards = soup.select("div.tag-card") or soup.select("[data-testid='tag-card']") or soup.select("li.tag-card")
         if not cards:
-            # Fallback: any /t/<slug> link
             seen = set()
             for a in soup.select("a[href^='/t/']"):
                 href = a.get("href", "")
@@ -107,16 +101,24 @@ class DevToAdapter(BaseAdapter):
         soup = self._get_html(DEVTO_TAGS, params={"page": page})
         tags = self._parse_tag_cards(soup)
 
-        # Build output list (cap to per_page)
         topics = []
         for t in tags[:per_page]:
             slug = t["slug"]
+            name = t["name"]
+            tag_url = f"{DEVTO_BASE}/t/{slug}"
+
             topics.append({
                 "type": "tag",
-                "input_identification": slug,                 # <-- STABLE ID
-                "name": t["name"],
+                "input_identification": slug,  # old stable ID
+                "name": name,
                 "description": t.get("description"),
-                "url": f"{DEVTO_BASE}/t/{slug}",
+                "url": tag_url,
+                "identifications": IdentificationsModel(
+                    input_identification=slug,
+                    title_identification=name,
+                    link_identification=tag_url,
+                    img_link_identification=None,
+                ),
             })
 
         has_more = bool(tags) and (len(tags) >= per_page)
@@ -133,15 +135,10 @@ class DevToAdapter(BaseAdapter):
 
     # ---------- Internals: tag context ----------
     def _fetch_tag_about(self, slug: str) -> Dict[str, Any]:
-        """
-        Scrape /t/<slug> for description and follower count (best effort).
-        """
         url = f"{DEVTO_BASE}/t/{slug}"
         soup = self._get_html(url)
 
-        # Description: try common areas around the tag header
         desc = None
-        # Dev.to tends to put description under .crayons-card or near the header
         cand = (
             soup.select_one(".tag-metadata p") or
             soup.select_one(".crayons-card p") or
@@ -151,7 +148,6 @@ class DevToAdapter(BaseAdapter):
         if cand:
             desc = cand.get_text(" ", strip=True) or None
 
-        # Followers: look for text like "X followers"
         followers = None
         page_text = soup.get_text(" ", strip=True)
         m = re.search(r"([\d,]+)\s+followers", page_text, flags=re.I)
@@ -164,10 +160,6 @@ class DevToAdapter(BaseAdapter):
         return {"url": url, "description": desc, "followers": followers}
 
     def _fetch_tag_feed(self, slug: str, max_items: int = 12) -> List[Dict[str, Any]]:
-        """
-        Parse RSS feed for a tag: https://dev.to/feed/tag/{slug}
-        Returns a list of recent posts with title, url, author, published, summary.
-        """
         feed_url = f"{DEVTO_BASE}/feed/tag/{slug}"
         soup = self._get_xml(feed_url)
 
@@ -177,7 +169,6 @@ class DevToAdapter(BaseAdapter):
             link = (it.link.get_text(strip=True) if it.link else None)
             author = (it.find("dc:creator").get_text(strip=True) if it.find("dc:creator") else None)
             pub = (it.pubDate.get_text(strip=True) if it.pubDate else None)
-            # Normalize pubDate -> ISO if possible
             published_iso = None
             if pub:
                 try:
@@ -187,7 +178,6 @@ class DevToAdapter(BaseAdapter):
                     published_iso = dt.isoformat()
                 except Exception:
                     published_iso = pub
-            # Description/summary (strip HTML-ish)
             summary = None
             if it.description:
                 summary = BeautifulSoup(it.description.get_text(), "html.parser").get_text(" ", strip=True)
@@ -206,25 +196,11 @@ class DevToAdapter(BaseAdapter):
     def get_input(
         self,
         *,
-        input_identification: str | None = None,   # tag slug
+        input_identification: str | None = None,
         slug: str | None = None,
         max_items: int = 12,
         **_: Any
     ) -> Dict[str, Any]:
-        """
-        Resolve a Dev.to tag and return a compact, quiz-friendly payload.
-
-        Returns:
-          {
-            "input_identification": "<slug>",
-            "input_data": {
-              "meta": {"slug": "...", "name": "...", "tag_url": "..."},
-              "about": {"description": "...", "followers": 12345},
-              "latest": [ {title,url,author,published,summary}, ... ]
-            },
-            "updated_at": "...iso..."
-          }
-        """
         now_iso = datetime.now(timezone.utc).isoformat()
         tag = (slug or input_identification or "").strip().lstrip("#").lower()
         if not tag:
@@ -232,9 +208,14 @@ class DevToAdapter(BaseAdapter):
                 "input_identification": "",
                 "input_data": {"error": "missing_tag_slug"},
                 "updated_at": now_iso,
+                "identifications": IdentificationsModel(
+                    input_identification=None,
+                    title_identification=None,
+                    link_identification=None,
+                    img_link_identification=None,
+                ),
             }
 
-        # About (description + followers), and recent posts from RSS
         about = {}
         latest: List[Dict[str, Any]] = []
         try:
@@ -247,7 +228,6 @@ class DevToAdapter(BaseAdapter):
         except Exception:
             latest = []
 
-        # Try to derive a nicer display name
         name = tag.replace("-", " ").title()
 
         input_data: Dict[str, Any] = {
@@ -267,9 +247,15 @@ class DevToAdapter(BaseAdapter):
             "input_identification": tag,
             "input_data": input_data,
             "updated_at": now_iso,
+            "identifications": IdentificationsModel(
+                input_identification=tag,
+                title_identification=name,
+                link_identification=f"{DEVTO_BASE}/t/{tag}",
+                img_link_identification=None,
+            ),
         }
 
-    # ---------- Instructions (concise & creativity-friendly) ----------
+    # ---------- Instructions ----------
     def instructions(self) -> str:
         return (
             "You will receive a Dev.to tag context: a short description, optional follower count, "
@@ -288,10 +274,6 @@ class DevToAdapter(BaseAdapter):
 
     # ---------- Generate textual quiz context ----------
     def generate_context(self, input_data: Dict[str, Any], amount_question: int = 10) -> str:
-        """
-        Produce a compact, human-readable context for question writing, then append
-        self.context_output_structure(amount_question=...).
-        """
         meta = (input_data or {}).get("meta", {})
         about = (input_data or {}).get("about", {})
         latest = (input_data or {}).get("latest", []) or []

@@ -7,6 +7,7 @@ import requests
 
 from src.dal.remote.base import BaseAdapter
 from src.domain.models.preview_model import PreviewModel, EnumMode
+from src.domain.models.indentifications_model import IdentificationsModel  # <-- added
 
 # BLS flat file (same path for http/https)
 BLS_CU_AREA_PATH = "download.bls.gov/pub/time.series/cu/cu.area"
@@ -89,15 +90,22 @@ class BlsgovAdapter(BaseAdapter):
         end = start + per_page
         page_items = areas[start:end]
 
-        topics = [
-            {
-                "input_identification": self._to_series_id(area_code),                 # e.g., CUURS49ASA0
-                "name": area_name,                                   # display city/metro
-                "description": "United States",                      # BLS CPI scope
-                "url": f"https://data.bls.gov/timeseries/{self._to_series_id(area_code)}",
-            }
-            for (area_code, area_name) in page_items
-        ]
+        topics = []
+        for (area_code, area_name) in page_items:
+            tsid = self._to_series_id(area_code)
+            series_url = f"https://data.bls.gov/timeseries/{tsid}"
+            topics.append({
+                "name": area_name,                     # display city/metro
+                "description": "United States",        # BLS CPI scope
+                "url": series_url,
+                # NEW: replace input_identification with identifications
+                "identifications": IdentificationsModel(
+                    input_identification=tsid,
+                    title_identification=area_name,
+                    link_identification=series_url,
+                    img_link_identification=None,
+                ),
+            })
 
         return {
             "topics": topics,
@@ -220,8 +228,13 @@ class BlsgovAdapter(BaseAdapter):
         tsid = (input_identification or "").strip()
         if not tsid:
             return {
-                "input_identification": input_identification,
-                "input_data": {"error": "missing input_identification (series id)"},
+                "identifications": IdentificationsModel(
+                    input_identification=None,
+                    title_identification=None,
+                    link_identification=None,
+                    img_link_identification=None,
+                ),
+                "input_data": {},
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
 
@@ -251,8 +264,13 @@ class BlsgovAdapter(BaseAdapter):
             payload = r.json()
         except Exception as exc:
             return {
-                "input_identification": tsid,
-                "input_data": {"error": f"BLS request failed: {exc}"},
+                "identifications": IdentificationsModel(
+                    input_identification=tsid,
+                    title_identification=None,
+                    link_identification=f"https://data.bls.gov/timeseries/{tsid}",
+                    img_link_identification=None,
+                ),
+                "input_data": {},
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
 
@@ -443,8 +461,16 @@ class BlsgovAdapter(BaseAdapter):
             "stats": stats,
         }
 
+        # Choose a reasonable display title for identifications
+        title_ident = title or (f"CPI — {area_name}" if area_name else tsid)
+
         return {
-            "input_identification": tsid,
+            "identifications": IdentificationsModel(
+                input_identification=tsid,
+                title_identification=title_ident,
+                link_identification=meta["series_url"],
+                img_link_identification=None,
+            ),
             "input_data": input_data,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -543,11 +569,9 @@ class BlsgovAdapter(BaseAdapter):
         context_lines.append(f"- Current streak: up {up_streak or 0} months, down {down_streak or 0} months")
         context_lines.append("")
 
-
         context = "\n".join(context_lines)
 
         # IMPORTANT: append structure instructions required by BaseAdapter
         context += self.context_output_structure(amount_question=amount_question)
 
         return context
-

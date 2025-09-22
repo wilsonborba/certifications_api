@@ -7,6 +7,7 @@ import time
 import requests
 from datetime import datetime, timezone, timedelta
 
+from src.domain.models.indentifications_model import IdentificationsModel
 from src.core.settings import app_settings
 from src.dal.remote.base import BaseAdapter
 from src.domain.models.preview_model import PreviewModel, EnumMode
@@ -187,9 +188,10 @@ class StackExchangeOverflowAdapter(BaseAdapter):
         for q in combined:
             qid = q.get("question_id")
             best_id, worst_id = qid_to_best_worst.get(qid, (None, None))
-            topics.append({
+
+            t_topics = {
                 "type": "question",
-                "input_identification": qid,
+
                 "title": q.get("title"),
                 "score": q.get("score"),
                 "answer_count": q.get("answer_count"),
@@ -200,7 +202,15 @@ class StackExchangeOverflowAdapter(BaseAdapter):
                 "is_answered": q.get("is_answered"),
                 "best_answer_id": best_id,
                 "worst_answer_id": worst_id,
-            })
+            }
+
+            t_topics['identifications'] = IdentificationsModel(
+                input_identification=f"q:{qid}" if qid else None,
+                title_identification=q.get("title"),
+                link_identification=q.get("link"),
+            )
+
+            topics.append(t_topics)
 
         has_more = bool(recent_raw.get("has_more")) or bool(top_raw.get("has_more"))
 
@@ -338,6 +348,7 @@ class StackExchangeOverflowAdapter(BaseAdapter):
         question_block = {
             "id": q.get("question_id"),
             "title": q.get("title"),
+            "title_identification": q.get("title"),
             "body_html": q.get("body"),  # HTML string
             "tags": q.get("tags"),
             "owner": _owner_name(q),
@@ -369,8 +380,7 @@ class StackExchangeOverflowAdapter(BaseAdapter):
         # Canonical input_identification string
         canonical_id = f"q:{qid}" if not aid else f"q:{qid}|a:{aid}"
 
-        return {
-            "input_identification": canonical_id,
+        input_ = {
             "input_data": {
                 "question": question_block,
                 "answers": answers_block,
@@ -379,6 +389,16 @@ class StackExchangeOverflowAdapter(BaseAdapter):
             },
             "updated_at": _now_iso(),
         }
+
+        input_['identifications'] = IdentificationsModel(
+            input_identification=canonical_id,
+            title_identification=q.get("title"),
+            link_identification=q.get("link"),
+            img_link_identification=None,
+        )
+
+        return input_
+        
 
     # ------------ NEW: generate_context (mirror of RedditAdapter) ------------
     def generate_context(self, input_data: Dict[str, Any], amount_question: int = 10) -> str:

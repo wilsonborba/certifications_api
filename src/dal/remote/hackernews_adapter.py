@@ -8,6 +8,7 @@ import re
 import requests
 from bs4 import BeautifulSoup
 
+from src.domain.models.indentifications_model import IdentificationsModel
 from src.dal.remote.base import BaseAdapter
 from src.domain.models.preview_model import PreviewModel, EnumMode
 
@@ -145,6 +146,8 @@ class HackerNewsAdapter(BaseAdapter):
             "comment_count": item.get("descendants"),
         }
 
+        
+
         if with_comments and comments_n > 0:
             topic["top_comments"] = self._fetch_top_comments(item, comments_n)
 
@@ -190,7 +193,13 @@ class HackerNewsAdapter(BaseAdapter):
             for it in items:
                 # normalize
                 norm = self._norm_story(it, section=feed, with_comments=with_comments, comments_n=comments_per_story)
-                norm["input_identification"] = str(norm.get("id")) if norm.get("id") is not None else None
+                norm['identification'] = IdentificationsModel(
+                    input_identification=str(norm["id"]) if norm.get("id") is not None else None,
+                    title_identification=norm.get("title"),
+                    link_identification=norm.get("url"),
+                    img_link_identification=None,
+                )
+
                 norm["topic_type"] = "story"
                 merged.append(norm)
 
@@ -288,8 +297,17 @@ class HackerNewsAdapter(BaseAdapter):
                 "author": author,
                 "comment_count": num_comments,
             }
-            topic["input_identification"] = str(topic["id"]) if topic.get("id") is not None else None
+            # topic["input_identification"] = str(topic["id"]) if topic.get("id") is not None else None
             topic["topic_type"] = "story"
+
+            topic['identification'] = IdentificationsModel(
+                input_identification=str(topic["id"]) if topic.get("id") is not None else None,
+                title_identification=topic.get("title"),
+                link_identification=topic.get("url"),
+                img_link_identification=None,
+            )
+
+
             topics.append(topic)
 
         has_more = (page * per_page) < int(data.get("nbHits", 0))
@@ -316,21 +334,38 @@ class HackerNewsAdapter(BaseAdapter):
         **_: Any,
     ) -> Dict[str, Any]:
         now_iso = datetime.now(timezone.utc).isoformat()
+        
         if input_identification is None:
-            return {
-                "input_identification": "",
+            input_ = {
+                
                 "input_data": {},
                 "updated_at": now_iso,
             }
 
+            input_['identifications'] = IdentificationsModel(
+                input_identification='',
+                title_identification=None,
+                link_identification=None,
+                img_link_identification=None,
+            )
+
         try:
             sid = int(str(input_identification).strip())
         except ValueError:
-            return {
-                "input_identification": str(input_identification),
+            input_2 = {
+                
                 "input_data": {},
                 "updated_at": now_iso,
             }
+
+            input_2['identifications'] = IdentificationsModel(
+                input_identification=str(input_identification),
+                title_identification=None,
+                link_identification=None,
+                img_link_identification=None,
+            )
+
+            return input_2
 
         try:
             item = self._fetch_item(sid)
@@ -338,11 +373,19 @@ class HackerNewsAdapter(BaseAdapter):
             item = {}
 
         if not item:
-            return {
-                "input_identification": str(sid),
+            input_3 = {
+                
                 "input_data": {},
                 "updated_at": now_iso,
             }
+            input_3['identifications'] = IdentificationsModel(
+                input_identification=str(sid),
+                title_identification=None,
+                link_identification=None,
+                img_link_identification=None,
+            )
+
+            return input_3
 
         tag = self._tag_from_title_or_type(item)
         text = item.get("text") if tag in ("ask", "show") else None
@@ -408,11 +451,20 @@ class HackerNewsAdapter(BaseAdapter):
                 "text": hn_page_plaintext,
             }
 
-        return {
-            "input_identification": str(sid),
+        input_4 = {
+            
             "input_data": input_data,
             "updated_at": now_iso,
         }
+
+        input_4['identifications'] = IdentificationsModel(
+            input_identification=str(sid),
+            title_identification=item.get("title"),
+            link_identification=external_url,
+            img_link_identification=None,
+        )
+
+        return input_4
 
     def instructions(self) -> str:
         return (

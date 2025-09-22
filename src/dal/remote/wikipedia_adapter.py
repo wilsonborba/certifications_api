@@ -7,9 +7,11 @@ from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse, unquote
 import re
 import requests
+import time as _time
 
 from src.dal.remote.base import BaseAdapter
 from src.domain.models.preview_model import PreviewModel, EnumMode
+from src.domain.models.indentifications_model import IdentificationsModel  # <-- added
 
 # --- API endpoints ---
 MW_API = "https://en.wikipedia.org/w/api.php"  # MediaWiki action API
@@ -70,10 +72,7 @@ class WikipediaAdapter(BaseAdapter):
         # Configure in your settings; Wikimedia requires a descriptive UA with contact
         # e.g., WIKIMEDIA_USER_AGENT="Asodya/1.0 (https://yourdomain; contact@yourdomain)"
         return "AsodyaBot/1.0 (https://asodya.com; support@asodya.com)"
-    
 
-
-    # ---------------- low-level helpers ----------------
     def _mw_get(self, params: Dict[str, Any]) -> Dict[str, Any]:
         p = {"format": "json", "formatversion": 2, **params}
         r = requests.get(
@@ -110,7 +109,7 @@ class WikipediaAdapter(BaseAdapter):
             return unquote(t) if t else None
         except Exception:
             return None
-        
+
     def _fetch_related_pages(self, title: str, *, limit: int = 10, thumb_size: int = 240) -> List[Dict[str, Any]]:
         """
         Use MediaWiki search 'morelike:<title>' to approximate related pages.
@@ -139,7 +138,6 @@ class WikipediaAdapter(BaseAdapter):
                     "url": p.get("fullurl") or f"https://en.wikipedia.org/wiki/{t.replace(' ', '_')}",
                     "thumbnail": (p.get("thumbnail") or {}).get("source"),
                 })
-            # The generator order is already relevance-sorted; truncate just in case
             return related[:limit]
         except Exception:
             return []
@@ -170,13 +168,22 @@ class WikipediaAdapter(BaseAdapter):
             hits = (res.get("query") or {}).get("search") or []
             for h in hits:
                 title = h.get("title")
+                if not title:
+                    continue
                 snippet = _strip_html(h.get("snippet"))
+                link = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
                 topics.append({
                     "type": "article",
-                    "input_identification": title,
                     "title": title,
                     "description": snippet or None,
-                    "url": f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}",
+                    "url": link,
+                    # NEW: identifications replaces input_identification
+                    "identifications": IdentificationsModel(
+                        input_identification=title,
+                        title_identification=title,
+                        link_identification=link,
+                        img_link_identification=None,
+                    ),
                     "score": h.get("score"),
                 })
             return {
@@ -207,9 +214,8 @@ class WikipediaAdapter(BaseAdapter):
             status = getattr(e.response, "status_code", None)
             # Graceful fallbacks for 403/429/5xx or empty data
             if status in (403, 429, 500, 502, 503, 504):
-                # small backoff on 429
                 if status == 429:
-                    time.sleep(1.0)
+                    _time.sleep(1.0)  # small backoff
                 # Featured feed "mostread"
                 feed_url = FEED_FEATURED.format(
                     year=str(yd.year), month=f"{yd.month:02d}", day=f"{yd.day:02d}"
@@ -217,14 +223,14 @@ class WikipediaAdapter(BaseAdapter):
                 try:
                     feed = self._rest_get(feed_url)
                     mostread = (feed.get("mostread") or {}).get("articles") or []
-                    # Normalize to same shape as pageviews top
                     items = [{"article": a.get("normalizedtitle") or a.get("title"),
                               "views": a.get("views", 0)} for a in mostread if a.get("title")]
                 except Exception:
                     items = []
             else:
-                # re-raise unknown errors
                 raise
+        except Exception:
+            items = []
 
         # Paginate over the list (whether pageviews or mostread)
         start, end = (page - 1) * per_page, (page - 1) * per_page + per_page
@@ -234,14 +240,21 @@ class WikipediaAdapter(BaseAdapter):
             if raw in ("Main_Page", "-", ""):
                 continue
             title_disp = raw.replace("_", " ")
+            link = f"https://en.wikipedia.org/wiki/{raw or title_disp.replace(' ', '_')}"
             topics.append({
                 "type": "article",
-                "input_identification": title_disp,
                 "title": title_disp,
                 "description": (f"Top viewed yesterday • {it.get('views', 0)} views"
                                 if it.get("views") is not None else None),
-                "url": f"https://en.wikipedia.org/wiki/{raw or title_disp.replace(' ', '_')}",
+                "url": link,
                 "views": it.get("views"),
+                # NEW: identifications replaces input_identification
+                "identifications": IdentificationsModel(
+                    input_identification=title_disp,
+                    title_identification=title_disp,
+                    link_identification=link,
+                    img_link_identification=None,
+                ),
             })
         has_more = end < len(items)
 
@@ -258,7 +271,7 @@ class WikipediaAdapter(BaseAdapter):
     # ---------------- input ----------------
     def get_input(
         self,
-        *,
+        *args: Any,
         input_identification: str | None = None,   # preferred: page title (normalized, spaces ok)
         permalink_or_url: str | None = None,
         include_sections: bool = True,
@@ -269,7 +282,7 @@ class WikipediaAdapter(BaseAdapter):
         """
         Build a canonical article bundle:
           {
-            "input_identification": "<Title>",
+            "identifications": IdentificationsModel(...),
             "input_data": {
               "page": { pageid, title, description, lang, url, extract, thumbnail },
               "sections": [ {index, line, anchor} ],
@@ -278,85 +291,101 @@ class WikipediaAdapter(BaseAdapter):
             },
             "updated_at": "..."
           }
+          On error, input_data is {} (empty).
         """
         title = (input_identification or "").strip() if input_identification else None
         if not title and permalink_or_url:
             title = self._title_from_url(permalink_or_url)
 
         if not title:
-            return {"error": "missing input_identification and permalink_or_url"}
+            # ERROR: missing identifiers -> empty input_data
+            return {
+                "identifications": IdentificationsModel(
+                    input_identification=None,
+                    title_identification=None,
+                    link_identification=None,
+                    img_link_identification=None,
+                ),
+                "input_data": {},
+                "updated_at": _now_iso(),
+            }
 
-        # 1) REST summary (fast, language-agnostic metadata)
-        sum_data = self._rest_get(REST_SUMMARY.format(title=title.replace(" ", "_")))
-        # Normalize basic fields
-        pageid = sum_data.get("pageid")
-        norm_title = sum_data.get("title") or title
-        description = sum_data.get("description")
-        lang = sum_data.get("lang") or "en"
-        canonicalurl = sum_data.get("content_urls", {}).get("desktop", {}).get("page") or f"https://en.wikipedia.org/wiki/{norm_title.replace(' ', '_')}"
-        thumbnail = (sum_data.get("thumbnail") or {}).get("source")
-
-        # 2) Lead extract & thumbnail via action=query (for plaintext + guaranteed thumb)
-        q_params = {
-            "action": "query",
-            "prop": "extracts|pageimages",
-            "explaintext": 1,
-            "exintro": 1,
-            "titles": norm_title,
-            "piprop": "thumbnail|name",
-            "pithumbsize": thumb_size,
-        }
-        q_data = self._mw_get(q_params)
-        q_pages = (q_data.get("query") or {}).get("pages") or []
+        # Try fetching; if anything fails, return empty input_data but keep identifications
+        norm_title = title
+        canonicalurl = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
+        thumbnail = None
+        pageid = None
+        description = None
+        lang = "en"
         extract = None
-        if q_pages:
-            p0 = q_pages[0]
-            extract = p0.get("extract") or extract
-            # prefer p0 thumbnail if REST lacked one
-            if not thumbnail:
-                tn = (p0.get("thumbnail") or {}).get("source")
-                if tn:
-                    thumbnail = tn
-
-        # 3) Sections (parse API)
         sections: List[Dict[str, Any]] = []
-        if include_sections:
-            sec_res = self._mw_get({
-                "action": "parse",
-                "page": norm_title,
-                "prop": "sections",
-                "disablelimitreport": 1,
-            })
-            for s in (sec_res.get("parse") or {}).get("sections") or []:
-                sections.append({
-                    "index": s.get("index"),
-                    "line": s.get("line"),
-                    "anchor": s.get("anchor"),
-                })
-
-        # 4) Categories
         categories: List[str] = []
-        if include_categories:
-            cat_res = self._mw_get({
-                "action": "query",
-                "prop": "categories",
-                "cllimit": 50,
-                "titles": norm_title,
-            })
-            for p in (cat_res.get("query") or {}).get("pages") or []:
-                for c in (p.get("categories") or []):
-                    name = c.get("title")
-                    if name:
-                        categories.append(name)
-
-        # 5) Related (REST)
         related: List[Dict[str, Any]] = []
-        if include_related:
-            related = self._fetch_related_pages(norm_title, limit=10, thumb_size=thumb_size)
 
-        return {
-            "input_identification": norm_title,
-            "input_data": {
+        try:
+            # 1) REST summary
+            sum_data = self._rest_get(REST_SUMMARY.format(title=title.replace(" ", "_")))
+            pageid = sum_data.get("pageid")
+            norm_title = sum_data.get("title") or title
+            description = sum_data.get("description")
+            lang = sum_data.get("lang") or "en"
+            canonicalurl = sum_data.get("content_urls", {}).get("desktop", {}).get("page") or canonicalurl
+            thumbnail = (sum_data.get("thumbnail") or {}).get("source")
+
+            # 2) Lead extract & thumbnail via action=query
+            q_params = {
+                "action": "query",
+                "prop": "extracts|pageimages",
+                "explaintext": 1,
+                "exintro": 1,
+                "titles": norm_title,
+                "piprop": "thumbnail|name",
+                "pithumbsize": thumb_size,
+            }
+            q_data = self._mw_get(q_params)
+            q_pages = (q_data.get("query") or {}).get("pages") or []
+            if q_pages:
+                p0 = q_pages[0]
+                extract = p0.get("extract") or extract
+                if not thumbnail:
+                    tn = (p0.get("thumbnail") or {}).get("source")
+                    if tn:
+                        thumbnail = tn
+
+            # 3) Sections
+            if include_sections:
+                sec_res = self._mw_get({
+                    "action": "parse",
+                    "page": norm_title,
+                    "prop": "sections",
+                    "disablelimitreport": 1,
+                })
+                for s in (sec_res.get("parse") or {}).get("sections") or []:
+                    sections.append({
+                        "index": s.get("index"),
+                        "line": s.get("line"),
+                        "anchor": s.get("anchor"),
+                    })
+
+            # 4) Categories
+            if include_categories:
+                cat_res = self._mw_get({
+                    "action": "query",
+                    "prop": "categories",
+                    "cllimit": 50,
+                    "titles": norm_title,
+                })
+                for p in (cat_res.get("query") or {}).get("pages") or []:
+                    for c in (p.get("categories") or []):
+                        name = c.get("title")
+                        if name:
+                            categories.append(name)
+
+            # 5) Related
+            if include_related:
+                related = self._fetch_related_pages(norm_title, limit=10, thumb_size=thumb_size)
+
+            input_data = {
                 "page": {
                     "pageid": pageid,
                     "title": norm_title,
@@ -369,9 +398,31 @@ class WikipediaAdapter(BaseAdapter):
                 "sections": sections,
                 "categories": categories,
                 "related": related,
-            },
-            "updated_at": _now_iso(),
-        }
+            }
+
+            return {
+                "identifications": IdentificationsModel(
+                    input_identification=norm_title,
+                    title_identification=norm_title,
+                    link_identification=canonicalurl,
+                    img_link_identification=thumbnail,
+                ),
+                "input_data": input_data,
+                "updated_at": _now_iso(),
+            }
+
+        except Exception:
+            # Any fetch/parse error -> empty input_data, but keep best-effort identifications
+            return {
+                "identifications": IdentificationsModel(
+                    input_identification=norm_title or title,
+                    title_identification=norm_title or title,
+                    link_identification=canonicalurl,
+                    img_link_identification=thumbnail,
+                ),
+                "input_data": {},  # <- EMPTY on error
+                "updated_at": _now_iso(),
+            }
 
     # ---------------- context ----------------
     def generate_context(self, input_data: Dict[str, Any], amount_question: int = 10) -> str:
@@ -394,7 +445,6 @@ class WikipediaAdapter(BaseAdapter):
 
         if sections:
             context.append("Key sections:")
-            # list a handful to keep it compact
             for s in sections[:8]:
                 line = s.get("line") or ""
                 context.append(f"- {line}")
@@ -411,5 +461,3 @@ class WikipediaAdapter(BaseAdapter):
 
         context.append(self.context_output_structure(amount_question=amount_question))
         return "\n".join(context)
-    
-    

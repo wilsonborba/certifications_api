@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple, List
 import requests
 
+from src.domain.models.indentifications_model import IdentificationsModel
 from src.core.settings import app_settings
 from src.dal.remote.base import BaseAdapter
 from src.domain.models.preview_model import EnumMode, PreviewModel
@@ -91,10 +92,11 @@ class RedditAdapter(BaseAdapter):
         trends: list[dict] = []
         for c in children:
             d = c.get("data", {}) or {}
-            trends.append({
+
+            t_community = {
                 "type": "subreddit",
                 "topic_type": "subreddit",
-                "input_identification": d.get("name"),  # e.g., t5_2qh33
+                
                 "name": d.get("display_name_prefixed") or d.get("display_name"),
                 "display_name": d.get("display_name"),
                 "title": d.get("title"),
@@ -102,7 +104,16 @@ class RedditAdapter(BaseAdapter):
                 "url": f"https://www.reddit.com{d.get('url')}" if d.get("url") else None,
                 "icon_img": d.get("community_icon") or d.get("icon_img"),
                 "nsfw": d.get("over18"),
-            })
+            }
+
+            t_community['identifications'] = IdentificationsModel(
+                input_identification=d.get("name"),  # e.g., t5_2qh33
+                title_identification=d.get("title"),
+                link_identification=t_community["url"],
+                img_link_identification=t_community["icon_img"],
+            )
+
+            trends.append(t_community)
         return trends, next_after
 
     def _kind_hot(self, *, limit: int, after: str | None) -> tuple[list[dict], str | None]:
@@ -110,10 +121,10 @@ class RedditAdapter(BaseAdapter):
         trends: list[dict] = []
         for c in children:
             d = c.get("data", {}) or {}
-            trends.append({
+
+            t_hot = {
                 "type": "post",
                 "topic_type": "post",
-                "input_identification": d.get("name"),  # e.g., t3_abc123
                 "title": d.get("title"),
                 "subreddit": d.get("subreddit_name_prefixed"),
                 "score": d.get("score"),
@@ -124,7 +135,16 @@ class RedditAdapter(BaseAdapter):
                 "author": d.get("author"),
                 "thumbnail": d.get("thumbnail") if (d.get("thumbnail") or "").startswith("http") else None,
                 "nsfw": d.get("over_18"),
-            })
+            }
+
+            t_hot['identifications'] = IdentificationsModel(
+                input_identification=d.get("name"),  # e.g., t3_abc123
+                title_identification=d.get("title"),
+                link_identification=t_hot["url"],
+                img_link_identification=t_hot["thumbnail"],
+            )
+
+            trends.append(t_hot)
         return trends, next_after
 
     def _kind_top(self, *, limit: int, after: str | None, time_window: str | None) -> tuple[list[dict], str | None]:
@@ -133,10 +153,10 @@ class RedditAdapter(BaseAdapter):
         trends: list[dict] = []
         for c in children:
             d = c.get("data", {}) or {}
-            trends.append({
+            t_top = {
                 "type": "post",
                 "topic_type": "post",
-                "input_identification": d.get("name"),  # e.g., t3_abc123
+
                 "title": d.get("title"),
                 "subreddit": d.get("subreddit_name_prefixed"),
                 "score": d.get("score"),
@@ -148,7 +168,16 @@ class RedditAdapter(BaseAdapter):
                 "thumbnail": d.get("thumbnail") if (d.get("thumbnail") or "").startswith("http") else None,
                 "nsfw": d.get("over_18"),
                 "time_window": t,
-            })
+            }
+
+            t_top['identifications'] = IdentificationsModel(
+                input_identification=d.get("name"),  # e.g., t3_abc123
+                title_identification=d.get("title"),
+                link_identification=t_top["url"],
+                img_link_identification=t_top["thumbnail"],
+            )
+
+            trends.append(t_top)
         return trends, next_after
 
     
@@ -229,13 +258,14 @@ class RedditAdapter(BaseAdapter):
             except Exception:
                 pass
 
-            return {
+            input_ = {
                 # "topic_type": "post",
-                "input_identification": input_identification,
+                
                 "input_data": {
                     "post": {
                     "id": post.get("name"),
                     "title": post.get("title"),
+                    
                     "selftext": post.get("selftext"),
                     "selftext_html": post.get("selftext_html"),
                     "author": post.get("author"),
@@ -255,6 +285,15 @@ class RedditAdapter(BaseAdapter):
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
 
+            input_['identifications'] = IdentificationsModel(
+                input_identification=input_identification,  # e.g., t3_abc123
+                title_identification=post.get("title"),
+                link_identification=input_.get("input_data", {}).get("post", {}).get("url", None),
+                img_link_identification=input_.get("input_data", {}).get("post", {}).get("thumbnail", None),
+            )
+
+            return input_
+
         # SUBREDDITS (t5_*)
         if input_identification.startswith("t5_") or topic_type == "subreddit":
             # /api/info?id=t5_xxx -> basic about data (but not all about fields)
@@ -271,9 +310,10 @@ class RedditAdapter(BaseAdapter):
             hot = []
             for c in hot_children:
                 d = (c.get("data") or {})
-                hot.append({
+
+                t_hot_2 = {
                     "topic_type": "post",
-                    "input_identification": d.get("name"),
+
                     "title": d.get("title"),
                     "permalink": d.get("permalink"),
                     "url": f"https://www.reddit.com{d.get('permalink')}" if d.get("permalink") else d.get("url"),
@@ -281,25 +321,52 @@ class RedditAdapter(BaseAdapter):
                     "score": d.get("score"),
                     "num_comments": d.get("num_comments"),
                     "thumbnail": d.get("thumbnail") if (d.get("thumbnail") or "").startswith("http") else None,
-                })
-            return {
+                }
+
+                t_hot_2['identifications'] = IdentificationsModel(
+                    input_identification=d.get("name"),  # e.g., t3_abc123
+                    title_identification=d.get("title"),
+                    link_identification=t_hot_2["url"],
+                    img_link_identification=t_hot_2["thumbnail"],
+                )
+
+                hot.append(t_hot_2)
+           
+            input_2 = {
                 # "topic_type": "subreddit",
-                "input_identification": input_identification,
+                
                 "input_data": {
+                    
                 "about": (about.get("data") or {}),
                 "hot": hot
                 },
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
 
-        return {
-            
-            "input_identification": input_identification,
+            input_2['identifications'] = IdentificationsModel(
+                input_identification=input_identification,  # e.g., t3_abc123
+                title_identification=None,
+                link_identification=None,
+                img_link_identification=None,
+            )
 
+            return input_2
+
+        input_3 = {
+            
+ 
             "input_data": {
+                
             },
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+
+        input_3['identifications'] = IdentificationsModel(
+            input_identification=input_identification,
+            title_identification=None,
+            link_identification=None,
+            img_link_identification=None,
+        )
 
 
 

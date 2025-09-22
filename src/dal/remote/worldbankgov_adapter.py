@@ -7,6 +7,7 @@ import math
 
 from src.dal.remote.base import BaseAdapter
 from src.domain.models.preview_model import PreviewModel, EnumMode
+from src.domain.models.indentifications_model import IdentificationsModel  # <-- added
 
 WB_COUNTRIES_URL = "https://api.worldbank.org/v2/country"  # paginated; add ?format=json
 WB_INDICATOR_URL = "https://api.worldbank.org/v2/country/{code}/indicator/{indicator}"  # ?format=json
@@ -48,7 +49,7 @@ class WorldbankgovAdapter(BaseAdapter):
             "Keep questions short and answerable from the provided context."
         )
 
-    # ---------------- topics (unchanged) ----------------
+    # ---------------- topics (updated to use identifications) ----------------
     def get_topics(
         self,
         *,
@@ -71,17 +72,24 @@ class WorldbankgovAdapter(BaseAdapter):
         start, end = (page - 1) * per_page, (page - 1) * per_page + per_page
         slice_ = countries[start:end]
 
-        topics = [
-            {
-                # stable id = ISO3 code
-                "input_identification": c["id"],
-                "name": c["name"],  # human display
-                # put region or income level in description (compact context)
-                "description": (c.get("region") or "") or None,
-                "url": f"https://api.worldbank.org/v2/country/{c['iso2Code']}?format=json",
-            }
-            for c in slice_
-        ]
+        topics: List[Dict[str, Any]] = []
+        for c in slice_:
+            iso3 = c["id"]                # stable id
+            iso2 = c["iso2Code"]
+            name = c["name"]
+            region = (c.get("region") or "") or None
+            url = f"https://api.worldbank.org/v2/country/{iso2}?format=json"
+            topics.append({
+                "name": name,                # human display
+                "description": region,       # compact context
+                "url": url,
+                "identifications": IdentificationsModel(
+                    input_identification=iso3,
+                    title_identification=name,
+                    link_identification=url,
+                    img_link_identification=None,
+                ),
+            })
 
         return {
             "topics": topics,
@@ -130,7 +138,7 @@ class WorldbankgovAdapter(BaseAdapter):
         collected.sort(key=lambda x: x["name"].lower())
         return collected
 
-    # ---------------- new: get_input ----------------
+    # ---------------- new: get_input (updated to use identifications and {} on error) ----------------
     def get_input(
         self,
         *,
@@ -143,27 +151,32 @@ class WorldbankgovAdapter(BaseAdapter):
         """
         Fetch country facts + a compact set of indicator series.
         - Accepts ISO3/ISO2/name via input_identification or country_code_or_name.
-        - Returns:
+        - Returns (success):
           {
-            "input_identification": "<ISO3>",
-            "input_data": {
-              "country": {...},
-              "indicators": {
-                 "<code>": {
-                    "label": "...",
-                    "latest": {"year": "YYYY", "value": <float or None>},
-                    "series": [{"year":"YYYY","value":...}, ...]   # descending years, capped
-                 },
-                 ...
-              }
-            },
+            "identifications": IdentificationsModel(...),
+            "input_data": {...},
+            "updated_at": "..."
+          }
+        - Returns (error):
+          {
+            "identifications": IdentificationsModel(...),
+            "input_data": {},   # EMPTY per requirement
             "updated_at": "..."
           }
         """
         # ---- resolve which country ----
         ident = input_identification or country_code_or_name
         if not ident:
-            return {"error": "missing input_identification and country_code_or_name"}
+            return {
+                "identifications": IdentificationsModel(
+                    input_identification=None,
+                    title_identification=None,
+                    link_identification=None,
+                    img_link_identification=None,
+                ),
+                "input_data": {},  # empty on error
+                "updated_at": _now_iso(),
+            }
 
         # Pull all to match flexibly (ISO3, ISO2, or name)
         countries = self._fetch_all_countries()
@@ -181,11 +194,21 @@ class WorldbankgovAdapter(BaseAdapter):
             # try contains on name as a fallback (e.g., "Congo")
             cands = [c for c in countries if ident_norm in (c.get("name") or "").strip().lower()]
         if not cands:
-            return {"error": "country not found", "input_identification": ident}
+            return {
+                "identifications": IdentificationsModel(
+                    input_identification=ident,
+                    title_identification=None,
+                    link_identification=None,
+                    img_link_identification=None,
+                ),
+                "input_data": {},  # empty on error
+                "updated_at": _now_iso(),
+            }
 
         country = cands[0]  # choose the first best match
         iso3 = country.get("id")
         iso2 = country.get("iso2Code")
+        name = country.get("name")
 
         # ---- fetch richer country details from WB country endpoint (single) ----
         details = self._fetch_country_detail(iso2 or iso3)
@@ -202,22 +225,31 @@ class WorldbankgovAdapter(BaseAdapter):
                 "series": series,         # descending by year, numeric values only where present
             }
 
-        return {
-            "input_identification": iso3 or iso2 or ident,
-            "input_data": {
-                "country": {
-                    "iso3": iso3,
-                    "iso2": iso2,
-                    "name": country.get("name"),
-                    "region": country.get("region"),
-                    "incomeLevel": country.get("incomeLevel"),
-                    "capitalCity": country.get("capitalCity"),
-                    "latitude": country.get("latitude"),
-                    "longitude": country.get("longitude"),
-                    "detail": details,  # includes WB’s full country object for completeness
-                },
-                "indicators": ind_payload,
+        input_data = {
+            "country": {
+                "iso3": iso3,
+                "iso2": iso2,
+                "name": name,
+                "region": country.get("region"),
+                "incomeLevel": country.get("incomeLevel"),
+                "capitalCity": country.get("capitalCity"),
+                "latitude": country.get("latitude"),
+                "longitude": country.get("longitude"),
+                "detail": details,  # includes WB’s full country object for completeness
             },
+            "indicators": ind_payload,
+        }
+
+        link = f"https://api.worldbank.org/v2/country/{(iso2 or iso3)}?format=json"
+
+        return {
+            "identifications": IdentificationsModel(
+                input_identification=(iso3 or iso2 or ident),
+                title_identification=name,
+                link_identification=link,
+                img_link_identification=None,
+            ),
+            "input_data": input_data,
             "updated_at": _now_iso(),
         }
 
@@ -303,12 +335,9 @@ class WorldbankgovAdapter(BaseAdapter):
         def _fmt_val(v: Optional[float]) -> str:
             if v is None or (isinstance(v, float) and (math.isnan(v) or math.isinf(v))):
                 return "n/a"
-            # Heuristic formatting: big numbers with separators, percents/years handled by label (kept simple)
-            # Keep raw for GDP per capita/current USD but add grouping
             try:
                 if abs(v) >= 1000:
                     return f"{v:,.0f}"
-                # show one decimal if < 1000 but not an int
                 if float(v).is_integer():
                     return f"{int(v)}"
                 return f"{v:.1f}"
@@ -331,7 +360,6 @@ class WorldbankgovAdapter(BaseAdapter):
 
             context.append("")
             context.append("Recent series (year → value):")
-            # keep to a compact per-indicator listing
             for code, bundle in inds.items():
                 label = bundle.get("label") or code
                 series = bundle.get("series") or []
@@ -341,7 +369,6 @@ class WorldbankgovAdapter(BaseAdapter):
                 context.append(f"- {label}: " + "; ".join(pairs))
 
         context.append("")
-        # Append your standard output structure prompt
         context.append(self.context_output_structure(amount_question=amount_question))
 
         return "\n".join(context)

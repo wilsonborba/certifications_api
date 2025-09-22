@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import requests
 from bs4 import BeautifulSoup
 
+from src.domain.models.indentifications_model import IdentificationsModel
 from src.dal.remote.base import BaseAdapter
 from src.domain.models.preview_model import PreviewModel, EnumMode
 from src.core.logs import error
@@ -78,10 +79,10 @@ class ChessComAdapter(BaseAdapter):
         for cat in categories:
             lst = data.get(cat) or []
             for p in lst:
-                players.append({
+            
+                t_players = {
                     "type": "player",
                     "category": cat,
-                    "input_identification": p.get("username"),
                     "username": p.get("username"),
                     "title": p.get("title"),           # e.g., GM/IM/FM
                     "score": p.get("score"),           # leaderboard points
@@ -90,7 +91,16 @@ class ChessComAdapter(BaseAdapter):
                     "status": p.get("status"),
                     "icon": p.get("avatar"),
                     "url": p.get("url"),
-                })
+                }
+
+                t_players['identifications'] = IdentificationsModel(
+                    input_identification=p.get("username"),
+                    title_identification=f"{p.get('username')} {p.get('title')}",
+                    link_identification=p.get("url"),
+                    img_link_identification=p.get("avatar"),
+                )
+
+                players.append(t_players)
         return players
 
     # ---------- Scraper: news ----------
@@ -155,15 +165,24 @@ class ChessComAdapter(BaseAdapter):
                 if time_el:
                     published_iso = _to_iso(time_el.get("datetime") or time_el.get_text(strip=True))
 
-            news.append({
+            t_news = {
                 "type": "news",
-                "input_identification": self._news_id_from_url(url),
+
                 "title": title,
                 "url": url,
                 "author": author,
                 "published": published_iso,
                 "image": img,
-            })
+            }
+
+            t_news['identifications'] = IdentificationsModel(
+                input_identification= self._news_id_from_url(url),
+                title_identification=title,
+                link_identification=url,
+                img_link_identification=img,
+            )
+
+            news.append(t_news)
 
         # Fallback if selector missed newer DOM variants; try generic <article> cards
         if not news:
@@ -189,15 +208,25 @@ class ChessComAdapter(BaseAdapter):
                     if time_el:
                         published_iso = _to_iso(time_el.get("datetime") or time_el.get_text(strip=True))
 
-                news.append({
+
+                t_news_2 = {
                     "type": "news",
-                    "input_identification": self._news_id_from_url(url),
+
                     "title": title,
                     "url": url,
                     "author": author,
                     "published": published_iso,
                     "image": img,
-                })
+                }
+
+                t_news_2['identifications'] = IdentificationsModel(
+                    input_identification= self._news_id_from_url(url),
+                    title_identification=title,
+                    link_identification=url,
+                    img_link_identification=img,
+                )
+
+                news.append(t_news_2)
 
         return news
 
@@ -355,12 +384,20 @@ class ChessComAdapter(BaseAdapter):
                 "key_points": body_blocks,
             }
 
-            return {
-                "input_identification": ident,
+            input_ = {
                 "input_data": input_data,
                 "updated_at": now_iso,
             }
 
+            input_['identifications'] = IdentificationsModel(
+                input_identification=ident,
+                title_identification=title,
+                link_identification=ident,
+                img_link_identification=hero,
+            )
+            
+            return input_
+        
         # If the caller already told us it's a player
         if topic_type == "player":
             username = username or ident
@@ -373,7 +410,15 @@ class ChessComAdapter(BaseAdapter):
             # Normalize username casing (Chess.com usernames are case-insensitive)
             uname = (ident or "").strip().lstrip("@")
             if not uname:
-                return {"input_identification": "", "input_data": {"error": "missing username"}, "updated_at": now_iso}
+                input_2 = { "input_data": {}, "updated_at": now_iso}
+                input_2['identifications'] = IdentificationsModel(
+                    input_identification="",
+                    title_identification=None,
+                    link_identification=None,
+                    img_link_identification=None,
+                )
+
+                return input_2
 
             profile = None
             stats = None
@@ -381,7 +426,17 @@ class ChessComAdapter(BaseAdapter):
             try:
                 profile = self._get_json(f"{CHESS_API_BASE}/player/{uname}")
             except Exception as e:
-                return {"input_identification": uname, "input_data": {"error": f"profile_fetch_failed: {e}"}, "updated_at": now_iso}
+                input_3 = {"updated_at": now_iso}
+
+                input_3['identifications'] = IdentificationsModel(
+                    input_identification=uname,
+                    title_identification=None,
+                    link_identification=None,
+                    img_link_identification=None,
+                )
+
+                return input_3
+
 
             try:
                 stats = self._get_json(f"{CHESS_API_BASE}/player/{uname}/stats")
@@ -425,6 +480,7 @@ class ChessComAdapter(BaseAdapter):
                 "type": "player",
                 "username": profile.get("username") or uname,
                 "title": profile.get("title"),
+                
                 "name": profile.get("name"),
                 "status": profile.get("status"),
                 "country": country_name or profile.get("country"),
@@ -436,18 +492,36 @@ class ChessComAdapter(BaseAdapter):
                 "ratings": ratings,
             }
 
-            return {
-                "input_identification": uname,
+            input_4 = {
                 "input_data": input_data,
                 "updated_at": now_iso,
             }
 
+            input_4['identifications'] = IdentificationsModel(
+                input_identification=uname,
+                title_identification=f"{profile.get('username')} {profile.get('title')}",
+                link_identification=profile.get("url"),
+                img_link_identification=profile.get("avatar"),
+            )
+
+            return input_4
+
         # Fallback (nothing resolved)
-        return {
-            "input_identification": input_identification or "",
-            "input_data": {"error": "unable_to_resolve_input"},
+        input_5 = {
+
+            "input_data": {},
             "updated_at": now_iso,
         }
+
+        input_5['identifications'] = IdentificationsModel(
+            input_identification=input_identification,
+            title_identification=None,
+            link_identification=None,
+            img_link_identification=None,
+        )
+
+        return input_5
+
 
     # ---------- Instructions: concise & creativity-friendly ----------
     def instructions(self) -> str:

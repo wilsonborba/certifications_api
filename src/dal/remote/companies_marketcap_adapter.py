@@ -7,6 +7,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
+from domain.models.indentifications_model import IdentificationsModel
 from src.dal.remote.base import BaseAdapter
 from src.domain.models.preview_model import PreviewModel, EnumMode
 
@@ -62,14 +63,22 @@ class CompaniesMarketCapAdapter(BaseAdapter):
             # /meta-platforms/marketcap/ -> 'meta-platforms'
             slug = href.strip("/").split("/", 1)[0] if "/" in href.strip("/") else href.strip("/")
 
-            topics.append({
+            t_topics = {
                 "type": "company",
                 "topic_type": "company",
-                "input_identification": slug,
                 "name": name,
                 "logo": logo_url,
                 "url": url,
-            })
+            }
+
+            t_topics["identifications"] = IdentificationsModel(
+                input_identification=slug,
+                title_identification=name,
+                link_identification=url,
+                img_link_identification=logo_url,
+            )
+
+            topics.append(t_topics)
 
         return topics
 
@@ -128,21 +137,37 @@ class CompaniesMarketCapAdapter(BaseAdapter):
             # canonical marketcap page for a company slug
             page_url = f"{BASE}/{ident}/marketcap/"
         else:
-            return {
-                "input_identification": "",
+            input_3 =  {
+                
                 "input_data": {"error": "missing identification or url"},
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
+
+            input_3['identifications'] = IdentificationsModel(
+                input_identification="",
+                title_identification=None,
+                link_identification=None,
+                img_link_identification=None,
+            )
 
         # Fetch & parse
         try:
             soup = self._get_html(page_url)
         except Exception as e:
-            return {
-                "input_identification": ident or page_url,
+            input_ = {
+                
                 "input_data": {"error": f"fetch_failed: {e}"},
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
+
+            input_['identifications'] = IdentificationsModel(
+                input_identification=ident if ident else None,
+                title_identification=None,
+                link_identification=page_url,
+                img_link_identification=None,
+            )
+
+            return input_
 
         # Helpers
         def text_of(sel: str) -> Optional[str]:
@@ -268,11 +293,20 @@ class CompaniesMarketCapAdapter(BaseAdapter):
             "eod_sources": eod_sources,  # [{reported_marketcap, usd, source, source_url}, ...]
         }
 
-        return {
-            "input_identification": ident or page_url,
+        input_2 = {
+            
             "input_data": input_data,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+
+        input_2['identifications'] = IdentificationsModel(
+            input_identification=ident if ident else None,
+            title_identification=name,
+            link_identification=page_url,
+            img_link_identification=logo,
+        )
+
+        return input_2
 
     # ---------- Instructions (short & flexible) ----------
     def instructions(self) -> str:

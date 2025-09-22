@@ -7,6 +7,7 @@ import requests
 
 from src.dal.remote.base import BaseAdapter
 from src.domain.models.preview_model import PreviewModel, EnumMode
+from src.domain.models.indentifications_model import IdentificationsModel  # <-- added
 
 BASE = "https://countriesnow.space/api/v0.1"
 HEADERS = {"User-Agent": "Asodya-Adapters/1.0 (+https://asodya.com)"}
@@ -75,13 +76,22 @@ class CountriesnowAdapter(BaseAdapter):
         def _slug(s: str) -> str:
             return s.lower().strip().replace(" ", "-")
 
-        topics = [{
-            # IMPORTANT: stable identification that get_input can reverse
-            "input_identification": f"{_slug(city)}__{_slug(country)}",  # double-underscore to avoid ambiguity
-            "name": city,
-            "description": country,
-            "url": None
-        } for (city, country) in slice_]
+        topics = []
+        for (city, country) in slice_:
+            ident = f"{_slug(city)}__{_slug(country)}"
+            title = f"{city} — {country}"
+            topics.append({
+                "name": city,
+                "description": country,
+                "url": None,
+                # NEW: identifications replaces input_identification
+                "identifications": IdentificationsModel(
+                    input_identification=ident,
+                    title_identification=title,
+                    link_identification=None,
+                    img_link_identification=None,
+                ),
+            })
 
         return {
             "topics": topics,
@@ -107,16 +117,19 @@ class CountriesnowAdapter(BaseAdapter):
         Resolve a single city/country and fetch concise, quiz-useful facts.
 
         Identification contract from get_topics:
-          input_identification = "<city-slug>__<country-slug>"  (double underscore)
+          identifications.input_identification = "<city-slug>__<country-slug>"  (double underscore)
 
-        Returns:
+        Returns (success):
           {
-            "input_identification": "...",
-            "input_data": {
-              "meta": {...},
-              "country": {...},
-              "city": {...}
-            },
+            "identifications": IdentificationsModel(...),
+            "input_data": { "meta": {...}, "country": {...}, "city": {...} },
+            "updated_at": "...iso..."
+          }
+
+        Returns (error):
+          {
+            "identifications": IdentificationsModel(...),
+            "input_data": {},   # <- EMPTY per requirement
             "updated_at": "...iso..."
           }
         """
@@ -131,9 +144,15 @@ class CountriesnowAdapter(BaseAdapter):
                 country = (coslug or "").replace("-", " ").strip()
 
         if not (city and country):
+            # ERROR SHAPE: input_data must be {}
             return {
-                "input_identification": input_identification or "",
-                "input_data": {"error": "missing_city_or_country"},
+                "identifications": IdentificationsModel(
+                    input_identification=(input_identification or None),
+                    title_identification=None,
+                    link_identification=None,
+                    img_link_identification=None,
+                ),
+                "input_data": {},  # <- empty on error
                 "updated_at": now_iso,
             }
 
@@ -177,15 +196,12 @@ class CountriesnowAdapter(BaseAdapter):
         else:
             sample = []
 
-        # Population by country (historical series, if the API supports it)
-        # Endpoint commonly exists: POST /countries/population  {"country": "..."}
+        # Population by country
         pop_country = _post_json("/countries/population", {"country": country_title})
         pop_series = []
         latest_country_pop = None
         if isinstance(pop_country.get("data"), dict):
-            # expected: {"country":"X","populationCounts":[{"year":2020,"value":...}, ...]}
             series = (pop_country["data"].get("populationCounts")) or []
-            # normalize to simple list[{year, value}]
             for row in series:
                 y = row.get("year")
                 v = row.get("value")
@@ -196,12 +212,10 @@ class CountriesnowAdapter(BaseAdapter):
                 latest_country_pop = pop_series[-1]["value"]
 
         # City population (if available)
-        # Endpoint often: POST /countries/population/cities {"city":"..."}
         pop_city_data = _post_json("/countries/population/cities", {"city": city_title})
         latest_city_pop = None
         city_pop_series = []
         if isinstance(pop_city_data.get("data"), list) and pop_city_data["data"]:
-            # API may return multiple matches; pick first with counts
             entry = pop_city_data["data"][0]
             counts = entry.get("populationCounts") or []
             for row in counts:
@@ -255,11 +269,18 @@ class CountriesnowAdapter(BaseAdapter):
             },
         }
 
-        # Rebuild the canonical identification (in case caller passed raw names)
+        # Canonical identification (slug form)
         ident = f"{city_title.lower().replace(' ', '-')}" \
                 f"__{country_title.lower().replace(' ', '-')}"
+        title_ident = f"{city_title} — {country_title}"
+
         return {
-            "input_identification": ident,
+            "identifications": IdentificationsModel(
+                input_identification=ident,
+                title_identification=title_ident,
+                link_identification=None,
+                img_link_identification=None,
+            ),
             "input_data": input_data,
             "updated_at": now_iso,
         }

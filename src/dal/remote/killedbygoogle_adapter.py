@@ -9,6 +9,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
+from src.domain.models.indentifications_model import IdentificationsModel
 from src.dal.remote.base import BaseAdapter
 from src.domain.models.preview_model import PreviewModel, EnumMode
 
@@ -156,11 +157,21 @@ class KilledByGoogleAdapter(BaseAdapter):
             if not link:
                 link = urljoin(BASE, f"/{slug}/")
 
-            topics.append({
+            t_topics = {
                 "name": name,
                 "url": link,
-                "input_identification": slug,
-            })
+                
+            }
+
+            t_topics['identifications'] = IdentificationsModel(
+                input_identification=slug,
+                title_identification=name,
+                link_identification=link,
+                img_link_identification=None,
+            )
+            
+
+            topics.append(t_topics)
         return topics
 
     # -------- HTML fallback parsing --------
@@ -193,13 +204,21 @@ class KilledByGoogleAdapter(BaseAdapter):
             if not slug:
                 slug = _slugify_name(text)
 
-            topics.append({"name": text, "url": url, "input_identification": slug})
+            t_topics = {"name": text, "url": url}
+            t_topics['identifications'] = IdentificationsModel(
+                input_identification=slug,
+                title_identification=text,
+                link_identification=url,
+                img_link_identification=None,
+            )
+
+            topics.append(t_topics)
 
         # Deduplicate by slug (keep first)
         seen = set()
         deduped: List[Dict[str, str]] = []
         for t in topics:
-            s = t["input_identification"]
+            s = t["identifications"].input_identification
             if s in seen:
                 continue
             seen.add(s)
@@ -283,11 +302,19 @@ class KilledByGoogleAdapter(BaseAdapter):
                     break
 
         if not record:
-            return {
-                "input_identification": slug_or_name,
+            input_ =  {
+
                 "input_data": {"error": "not_found"},
                 "updated_at": now_iso,
             }
+
+            input_['identifications'] = IdentificationsModel(
+                input_identification=slug_or_name if slug_or_name else None,
+                title_identification=None,
+                link_identification=None,
+                img_link_identification=None,
+            )
+            return input_
 
         # Normalize minimal meta
         name = (record.get("name") or record.get("title") or record.get("product") or slug_or_name).strip()
@@ -331,11 +358,20 @@ class KilledByGoogleAdapter(BaseAdapter):
         if include_site_page_text and site_page_text:
             input_data["site_page_text"] = site_page_text
 
-        return {
-            "input_identification": slug,
+        input_2 = {
+            
             "input_data": input_data,
             "updated_at": now_iso,
         }
+
+        input_2['identifications'] = IdentificationsModel(
+            input_identification=slug,
+            title_identification=name,
+            link_identification=page_url,
+            img_link_identification=None,
+        )
+
+        return input_2
 
     # -------- Instructions & context-generation --------
     def instructions(self) -> str:
