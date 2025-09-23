@@ -7,7 +7,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-from domain.models.indentifications_model import IdentificationsModel
+from src.domain.models.indentifications_model import IdentificationsModel
 from src.dal.remote.base import BaseAdapter
 from src.domain.models.preview_model import PreviewModel, EnumMode
 

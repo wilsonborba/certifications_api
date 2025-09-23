@@ -180,7 +180,7 @@ class WikipediaAdapter(BaseAdapter):
                     # NEW: identifications replaces input_identification
                     "identifications": IdentificationsModel(
                         input_identification=title,
-                        title_identification=title,
+                        title_identification=snippet,
                         link_identification=link,
                         img_link_identification=None,
                     ),
@@ -241,17 +241,20 @@ class WikipediaAdapter(BaseAdapter):
                 continue
             title_disp = raw.replace("_", " ")
             link = f"https://en.wikipedia.org/wiki/{raw or title_disp.replace(' ', '_')}"
+
+            description = (f"Top viewed yesterday • {it.get('views', 0)} views"
+                                if it.get("views") is not None else None)
+
             topics.append({
                 "type": "article",
                 "title": title_disp,
-                "description": (f"Top viewed yesterday • {it.get('views', 0)} views"
-                                if it.get("views") is not None else None),
+                "description": description,
                 "url": link,
                 "views": it.get("views"),
                 # NEW: identifications replaces input_identification
                 "identifications": IdentificationsModel(
                     input_identification=title_disp,
-                    title_identification=title_disp,
+                    title_identification=description,
                     link_identification=link,
                     img_link_identification=None,
                 ),
@@ -403,7 +406,7 @@ class WikipediaAdapter(BaseAdapter):
             return {
                 "identifications": IdentificationsModel(
                     input_identification=norm_title,
-                    title_identification=norm_title,
+                    title_identification=description,
                     link_identification=canonicalurl,
                     img_link_identification=thumbnail,
                 ),
@@ -416,7 +419,7 @@ class WikipediaAdapter(BaseAdapter):
             return {
                 "identifications": IdentificationsModel(
                     input_identification=norm_title or title,
-                    title_identification=norm_title or title,
+                    title_identification=description,
                     link_identification=canonicalurl,
                     img_link_identification=thumbnail,
                 ),

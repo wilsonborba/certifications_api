@@ -19,6 +19,10 @@ from src.domain.models.pdf_model import  (AiInjectionReport, AntivirusScan, Elem
 from src.core.logs import error, debug
 import os, time, re, json
 
+import hashlib
+import textwrap
+
+
 try:
     import clamd
 except Exception:
@@ -395,6 +399,267 @@ class PdfParser:
 
         flush()
         return blocks
+    
+
+
+    # -------------------- Cleaning helpers (no LLM) --------------------
+
+    @staticmethod
+    def _est_tokens(s: str) -> int:
+        """Very rough token estimator (~4 chars/token). Keeps us model-agnostic."""
+        return max(1, len(s) // 4)
+
+    @staticmethod
+    def _normalize_text(s: str) -> str:
+        """Whitespace & trivial noise normalization (keeps semantic content intact)."""
+        s = s.replace("\r", "")
+        s = re.sub(r"[ \t]+", " ", s)
+        s = re.sub(r"\n{3,}", "\n\n", s)
+        # drop lines made only of repeated punctuation/dashes
+        s = re.sub(r"^\s*[\-\–\—\·\*_=]{2,}\s*$", "", s, flags=re.M)
+        return s.strip()
+
+    @staticmethod
+    def _looks_noise(line: str) -> bool:
+        """Fast, conservative noise filter for single lines (page numbers, tiny labels)."""
+        if not line:
+            return True
+        line = line.strip()
+        if len(line) < 5:
+            return True
+        # "12", "Page 3", "p. 7" etc.
+        if re.match(r"^\W*\d+\W*$", line):
+            return True
+        if re.match(r"^\s*(page|pág|p)\s*\d+\s*$", line, flags=re.I):
+            return True
+        # very short & no punctuation → often headers/labels
+        if len(line) < 20 and not re.search(r"[\.!?;:,]", line):
+            return True
+        return False
+
+    @staticmethod
+    def _compact_table_markdown(md: str, max_rows: int = 20, max_cols: int = 6, max_cell_chars: int = 120) -> str:
+        """Trim big markdown tables: keep header + a sample of rows/cols/cell-size."""
+        lines = [ln for ln in md.splitlines() if ln.strip()]
+        if not lines:
+            return ""
+        # detect standard md header separator
+        header = []
+        body = []
+        if len(lines) >= 2 and re.match(r"^\s*\|", lines[0]) and re.match(r"^\s*\|?\s*[:-]+\s*(\|\s*[:-]+\s*)+\|?\s*$", lines[1]):
+            header = lines[:2]
+            body = lines[2:]
+        else:
+            header = lines[:1]
+            body = lines[1:]
+
+        def cut_cols(ln: str) -> str:
+            parts = [p.strip() for p in ln.strip().strip('|').split('|')]
+            parts = [p[:max_cell_chars] for p in parts[:max_cols]]
+            return "| " + " | ".join(parts) + " |"
+
+        header = [cut_cols(h) for h in header]
+        body   = [cut_cols(b) for b in body[:max_rows]]
+
+        if len(lines) > (len(header) + len(body)):
+            body.append(f"| … | (truncated: {len(lines)-(len(header)+len(body))} rows) |")
+
+        return "\n".join(header + body)
+
+    @staticmethod
+    def _stable_hash(text: str) -> str:
+        """Stable short hash to dedupe near-identical chunks cheaply."""
+        return hashlib.blake2s(text.encode("utf-8"), digest_size=16).hexdigest()
+
+    @staticmethod
+    def _similar_ratio(a: str, b: str) -> float:
+        """Tiny similarity (Jaccard over lowercase tokens). Good enough for dedupe."""
+        a_set = set(a.lower().split())
+        b_set = set(b.lower().split())
+        if not a_set or not b_set:
+            return 0.0
+        inter = len(a_set & b_set)
+        uni   = len(a_set | b_set)
+        return inter / max(1, uni)
+
+    def _trim_chunk_text(self, txt: str, max_chunk_tokens: int) -> str:
+        """For very long chunks: keep head + tail; drop the boring middle."""
+        if self._est_tokens(txt) <= max_chunk_tokens:
+            return txt
+        paras = [p for p in txt.split("\n\n") if p.strip()]
+        head, tail = [], []
+        used_head = used_tail = 0
+        head_budget = int(max_chunk_tokens * 0.70)
+        tail_budget = int(max_chunk_tokens * 0.25)
+        for p in paras:
+            t = self._est_tokens(p)
+            if used_head + t > head_budget: break
+            head.append(p); used_head += t
+        for p in reversed(paras):
+            t = self._est_tokens(p)
+            if used_tail + t > tail_budget: break
+            tail.append(p); used_tail += t
+        return "\n\n".join(head + (["…"] if tail else []) + list(reversed(tail)))
+
+    # -------------------- Public cleaner --------------------
+
+    def clean_parsed(
+        self,
+        parsed: Dict[str, Any],
+        *,
+        keep_elements: bool = True,
+        max_chunk_tokens: int = 3_000,
+        total_budget_tokens: int = 60_000,
+        dedupe_threshold: float = 0.85,
+        table_max_rows: int = 20,
+        table_max_cols: int = 6,
+        table_max_cell_chars: int = 120,
+        ) -> Dict[str, Any]:
+        """
+        Clean and minimize the 'parsed' JSON (no LLM calls).
+        - optionally cleans and keeps elements
+        - normalizes whitespace
+        - filters out noisy/empty chunks and elements
+        - trims oversized chunks (head+tail)
+        - compacts large markdown tables
+        - deduplicates similar chunks
+        - enforces a total input token budget
+
+        Returns a NEW 'parsed' dict with the same shape:
+        { document_id, source, elements, chunks }
+        """
+        doc_id = parsed.get("document_id")
+        src    = parsed.get("source")
+        elements = parsed.get("elements") or []
+        chunks   = parsed.get("chunks") or []
+
+        # 1) elements: either clean them or drop them entirely
+        if keep_elements:
+            out_elements = self.clean_elements(elements)
+        else:
+            out_elements = []
+
+        # 2) normalize & filter chunks
+        cleaned_chunks = []
+        for ch in chunks:
+            text = (ch.get("text") or "").strip()
+            if not text:
+                continue
+            text = self._normalize_text(text)
+
+            # fast line-level noise removal
+            kept_lines = []
+            for ln in text.splitlines():
+                l = ln.strip()
+                if self._looks_noise(l):
+                    continue
+                kept_lines.append(l)
+            text = "\n".join(kept_lines).strip()
+            if not text:
+                continue
+
+            # compact markdown tables if present
+            if "|" in text and re.search(r"^\s*\|.+\|\s*$", text, flags=re.M):
+                text = self._compact_table_markdown(
+                    text,
+                    max_rows=table_max_rows,
+                    max_cols=table_max_cols,
+                    max_cell_chars=table_max_cell_chars,
+                )
+
+            # trim oversized chunk
+            text = self._trim_chunk_text(text, max_chunk_tokens=max_chunk_tokens)
+
+            new = dict(ch)
+            new["text"] = text
+            new["tokens_est"] = int(self._est_tokens(text))
+            cleaned_chunks.append(new)
+
+        # 3) dedupe (hash + cheap similarity against last kept)
+        deduped = []
+        seen = set()
+        for ch in cleaned_chunks:
+            t = ch["text"]
+            h = self._stable_hash(t)
+            if h in seen:
+                continue
+            if deduped and self._similar_ratio(t, deduped[-1]["text"]) >= dedupe_threshold:
+                continue
+            seen.add(h)
+            deduped.append(ch)
+
+        # 4) enforce total budget by greedy accumulation
+        budget_used = 0
+        bounded = []
+        for ch in deduped:
+            need = int(ch.get("tokens_est") or 0)
+            if budget_used + need > total_budget_tokens:
+                break
+            bounded.append(ch)
+            budget_used += need
+
+        # 5) return cleaned 'parsed' with the same external shape
+        return {
+            "document_id": doc_id,
+            "source": src,
+            "elements": out_elements,
+            "chunks": bounded,
+        }
+
+    def _clean_single_element(self, el: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a cleaned element dict (keeps type, text, page, attrs if non-empty).
+        - normalizes whitespace
+        - drops noisy/empty lines
+        - removes 'attrs' key if it's empty
+        """
+        t = (el.get("type") or "").strip()
+        pg = el.get("page")
+        attrs = el.get("attrs") or {}
+
+        raw = (el.get("text") or "").strip()
+        if not raw:
+            return {}
+
+        # normalize + drop obvious noise lines
+        txt = self._normalize_text(raw)
+        kept = []
+        for ln in txt.splitlines():
+            l = ln.strip()
+            if self._looks_noise(l):
+                continue
+            kept.append(l)
+        txt = "\n".join(kept).strip()
+        if not txt:
+            return {}
+
+        cleaned = {
+            "type": t,
+            "text": txt,
+            "page": pg,
+        }
+        # only include attrs if not empty
+        if attrs:
+            cleaned["attrs"] = attrs
+        return cleaned
+
+    def clean_elements(
+        self,
+        elements: List[Dict[str, Any]],
+        *,
+        allow_types: Tuple[str, ...] = ("Title","NarrativeText","ListItem","Table","UncategorizedText"),
+    ) -> List[Dict[str, Any]]:
+        """Clean a list of element dicts (drop noise and empty attrs)."""
+        out: List[Dict[str, Any]] = []
+        for el in elements or []:
+            et = (el.get("type") or "").strip()
+            if allow_types and et not in allow_types:
+                continue
+            cleaned = self._clean_single_element(el)
+            if cleaned:
+                out.append(cleaned)
+        return out
+
+
 
 
 class PdfAdapter(BaseAdapter):
@@ -497,9 +762,21 @@ class PdfAdapter(BaseAdapter):
             overlap_chars=overlap_chars,
         )
 
+        parsed_clean = self.parser.clean_parsed(
+            parsed,
+            keep_elements=True,          # True if you really need elements in context
+            max_chunk_tokens=3_000,       # per-chunk hard cap
+            total_budget_tokens=60_000,   # global input cap
+            dedupe_threshold=0.85,        # skip near-duplicates
+            table_max_rows=20,
+            table_max_cols=6,
+            table_max_cell_chars=120,
+        )
+        
+
         payload = {
             "metadata": {**meta, "scan_ratio": round(scan_score, 3)},
-            "parsed": parsed,  # contains: document_id, source, elements, chunks
+            "parsed": parsed_clean,  # contains: document_id, source, elements, chunks
         }
 
         return payload   
@@ -575,19 +852,41 @@ class PdfAdapter(BaseAdapter):
         return out
 
     def get_input(self, selected_pages: str | None, total_pages: int, input_data) -> Dict[str, Any]:
-
-        if selected_pages:
-            try:
-                pages = self._parse_page_selector(selected_pages, total_pages)
-            except ValueError as e:
-                raise e
+        """
+        Page selection + payload shrinking.
+        - Parses page selection (or ALL)
+        - Filters to those pages
+        - Minimizes parsed JSON and (optionally) keeps cleaned elements
+        """
+        pages: List[int] = []
+        if selected_pages and selected_pages.strip().lower() != "all":
+            pages = self._parse_page_selector(selected_pages, total_pages)
+        else:
+            pages = list(range(1, int(total_pages) + 1))
 
         if not pages:
             raise ValueError("No valid pages selected.")
 
         filtered = self._filter_payload_by_pages(input_data, pages)
 
-        return filtered
+        if self.parser is None:
+            return filtered
+
+        # >>> set keep_elements=True when you need element-level context
+        parsed_clean = self.parser.clean_parsed(
+            filtered.get("parsed", {}) or {},
+            keep_elements=True,            # <-- important for your use case
+            max_chunk_tokens=3_000,
+            total_budget_tokens=60_000,
+            dedupe_threshold=0.85,
+            table_max_rows=20,
+            table_max_cols=6,
+            table_max_cell_chars=120,
+        )
+
+        out = dict(filtered)
+        out["parsed"] = parsed_clean
+        return out
     
     def _extract_gemini_text(self, resp: Dict[str, Any]) -> str:
         """Extract the first text string from Gemini generateContent response."""
