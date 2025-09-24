@@ -46,6 +46,7 @@ All notable changes to this project will be documented in this file.
 - *(pdf)* Generating question from secure pdf created
 - *(id)* Added a pattern for identification of the cards
 - *(ai)* Improved to clean useless char data for input
+- *(ai)* Improved to have amount of question and language of route to generate question
 
 ### ⚙️ Miscellaneous Tasks
 

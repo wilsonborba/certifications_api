@@ -67,6 +67,7 @@ async def get_pdf_input(
     document_id: str,
     # selected
     selected_pages: str = Query('all', description="Selected pages in format '1,2,5-10' or 'all'/'-4'/'2-'"),
+
 ):
     try:
         inputs = await get_input_from_pdf(
@@ -106,17 +107,21 @@ async def get_pdf_context(
     # selected
     selected_pages: str = Query('all', description="Selected pages in format '1,2,5-10' or 'all'/'-4'/'2-'"),
     mode: str = Query('both', description="Mode: playful, serious, both"),
+    selected_language: str = Query('English', description="Selected language for context generation"),
+    amount_question: int = Query(10, description="Number of questions to generate")
 ):
     
     try:
-        ai_injection_result = await get_context_from_pdf(
+        ai_result = await get_context_from_pdf(
             request=request,
             document_id=document_id,
-            selected_pages=selected_pages
+            selected_pages=selected_pages,
+            amount_question=amount_question,
+            selected_language=selected_language
         )
         response.status_code = status.HTTP_200_OK
         return MyResponse(
-            data=ai_injection_result,
+            data=ai_result,
             message="PDF context retrieved successfully.",
         )
     

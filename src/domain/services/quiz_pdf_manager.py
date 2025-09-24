@@ -52,7 +52,7 @@ class QuizPDFManager(BaseQuizManager):
     def get_questions(self):
         pass
 
-    async def generate_context(self, input_data, amount_question):
+    async def generate_context(self, input_data, amount_question, selected_language: str = "English") -> str:
 
         try:
             ai_injection_result = await self.pdf_adapter.check_ai_injection(input_data=input_data)
@@ -70,12 +70,15 @@ class QuizPDFManager(BaseQuizManager):
             raise e
 
 
-        prompt = self.pdf_adapter.generate_context(input_data=input_data, amount_question=amount_question)
+        prompt = self.pdf_adapter.generate_context(
+            input_data=input_data,
+            amount_question=amount_question,
+            )
 
         try:
             response = await self.pdf_adapter.gemini.generate_text(
                 prompt=prompt,
-                system_instruction=self.pdf_adapter.instructions(),
+                system_instruction=self.pdf_adapter.instructions(selected_language=selected_language),
                 response_mime_type="application/json",
                 temperature=0.7,
             )

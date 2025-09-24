@@ -98,13 +98,20 @@ async def get_input_from_pdf(request: Request, document_id: str, selected_pages:
     return inputs
 
 
-async def get_context_from_pdf(request: Request, document_id: str, selected_pages: str = 'all'):
+async def get_context_from_pdf(
+        request: Request, 
+        document_id: str, 
+        selected_language: str,
+        selected_pages: str = 'all', 
+        amount_question: int = 10,
+        ) -> dict:
     
     input_data = await get_input_from_pdf(request, document_id, selected_pages)
 
     response = await quiz_pdf_manager.generate_context(
             input_data=input_data,
-            amount_question=10
+            amount_question=amount_question,
+            selected_language=selected_language
         )
 
     return response
