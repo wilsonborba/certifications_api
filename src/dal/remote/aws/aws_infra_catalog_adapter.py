@@ -367,6 +367,105 @@ class AwsInfraCatalogAdapter(BaseAdapter):
             "Prefer questions that test recognition of service purpose/name/code, endpoint/region coverage, "
             "and metadata comprehension. Avoid speculation."
         )
+    
+        # ---------- Search (local over service codes & friendly names) ----------
+    def search(
+        self,
+        q: str,
+        *,
+        page: int = 1,
+        per_page: int = 60,
+        mode: str = "fulltext",                # "fulltext" | "substring" | "fuzzy"
+        include_endpoint_prefix: bool = True,  # enriquece o haystack com endpoint_prefix
+        **kwargs: Any,                         # <- exigido: absorve extras sem quebrar
+    ) -> Dict[str, Any]:
+        """
+        Busca por serviços AWS por código/nome (e, opcionalmente, endpoint_prefix).
+        - Carrega a lista via SSM (com fallback no índice de pricing).
+        - Monta um haystack: code | name | pricing_display | endpoint_prefix(opcional).
+        - Filtra por substring (ou fuzzy) e pagina o resultado filtrado.
+        - Retorna o mesmo envelope de /topics com 'identifications' (IdentificationsModel).
+        """
+        assert isinstance(q, str) and q.strip(), "q deve ser não-vazio"
+        assert page >= 1 and per_page >= 1
+        qn = q.casefold()
+        mode = mode if mode in ("fulltext", "substring", "fuzzy") else "fulltext"
+
+        # 1) Base de serviços (code + friendly name)
+        services = self._collect_service_items()  # [{'code': 'ec2', 'name': 'Amazon EC2'}, ...]
+
+        # 2) Mapa de nomes do índice de pricing (ajuda a achar sinônimos)
+        pricing_names = self._pricing_index_names()  # {'ec2': 'Amazon EC2', 'AmazonEC2': 'Amazon EC2', ...}
+
+        # 3) (opcional) endpoint_prefix p/ melhorar o recall (ex: 'monitoring' p/ CloudWatch)
+        ep_cache: Dict[str, Optional[str]] = {}
+        def _endpoint_prefix(code: str) -> Optional[str]:
+            if not include_endpoint_prefix:
+                return None
+            if code in ep_cache:
+                return ep_cache[code]
+            md = self._service_model_meta(code)
+            ep_cache[code] = md.get("endpoint_prefix")
+            return ep_cache[code]
+
+        # 4) matching
+        def _match(code: str, name: str) -> bool:
+            fields = [code or "", name or ""]
+            disp = pricing_names.get(code) or ""
+            if disp:
+                fields.append(disp)
+            ep = _endpoint_prefix(code)
+            if ep:
+                fields.append(ep)
+
+            hay = " ".join(x for x in fields if x).casefold()
+            if not hay:
+                return False
+            if mode in ("fulltext", "substring"):
+                return qn in hay
+            # fuzzy
+            return self._simple_fuzzy_score(hay, qn) >= 0.78
+
+        matched: List[Dict[str, Any]] = []
+        for it in services:
+            code = it.get("code") or ""
+            name = it.get("name") or code
+            if not code:
+                continue
+            if not _match(code, name):
+                continue
+
+            ext_url = f"https://aws.amazon.com/{code}/"
+            topic = {
+                "service": name,
+                "identifications": IdentificationsModel(
+                    input_identification=code,
+                    title_identification=name,
+                    link_identification=ext_url,
+                    img_link_identification=None,
+                ),
+            }
+            matched.append(topic)
+
+        # 5) ordenação estável (alfabética pelo title_identification)
+        matched.sort(key=lambda t: (t["identifications"].title_identification or "").casefold())
+
+        # 6) paginação sobre o resultado filtrado
+        start = (page - 1) * per_page
+        end = start + per_page
+        topics_page = matched[start:end]
+        has_more = end < len(matched)
+
+        return {
+            "topics": topics_page,
+            "page": page,
+            "per_page": per_page,
+            "has_more": has_more,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "item_name": self.item_name,
+            "source_name": self.source_name,
+        }
+
 
     # ---------- Generate textual quiz context ----------
     def generate_context(self, input_data: Dict[str, Any], amount_question: int = 10) -> str:

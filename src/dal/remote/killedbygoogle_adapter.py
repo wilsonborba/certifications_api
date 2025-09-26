@@ -381,6 +381,125 @@ class KilledByGoogleAdapter(BaseAdapter):
             "but keep facts (names, dates, reasons, timelines) exact and grounded in the provided text. "
             "Avoid speculation or private info."
         )
+    
+
+    def search(
+        self,
+        q: str,
+        *,
+        page: int = 1,
+        per_page: int = 20,
+        mode: str = "fulltext",          # "fulltext" | "substring" | "fuzzy"
+        fill_page: bool = True,          # mantido por compatibilidade; aqui não é necessário
+        max_extra_pages: int = 0,        # idem (dataset já vem inteiro)
+        # adapter-specific (opcionais):
+        search_in_description: bool = True,
+        search_in_tags: bool = True,
+        search_in_type: bool = True,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """
+        Busca por produtos descontinuados em killedbygoogle:
+        - Carrega o dataset JSON (graveyard).
+        - Faz filtro local por substring ou fuzzy em:
+          name | slug | (description/notes) | tipo | tags (quando existirem).
+        - Pagina **o resultado filtrado** (page/per_page).
+        - Retorna o mesmo envelope de /topics com 'identifications' (IdentificationsModel).
+        """
+        assert isinstance(q, str) and q.strip(), "q deve ser não-vazio"
+        assert page >= 1 and per_page >= 1
+        qn = q.casefold()
+        mode = mode if mode in ("fulltext", "substring", "fuzzy") else "fulltext"
+
+        # 1) Carregar dataset (preferindo o endpoint mais completo)
+        items = (
+            self._get_json_array("/api/graveyard")
+            or self._get_json_array("/api/killed.json")
+            or self._get_json_array("/graveyard.json")
+            or self._get_json_array("/graveyard.min.json")
+            or []
+        )
+
+        def _text_hay(it: Dict[str, Any]) -> str:
+            name = (it.get("name") or it.get("title") or it.get("product") or "").strip()
+            slug = (it.get("slug") or _slugify_name(name)).strip().strip("/")
+            parts: List[str] = [name, slug]
+
+            if search_in_type:
+                parts.append((it.get("type") or "").strip())
+
+            if search_in_tags:
+                tags = it.get("tags") or it.get("categories") or []
+                if isinstance(tags, list):
+                    parts.extend([str(t) for t in tags])
+
+            if search_in_description:
+                for k in ("description", "notes", "reason", "blurb", "explanation"):
+                    v = it.get(k)
+                    if isinstance(v, str):
+                        parts.append(v)
+
+            hay = " ".join(p for p in parts if p)
+            # normaliza HTML entities e espaços
+            return html.unescape(re.sub(r"\s+", " ", hay)).casefold()
+
+        def _match(it: Dict[str, Any]) -> bool:
+            hay = _text_hay(it)
+            if not hay:
+                return False
+            if mode in ("fulltext", "substring"):
+                return qn in hay
+            # fuzzy
+            return self._simple_fuzzy_score(hay, qn) >= 0.78
+
+        # 2) Filtrar e normalizar
+        matched: List[Dict[str, Any]] = []
+        for it in items:
+            if not _match(it):
+                continue
+
+            name = (it.get("name") or it.get("title") or it.get("product") or "").strip()
+            if not name:
+                continue
+
+            slug = (it.get("slug") or _slugify_name(name)).strip().strip("/")
+            link = (it.get("link") or it.get("url") or it.get("source") or "").strip()
+            if link and not link.startswith("http"):
+                link = urljoin(BASE, link)
+            if not link:
+                link = urljoin(BASE, f"/{slug}/")
+
+            topic = {
+                "type": "product",
+                "name": name,
+                "url": link,
+            }
+            topic["identifications"] = IdentificationsModel(
+                input_identification=slug,
+                title_identification=name,
+                link_identification=link,
+                img_link_identification=None,
+            )
+            matched.append(topic)
+
+        # 3) Ordenação previsível (alfabética por nome)
+        matched.sort(key=lambda x: (x.get("name") or "").casefold())
+
+        # 4) Paginação sobre o resultado filtrado
+        start = (page - 1) * per_page
+        end = start + per_page
+        topics_page = matched[start:end]
+        has_more = end < len(matched)
+
+        return {
+            "topics": topics_page,
+            "page": page,
+            "per_page": per_page,
+            "has_more": has_more,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "item_name": self.item_name,
+            "source_name": self.source_name,
+        }
 
     def generate_context(self, input_data: Dict[str, Any], amount_question: int = 10) -> str:
         meta = (input_data or {}).get("meta", {})

@@ -272,6 +272,137 @@ class DevToAdapter(BaseAdapter):
             "• Avoid predictions, personal judgments, or sensitive topics. Keep wording clear, neutral, and concise."
         )
 
+    # ---------- Search (tags + optional latest posts) ----------
+    def search(
+        self,
+        q: str,
+        *,
+        page: int = 1,
+        per_page: int = 30,
+        mode: str = "substring",          # "fulltext" | "substring" | "fuzzy"
+        max_tag_pages: int = 5,           # até quantas páginas de /tags varrer
+        scan_posts: bool = True,          # se True, também procura nos posts do RSS da tag
+        posts_per_tag: int = 8,           # quantos itens do RSS por tag carregar (para filtrar)
+        **kwargs: Any,                    # <- exigência: absorve extras sem quebrar
+    ) -> Dict[str, Any]:
+        """
+        Procura por tags (slug/nome/descrição) e opcionalmente por posts recentes
+        de cada tag (título/autor/summary). Retorna o mesmo envelope de /topics.
+        """
+        assert isinstance(q, str) and q.strip(), "q deve ser não-vazio"
+        assert page >= 1 and per_page >= 1
+        qn = q.casefold()
+        mode = mode if mode in ("fulltext", "substring", "fuzzy") else "substring"
+
+        def _hit(text: Optional[str]) -> bool:
+            t = (text or "").casefold()
+            if not t:
+                return False
+            if mode in ("fulltext", "substring"):
+                return qn in t
+            # fuzzy
+            return self._simple_fuzzy_score(t, qn) >= 0.78
+
+        matched: List[Dict[str, Any]] = []
+
+        # 1) varrer /tags paginado até max_tag_pages
+        seen_slugs: set[str] = set()
+        for p in range(1, max(1, int(max_tag_pages)) + 1):
+            try:
+                soup = self._get_html(DEVTO_TAGS, params={"page": p})
+            except Exception:
+                break
+            tags = self._parse_tag_cards(soup)
+            if not tags:
+                break
+
+            for t in tags:
+                slug = t.get("slug") or ""
+                name = t.get("name") or slug
+                desc = t.get("description") or ""
+                if not slug or slug in seen_slugs:
+                    continue
+                hay = " ".join([slug, name, desc])
+                if not _hit(hay):
+                    continue
+                seen_slugs.add(slug)
+
+                tag_url = f"{DEVTO_BASE}/t/{slug}"
+                matched.append({
+                    "type": "tag",
+                    "name": name,
+                    "description": desc or None,
+                    "url": tag_url,
+                    "identifications": IdentificationsModel(
+                        input_identification=slug,
+                        title_identification=name,
+                        link_identification=tag_url,
+                        img_link_identification=None,
+                    ),
+                })
+
+                # 2) opcional: procurar nos posts do RSS dessa tag
+                if scan_posts:
+                    try:
+                        feed_items = self._fetch_tag_feed(slug, max_items=posts_per_tag)
+                    except Exception:
+                        feed_items = []
+                    for it in feed_items:
+                        title = it.get("title") or ""
+                        author = it.get("author") or ""
+                        summary = it.get("summary") or ""
+                        url = it.get("url") or ""
+                        hay_post = " ".join([title, author, summary, url])
+                        if not url or not _hit(hay_post):
+                            continue
+                        # para posts, usamos o link como ID estável o suficiente para o front
+                        matched.append({
+                            "type": "post",
+                            "title": title,
+                            "author": author or None,
+                            "published": it.get("published"),
+                            "url": url,
+                            "summary": summary or None,
+                            "tag": slug,
+                            "identifications": IdentificationsModel(
+                                input_identification=url,      # ID não-vazio p/ passar no shouldUseIdentifications
+                                title_identification=title,
+                                link_identification=url,
+                                img_link_identification=None,
+                            ),
+                        })
+
+            # Heurística: se já temos muitos matches, podemos parar cedo
+            if len(matched) >= page * per_page * 2:
+                break
+
+        # 3) ordenação simples: tags primeiro por nome; depois posts por data (desc) e título
+        def _key(item: Dict[str, Any]):
+            t = item.get("type")
+            if t == "tag":
+                return (0, (item.get("name") or "").casefold(), "")
+            # posts
+            return (1, "", (item.get("published") or ""), (item.get("title") or "").casefold())
+
+        matched.sort(key=_key, reverse=False)
+
+        # 4) paginação sobre o resultado filtrado
+        start = (page - 1) * per_page
+        end = start + per_page
+        topics_page = matched[start:end]
+        has_more = end < len(matched)
+
+        return {
+            "topics": topics_page,
+            "page": page,
+            "per_page": per_page,
+            "has_more": has_more,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "item_name": self.item_name,
+            "source_name": self.source_name,
+        }
+
+
     # ---------- Generate textual quiz context ----------
     def generate_context(self, input_data: Dict[str, Any], amount_question: int = 10) -> str:
         meta = (input_data or {}).get("meta", {})

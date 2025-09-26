@@ -252,6 +252,133 @@ class WorldbankgovAdapter(BaseAdapter):
             "input_data": input_data,
             "updated_at": _now_iso(),
         }
+    
+        # ---------------- search (countries by name/code/region/income/capital) ----------------
+    def search(
+        self,
+        *args,
+        q: str,
+        page: int = 1,
+        per_page: int = 30,
+        mode: str = "substring",          # "substring" | "fuzzy" | "fulltext"(alias of substring)
+        min_fuzzy: float = 0.68,          # threshold for fuzzy acceptance
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """
+        Local search over World Bank countries.
+        Matches against: name, ISO3(id), ISO2, region, incomeLevel, capitalCity.
+        - substring: case-insensitive 'q in text'
+        - fuzzy: BaseAdapter._simple_fuzzy_score(text, q) >= min_fuzzy
+        - fulltext: treated as 'substring' (no WB server-side FT available here)
+
+        Returns same envelope as get_topics().
+        """
+        assert page >= 1 and per_page >= 1
+        q = (q or "").strip()
+        if not q:
+            return {
+                "topics": [],
+                "page": page,
+                "per_page": per_page,
+                "has_more": False,
+                "updated_at": _now_iso(),
+                "item_name": self.item_name,
+                "source_name": self.source_name,
+            }
+
+        qn = q.casefold()
+        if mode not in ("substring", "fuzzy", "fulltext"):
+            mode = "substring"
+        if mode == "fulltext":
+            mode = "substring"
+
+        def _score_text(t: Optional[str]) -> float:
+            s = (t or "").casefold()
+            if not s:
+                return 0.0
+            if mode == "substring":
+                return 1.0 if qn in s else 0.0
+            # fuzzy
+            return self._simple_fuzzy_score(s, qn)
+
+        try:
+            countries = self._fetch_all_countries()
+        except Exception:
+            return {
+                "topics": [],
+                "page": page,
+                "per_page": per_page,
+                "has_more": False,
+                "updated_at": _now_iso(),
+                "item_name": self.item_name,
+                "source_name": self.source_name,
+            }
+
+        scored: List[Tuple[float, Dict[str, Any]]] = []
+        for c in countries:
+            # fields to match
+            fields = [
+                c.get("name"),
+                c.get("id"),            # ISO3
+                c.get("iso2Code"),
+                c.get("region"),
+                c.get("incomeLevel"),
+                c.get("capitalCity"),
+            ]
+            field_scores = [_score_text(f) for f in fields]
+            best = max(field_scores) if field_scores else 0.0
+
+            # accept?
+            if mode == "substring":
+                if best <= 0.0:
+                    continue
+            else:  # fuzzy
+                if best < min_fuzzy:
+                    continue
+
+            scored.append((best, c))
+
+        # sort by score desc, then name asc for stability
+        scored.sort(key=lambda x: (-x[0], (x[1].get("name") or "").lower()))
+
+        # paginate
+        start = (page - 1) * per_page
+        end = start + per_page
+        page_rows = scored[start:end]
+        has_more = end < len(scored)
+
+        topics: List[Dict[str, Any]] = []
+        for score, c in page_rows:
+            iso3 = c.get("id")
+            iso2 = c.get("iso2Code")
+            name = c.get("name")
+            region = c.get("region")
+            url = f"https://api.worldbank.org/v2/country/{iso2}?format=json" if iso2 else None
+
+            topics.append({
+                "name": name,
+                "description": region,
+                "url": url,
+                "identifications": IdentificationsModel(
+                    input_identification=iso3 or iso2 or name,
+                    title_identification=name,
+                    link_identification=url,
+                    img_link_identification=None,
+                ),
+                # optional: surface score (non-breaking; safe for UI debugging)
+                "match_score": round(float(score), 3),
+            })
+
+        return {
+            "topics": topics,
+            "page": page,
+            "per_page": per_page,
+            "has_more": has_more,
+            "updated_at": _now_iso(),
+            "item_name": self.item_name,
+            "source_name": self.source_name,
+        }
+
 
     def _fetch_country_detail(self, code: str | None) -> Dict[str, Any]:
         if not code:

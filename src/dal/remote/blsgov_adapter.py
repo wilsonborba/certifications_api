@@ -474,6 +474,124 @@ class BlsgovAdapter(BaseAdapter):
             "input_data": input_data,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+    
+        # ---------- Search (areas + optional direct SeriesID) ----------
+    def search(
+        self,
+        q: str,
+        *,
+        page: int = 1,
+        per_page: int = 30,
+        mode: str = "substring",          # "fulltext" | "substring" | "fuzzy"
+        include_area_matches: bool = True,
+        include_direct_series_id: bool = True,
+        **kwargs: Any,                    # <- exigência: absorve extras sem quebrar
+    ) -> Dict[str, Any]:
+        """
+        Procura por áreas do CPI (arquivo cu.area) e/ou aceita Series IDs diretos.
+        Retorna o mesmo envelope de /topics (com `identifications`).
+
+        - substring: case-insensitive em nome/código da área.
+        - fuzzy: usa BaseAdapter._simple_fuzzy_score(...) em nome/código.
+        - fulltext: alias de substring (não há endpoint full-text no BLS).
+        """
+        assert isinstance(q, str) and q.strip(), "q deve ser não-vazio"
+        assert page >= 1 and per_page >= 1
+        qn = q.strip().casefold()
+        mode = mode if mode in ("fulltext", "substring", "fuzzy") else "substring"
+        if mode == "fulltext":
+            mode = "substring"
+
+        def _hit(text: Optional[str]) -> bool:
+            t = (text or "").casefold()
+            if not t:
+                return False
+            if mode == "substring":
+                return qn in t
+            # fuzzy
+            return self._simple_fuzzy_score(t, qn) >= 0.78
+
+        topics: List[Dict[str, Any]] = []
+
+        # 1) Match direto por Series ID (opcional)
+        #    Aceita ex.: "CUUR0000SA0" ou "cuur0400sa0" etc.
+        if include_direct_series_id:
+            series_like = re.fullmatch(r"[A-Za-z]{2,5}[A-Za-z0-9]{5,}", q.strip())
+            if series_like:
+                tsid = q.strip().upper()
+                area_name = None
+                area_code = None
+                if tsid.startswith("CUUR") and tsid.endswith("SA0") and len(tsid) > 7:
+                    area_code = tsid[4:-3]
+                    try:
+                        areas = dict(self._fetch_selectable_areas())
+                        area_name = areas.get(area_code)
+                    except Exception:
+                        pass
+                series_url = f"https://data.bls.gov/timeseries/{tsid}"
+                topics.append({
+                    "type": "series",
+                    "name": area_name or tsid,
+                    "description": "BLS CPI series",
+                    "url": series_url,
+                    "identifications": IdentificationsModel(
+                        input_identification=tsid,
+                        title_identification=area_name or tsid,
+                        link_identification=series_url,
+                        img_link_identification=None,
+                    ),
+                })
+
+        # 2) Procurar nas áreas (nome e código), gerando o Series ID canônico
+        if include_area_matches:
+            try:
+                areas = self._fetch_selectable_areas()  # List[Tuple[area_code, area_name]]
+            except Exception:
+                areas = []
+
+            for area_code, area_name in areas:
+                hay = f"{area_code} {area_name}"
+                if _hit(hay):
+                    tsid = self._to_series_id(area_code)
+                    series_url = f"https://data.bls.gov/timeseries/{tsid}"
+                    topics.append({
+                        "type": "area",
+                        "name": area_name,
+                        "description": "United States",
+                        "url": series_url,
+                        "identifications": IdentificationsModel(
+                            input_identification=tsid,
+                            title_identification=area_name,
+                            link_identification=series_url,
+                            img_link_identification=None,
+                        ),
+                    })
+
+        # 3) Ordenar: áreas por nome; series_id diretos caem depois (estável)
+        def _key(t: Dict[str, Any]):
+            kind = t.get("type")
+            if kind == "area":
+                return (0, (t.get("name") or "").casefold())
+            return (1, (t.get("name") or "").casefold())
+
+        topics.sort(key=_key)
+
+        # 4) Paginar
+        start = (page - 1) * per_page
+        end = start + per_page
+        page_items = topics[start:end]
+        has_more = end < len(topics)
+
+        return {
+            "topics": page_items,
+            "page": page,
+            "per_page": per_page,
+            "has_more": has_more,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "item_name": self.item_name,
+            "source_name": self.source_name,
+        }
+
 
     def generate_context(self, input_data: Dict[str, Any], amount_question: int = 10) -> str:
         """

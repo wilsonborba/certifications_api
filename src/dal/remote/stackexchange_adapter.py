@@ -398,6 +398,271 @@ class StackExchangeOverflowAdapter(BaseAdapter):
         )
 
         return input_
+    
+        # ------------ SEARCH (robust: title+body+comments with fallbacks) ------------
+    def search(
+        self,
+        q: str,
+        page: int = 1,
+        per_page: int = 20,
+        mode: str = "fulltext",             # "fulltext" | "substring" | "fuzzy"
+        tagged: Optional[str] = None,
+        window_days: int = 90,              # restrict recency on fallbacks
+        fill_page: bool = True,
+        max_extra_pages: int = 2,
+        *args,
+        **kwargs) -> Dict[str, Any]:
+        """
+        Strategy:
+          1) Try /search/advanced with q (title+body fulltext).
+          2) If low/zero → try /search with intitle.
+          3) If still low → expand tag(s) via /tags?inname= and fetch questions by votes/recent (bounded).
+          4) If mode != fulltext OR still low, do local substring/fuzzy on title/body, and also on COMMENTS
+             (fetch comments only for a bounded top-N candidate set).
+        """
+        assert isinstance(q, str) and q.strip(), "q must be non-empty"
+        assert page >= 1 and per_page >= 1
+
+        # ---- Stage 1: fulltext server-side (best when available) ----
+        adv = self._search_advanced(q=q, page=page, pagesize=per_page, tagged=tagged)
+        items = [self._normalize_search_item(x) for x in adv.get("items", []) or []]
+        items = [x for x in items if x]
+        has_more = bool(adv.get("has_more"))
+
+        # ---- Stage 2: fallback to title-only search if very low ----
+        MIN_OK = 3
+        if len(items) < MIN_OK:
+            ti = self._search_intitle(q=q, page=page, pagesize=per_page, tagged=tagged)
+            cand = [self._normalize_search_item(x) for x in ti.get("items", []) or []]
+            cand = [x for x in cand if x]
+            items, has_more = self._union_keep_best(items, cand, prefer="score", cap=per_page), has_more or bool(ti.get("has_more"))
+
+        # ---- Stage 3: tag expansion fallback (popular tags matching q) ----
+        if len(items) < MIN_OK:
+            tag_list = self._guess_tags(q)
+            if tag_list:
+                extra = self._fetch_by_tags(tag_list=tag_list, pagesize=min(per_page, 20), window_days=window_days)
+                cand = [self._normalize_search_item(x) for x in extra]
+                cand = [x for x in cand if x]
+                items = self._union_keep_best(items, cand, prefer="score", cap=max(per_page, MIN_OK))
+                # has_more stays as-is; these are supplemental
+
+        # ---- Local filtering on title/body/comments when needed ----
+        # We always allow substring/fuzzy if requested; otherwise we apply it only when results still weak.
+        need_local = (mode in ("substring", "fuzzy")) or (len(items) < MIN_OK)
+        if need_local:
+            # Ensure we have bodies for local filtering. /search(advanced) with filter=withbody usually gives body,
+            # but normalize again via fast-strip; then load COMMENTS for bounded top-N.
+            items = self._ensure_body_field(items)
+            # fetch comments only for top ~per_page items (bounded I/O)
+            items = self._attach_comments(items, max_q=per_page)
+
+            if mode == "substring" or len(items) < MIN_OK:
+                items = self._filter_local(items, q, mode="substring")
+            elif mode == "fuzzy":
+                items = self._filter_local(items, q, mode="fuzzy")
+
+            # Optional fill to reach per_page after filtering
+            if fill_page and len(items) < per_page and has_more:
+                items_fill, _ = self._fill_after_filter(
+                    q=q,
+                    start_page=page + 1,
+                    per_page=per_page - len(items),
+                    tagged=tagged,
+                    mode=(mode if mode in ("substring", "fuzzy") else "substring"),
+                    already_seen={it["identifications"].input_identification for it in items},
+                    max_extra_pages=max_extra_pages,
+                )
+                items.extend(items_fill)
+
+        # ---- Sort & cap ----
+        items.sort(key=lambda x: ((x.get("score") or 0), x.get("creation_ts", 0)), reverse=True)
+        topics = items[:per_page]
+
+        return {
+            "item_name": self.item_name,
+            "source_name": self.source_name,
+            "page": page,
+            "per_page": per_page,
+            "has_more": bool(has_more),
+            "updated_at": _now_iso(),
+            "topics": topics,
+        }
+        # ---- server searches ----
+    
+    def _search_advanced(self, *, q: str, page: int, pagesize: int, tagged: Optional[str]) -> Dict[str, Any]:
+        return self._get(
+            "/search/advanced",
+            {
+                "page": page, "pagesize": min(pagesize, 100),
+                "order": "desc", "sort": "relevance",
+                "q": q,
+                "filter": _QUESTION_FILTER,
+                **({"tagged": tagged} if tagged else {}),
+            },
+        )
+
+    def _search_intitle(self, *, q: str, page: int, pagesize: int, tagged: Optional[str]) -> Dict[str, Any]:
+        # classic title-only endpoint; still useful as a fallback
+        return self._get(
+            "/search",
+            {
+                "page": page, "pagesize": min(pagesize, 100),
+                "order": "desc", "sort": "relevance",
+                "intitle": q,
+                "filter": _QUESTION_FILTER,
+                **({"tagged": tagged} if tagged else {}),
+            },
+        )
+
+    # ---- tag expansion fallback ----
+    def _guess_tags(self, q: str, *, limit: int = 3) -> List[str]:
+        # Find popular tags that contain q (e.g., "python" -> ["python", "python-3.x", ...])
+        r = self._get("/tags", {"inname": q, "order": "desc", "sort": "popular"})
+        tags = [t.get("name") for t in r.get("items", []) or [] if t.get("name")]
+        return tags[:limit]
+
+    def _fetch_by_tags(self, *, tag_list: List[str], pagesize: int, window_days: int) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        from_ts = int((datetime.now(timezone.utc) - timedelta(days=window_days)).timestamp())
+        tagged_csv = ";".join(tag_list)
+        # two complementary pulls: top by votes (recent window) and newest
+        top = self._get("/questions", {
+            "order": "desc", "sort": "votes",
+            "pagesize": pagesize, "fromdate": from_ts,
+            "tagged": tagged_csv, "filter": _QUESTION_FILTER,
+        }).get("items", []) or []
+        recent = self._get("/questions", {
+            "order": "desc", "sort": "creation",
+            "pagesize": pagesize, "fromdate": from_ts,
+            "tagged": tagged_csv, "filter": _QUESTION_FILTER,
+        }).get("items", []) or []
+        out.extend(top); out.extend(recent)
+        return out
+
+    # ---- union & ranking helpers ----
+    def _union_keep_best(self, a: List[Dict[str, Any]], b: List[Dict[str, Any]], *, prefer: str, cap: int) -> List[Dict[str, Any]]:
+        """Merge by question id, keep higher 'prefer' (e.g. score)."""
+        seen: Dict[str, Dict[str, Any]] = {}
+        def _qid(it): 
+            ident = it["identifications"].input_identification  # "q:123"
+            return ident.split(":", 1)[1] if ":" in ident else ident
+        for it in (a + b):
+            qid = _qid(it)
+            prev = seen.get(qid)
+            if not prev or (it.get(prefer, 0) or 0) > (prev.get(prefer, 0) or 0):
+                seen[qid] = it
+        merged = list(seen.values())
+        merged.sort(key=lambda x: ((x.get("score") or 0), x.get("creation_ts", 0)), reverse=True)
+        return merged[:max(cap, len(merged))]
+
+    # ---- body normalization & comments attachment ----
+    def _ensure_body_field(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Make sure each item has a 'body_text' (stripped from body_html if present)."""
+        for it in items:
+            body_html = it.get("body_html") or it.get("body") or ""
+            if body_html and "body_text" not in it:
+                it["body_text"] = self._strip_html_fast(body_html)
+            elif "body_text" not in it:
+                it["body_text"] = ""
+        return items
+
+    def _attach_comments(self, items: List[Dict[str, Any]], *, max_q: int = 20, per_q: int = 20) -> List[Dict[str, Any]]:
+        """Fetch top comments per question (bounded) and attach as 'comments_text' (joined)."""
+        from_ids = []
+        for it in items[:max_q]:
+            ident = it["identifications"].input_identification
+            if ident.startswith("q:"):
+                try:
+                    from_ids.append(int(ident.split(":", 1)[1]))
+                except Exception:
+                    pass
+        if not from_ids:
+            return items
+
+        # Batch comments by up to 100 ids at a time (StackExchange limit is generous for CSV)
+        chunk = 50
+        joined: Dict[int, List[str]] = {}
+        for i in range(0, len(from_ids), chunk):
+            csv_ids = ";".join(str(x) for x in from_ids[i:i+chunk])
+            data = self._get(f"/questions/{csv_ids}/comments", {
+                "order": "desc", "sort": "votes", "pagesize": min(per_q, 100), "filter": _COMMENT_FILTER
+            })
+            for c in data.get("items", []) or []:
+                qid = c.get("post_id")
+                body_html = c.get("body") or ""
+                body_text = self._strip_html_fast(body_html)
+                if qid:
+                    joined.setdefault(qid, []).append(body_text)
+
+        by_qid = {}
+        for it in items:
+            ident = it["identifications"].input_identification
+            if ident.startswith("q:"):
+                try:
+                    qid = int(ident.split(":", 1)[1])
+                    it["comments_text"] = "\n".join(joined.get(qid, []))
+                    by_qid[qid] = it
+                except Exception:
+                    pass
+        return items
+    
+    def _normalize_search_item(self, qobj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        from src.domain.models.indentifications_model import IdentificationsModel
+
+        qid = qobj.get("question_id")
+        title = (qobj.get("title") or "").strip()
+        link = (qobj.get("link") or "").strip()
+        if not qid or not title or not link:
+            return None
+
+        ident = IdentificationsModel(
+            input_identification=f"q:{qid}",
+            title_identification=title,
+            link_identification=link,
+            img_link_identification=None,
+        )
+
+        created = qobj.get("creation_date")
+        creation_ts = float(created) if isinstance(created, (int, float)) else 0.0
+
+        # Keep body for local filtering (StackExchange returns 'body' when filter=withbody)
+        body_html = qobj.get("body") or qobj.get("body_markdown") or ""
+
+        return {
+            "type": "question",
+            "title": title,
+            "url": link,
+            "score": qobj.get("score"),
+            "answer_count": qobj.get("answer_count"),
+            "tags": qobj.get("tags"),
+            "owner": (qobj.get("owner") or {}).get("display_name"),
+            "is_answered": qobj.get("is_answered"),
+            "created": created,
+            "creation_ts": creation_ts,
+            "body_html": body_html,           # <--- keep body
+            "identifications": ident,
+        }
+    
+    def _filter_local(self, items: List[Dict[str, Any]], q: str, *, mode: str) -> List[Dict[str, Any]]:
+        qn = q.casefold()
+        out: List[Dict[str, Any]] = []
+        for it in items:
+            title = (it.get("title") or "")
+            body  = (it.get("body_text") or self._strip_html_fast(it.get("body_html") or "")) or ""
+            comm  = (it.get("comments_text") or "")
+            if mode == "substring":
+                ok = (qn in title.casefold()) or (qn in body.casefold()) or (qn in comm.casefold())
+            else:
+                ok = max(
+                    self._simple_fuzzy_score(title.casefold(), qn),
+                    self._simple_fuzzy_score(body.casefold(), qn),
+                    self._simple_fuzzy_score(comm.casefold(), qn),
+                ) >= 0.78
+            if ok:
+                out.append(it)
+        return out
+
         
 
     # ------------ NEW: generate_context (mirror of RedditAdapter) ------------

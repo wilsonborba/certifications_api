@@ -455,6 +455,151 @@ class CountriesnowAdapter(BaseAdapter):
             "(from the provided list); ‘which year had the highest value’; percent-change math; match flag to country.\n"
             "• Avoid politics, sensitive claims, or predictions. Keep wording clear, neutral, and concise."
         )
+    
+        # ---------- Search (cities & countries) ----------
+    def search(
+        self,
+        *args,
+        q: str,
+        page: int = 1,
+        per_page: int = 30,
+        mode: str = "substring",            # "substring" | "fuzzy" | "fulltext" (alias of substring)
+        max_country_fetch: int = 12,        # safety cap: how many countries to expand into cities when scanning
+        country_sample_if_country_only: int = 6,  # if query matches only a country, return up to N sample cities
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """
+        Finds city–country pairs matching `q`. We match against both city and country names.
+        - substring: case-insensitive 'q in text'
+        - fuzzy: BaseAdapter._simple_fuzzy_score(text, q) >= 0.78
+        - fulltext: treated as 'substring' (remote API has no full-text search)
+
+        Returns the same envelope as get_topics(), each item with IdentificationsModel.
+        """
+        assert isinstance(q, str) and q.strip(), "q must be a non-empty string"
+        assert page >= 1 and per_page >= 1
+
+        qn = q.strip().casefold()
+        if mode not in ("substring", "fuzzy", "fulltext"):
+            mode = "substring"
+        if mode == "fulltext":
+            mode = "substring"
+
+        def _hit(text: Optional[str]) -> bool:
+            t = (text or "").casefold()
+            if not t:
+                return False
+            if mode == "substring":
+                return qn in t
+            return self._simple_fuzzy_score(t, qn) >= 0.78
+
+        # Load countries once
+        try:
+            countries = self._get_countries()  # [{'name': '...'}, ...] sorted
+        except Exception:
+            return {
+                "topics": [],
+                "page": page,
+                "per_page": per_page,
+                "has_more": False,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "item_name": self.item_name,
+                "source_name": self.source_name,
+            }
+
+        # 1) Prioritize countries whose name matches q; we will fetch their cities fully.
+        matched_countries: List[str] = [c["name"] for c in countries if _hit(c["name"])]
+
+        # 2) If no country hit, we need to scan countries and pull cities,
+        #    but we cap expansions for performance.
+        topics: List[Dict[str, Any]] = []
+        fetched_countries = 0
+
+        def _emit(city: str, country: str) -> None:
+            ident = f"{self._slug(city)}__{self._slug(country)}"
+            title = f"{city} — {country}"
+            topics.append({
+                "name": city,
+                "description": country,
+                "url": None,
+                "identifications": IdentificationsModel(
+                    input_identification=ident,
+                    title_identification=title,
+                    link_identification=self._wiki_search_url(city, country),
+                    img_link_identification=self.resolve_flag_url(iso2=None, country=country),
+                ),
+            })
+
+        # Helper: expand one country -> cities that match
+        def _expand_country(country_name: str, need_city_match: bool = True) -> None:
+            nonlocal fetched_countries
+            if fetched_countries >= max_country_fetch:
+                return
+            try:
+                cities = self._get_cities_for_country(country_name)
+            except Exception:
+                return
+            fetched_countries += 1
+
+            hits = []
+            if need_city_match:
+                for city in cities:
+                    if _hit(city) or _hit(f"{city} {country_name}"):
+                        hits.append(city)
+            else:
+                hits = cities[:country_sample_if_country_only] if country_sample_if_country_only > 0 else []
+
+            for city in hits:
+                _emit(city, country_name)
+
+        # (A) Expand matched countries first (any city, but only emit those where city matches too)
+        for cname in matched_countries:
+            _expand_country(cname, need_city_match=True)
+
+        # (B) If we still have room and the query looks like a city (or no country matched),
+        #     scan other countries until we collect enough hits.
+        if len(topics) < per_page:
+            for c in countries:
+                cname = c["name"]
+                if cname in matched_countries:
+                    continue
+                if fetched_countries >= max_country_fetch:
+                    break
+                # pull cities and look for city matches
+                before = len(topics)
+                _expand_country(cname, need_city_match=True)
+                if len(topics) >= per_page:
+                    break
+                # If nothing matched anywhere AND we have a direct country match scenario,
+                # we will add a small sample later.
+
+        # (C) If we matched only country names (no city hits) add a small sample per matched country
+        if not topics and matched_countries:
+            for cname in matched_countries:
+                if fetched_countries >= max_country_fetch:
+                    break
+                _expand_country(cname, need_city_match=False)
+
+        # Stable ordering: sort by (country, city)
+        topics.sort(key=lambda t: ((t.get("description") or "").casefold(),
+                                   (t.get("name") or "").casefold()))
+
+        # Paginate
+        start = (page - 1) * per_page
+        end = start + per_page
+        page_items = topics[start:end]
+        has_more = end < len(topics)
+
+        return {
+            "topics": page_items,
+            "page": page,
+            "per_page": per_page,
+            "has_more": has_more,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "item_name": self.item_name,
+            "source_name": self.source_name,
+        }
+
 
     # ---------- Generate textual quiz context ----------
     def generate_context(self, input_data: Dict[str, Any], amount_question: int = 10) -> str:

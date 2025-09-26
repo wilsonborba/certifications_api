@@ -217,110 +217,255 @@ class HackerNewsAdapter(BaseAdapter):
             "source_name": self.source_name,
         }
 
-    # --------- Optional: Algolia search (same unified TopicsModel) ----------
-    def search_topics(
+       # ---------- SEARCH (Algolia push-down + bounded Firebase fallback) ----------
+    def search(
         self,
-        *,
-        query: str,
+        q: str,
+
         page: int = 1,
-        per_page: int = 30,
-        author: Optional[str] = None,
-        min_points: Optional[int] = None,
-        since_days: Optional[int] = None,
-        tags: Optional[List[str]] = None,  # e.g., ["story"], or ["ask_hn"], ["show_hn"]
+        per_page: int = 20,
+        mode: str = "fulltext",          # "fulltext" | "substring" | "fuzzy"
+        since_days: int | None = None,   # only applies to Algolia path
+        min_points: int | None = None,   # only applies to Algolia path
+        feeds: Optional[List[str]] = None,  # fallback scan buckets, e.g. ["top","new"]
+        fill_page: bool = True,          # if local filtering shrinks results, try to over-fetch (Algolia only)
+        max_feed_pages: int = 2,         # fallback: how many numeric feed pages to scan
+        include_comments_fallback: bool = True,  # fallback: use short comment excerpts in match
+        *args: Any,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         """
-        Full-text HN search via Algolia (returns unified topics).
-        Useful to match Google Trends or in-app queries.
+        Strategy:
+        1) Primary: Algolia /search (push-down fulltext). We map hits -> TopicsModel objects with
+           IdentificationsModel and return them directly for mode="fulltext".
+           For "substring"/"fuzzy", we over-fetch hits and then locally filter/title+text/comment_text.
+        2) Fallback: if Algolia fails/returns nothing, we scan a bounded slice of Firebase feeds
+           (IDs → items) and match query against title + self text + short top comment excerpts.
+
+        Output matches /topics: { item_name, source_name, page, per_page, has_more, updated_at, topics: [...] }.
         """
+        assert isinstance(q, str) and q.strip(), "q must be non-empty"
         assert page >= 1 and per_page >= 1
-        params: Dict[str, Any] = {
-            "query": query or "",
-            "page": page - 1,            # Algolia pages are 0-based
-            "hitsPerPage": per_page,
-        }
+        qn = q.casefold()
 
-        # tags
-        # Examples: tags=story | ask_hn | show_hn | author_<name>
-        algolia_tags: List[str] = []
-        if tags:
-            algolia_tags.extend(tags)
-        if author:
-            algolia_tags.append(f"author_{author}")
-        if algolia_tags:
-            params["tags"] = ",".join(algolia_tags)
+        # ---------------- Algolia path (preferred) ----------------
+        try:
+            # Over-fetch a bit so we can locally filter for substring/fuzzy without starving the page
+            over = per_page if mode != "fulltext" else 0
+            hits_per_page = min(50, per_page + over)
 
-        # numeric filters: points, created_at_i
-        numeric_filters: List[str] = []
-        if min_points is not None:
-            numeric_filters.append(f"points>={int(min_points)}")
-        if since_days is not None:
-            since_ts = int((datetime.now(timezone.utc) - timedelta(days=int(since_days))).timestamp())
-            numeric_filters.append(f"created_at_i>={since_ts}")
-        if numeric_filters:
-            params["numericFilters"] = ",".join(numeric_filters)
-
-        data = self._get_json(f"{ALGOLIA_BASE}/search", params)  # search_by_date works too
-        hits: List[Dict[str, Any]] = list(data.get("hits", []))
-
-        topics: List[Dict[str, Any]] = []
-        for h in hits:
-            # Map Algolia fields to our normalized story shape
-            tag = "story"
-            title = h.get("title") or h.get("story_title")
-            url = h.get("url") or h.get("story_url")
-            text = h.get("story_text") or h.get("comment_text")
-            created_i = h.get("created_at_i")
-            author = h.get("author")
-            points = h.get("points")
-            num_comments = h.get("num_comments")
-
-            # Derive ask/show from title (Algolia also has tags but we already normalized tags above)
-            low_title = (title or "").lower()
-            if low_title.startswith("ask hn"):
-                tag = "ask"
-            elif low_title.startswith("show hn"):
-                tag = "show"
-
-            topic = {
-                "type": "story",
-                "section": "search",
-                "tag": tag,
-                "id": h.get("objectID"),
-                "title": title,
-                "url": url,
-                "text": text,
-                "text_excerpt": (_strip_html_to_text(text)[:400] if text else None),
-                "score": points,
-                "time": created_i,
-                "time_iso": _iso(created_i),
-                "author": author,
-                "comment_count": num_comments,
+            params: Dict[str, Any] = {
+                "query": q,
+                "page": page - 1,                # Algolia is 0-based
+                "hitsPerPage": hits_per_page,
             }
-            # topic["input_identification"] = str(topic["id"]) if topic.get("id") is not None else None
-            topic["topic_type"] = "story"
+            # optional filters
+            if since_days is not None:
+                since_ts = int((datetime.now(timezone.utc) - timedelta(days=int(since_days))).timestamp())
+                params["numericFilters"] = f"created_at_i>={since_ts}"
+            if min_points is not None:
+                nf = params.get("numericFilters")
+                extra = f"points>={int(min_points)}"
+                params["numericFilters"] = f"{nf},{extra}" if nf else extra
 
-            topic['identification'] = IdentificationsModel(
-                input_identification=str(topic["id"]) if topic.get("id") is not None else None,
-                title_identification=topic.get("title"),
-                link_identification=topic.get("url"),
-                img_link_identification=None,
-            )
+            data = self._get_json(f"{ALGOLIA_BASE}/search", params)  # search_by_date also possible
+            hits: List[Dict[str, Any]] = list(data.get("hits", []))
 
+            # Normalize hits → topics with IdentificationsModel
+            topics_all = []
+            for h in hits:
+                norm = self._normalize_algolia_hit(h)
+                if norm:
+                    topics_all.append(norm)
 
-            topics.append(topic)
+            # Local filtering for substring/fuzzy modes (title + text bodies)
+            if mode in ("substring", "fuzzy"):
+                topics_all = self._apply_local_filter(topics_all, qn, mode=mode)
 
-        has_more = (page * per_page) < int(data.get("nbHits", 0))
+            # Stable sort: points desc, recency desc
+            topics_all.sort(key=self._rank_topic, reverse=True)
+
+            # Paginate (Algolia already paged, but we may have filtered more)
+            topics = topics_all[:per_page]
+            has_more = bool(data.get("nbPages")) and (page < int(data.get("nbPages", 0)))
+
+            if topics:
+                return {
+                    "item_name": self.item_name,
+                    "source_name": self.source_name,
+                    "page": page,
+                    "per_page": per_page,
+                    "has_more": has_more,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "topics": topics,
+                }
+        except Exception:
+            # fall through to Firebase fallback
+            pass
+
+        # ---------------- Firebase fallback (bounded scan) ----------------
+        feeds = feeds or ["top", "new"]
+        quota_per_feed = max(1, per_page // max(1, len(feeds)))
+
+        collected: List[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        for feed in feeds:
+            # Scan up to max_feed_pages of this feed
+            ids = self._fetch_ids(feed)
+            for page_idx in range(max_feed_pages):
+                if len(collected) >= per_page:
+                    break
+                start = page_idx * quota_per_feed
+                end = start + quota_per_feed
+                if start >= len(ids):
+                    break
+                items = self._fetch_items(ids[start:end])
+                for it in items:
+                    if it.get("type") != "story":
+                        continue
+                    # Lightweight normalization (similar to _norm_story but minimal)
+                    title = (it.get("title") or "").strip()
+                    body_html = it.get("text") if (title.lower().startswith("ask hn") or title.lower().startswith("show hn")) else None
+                    body_txt = _strip_html_to_text(body_html) if body_html else None
+                    # optional comment excerpts to widen recall
+                    excerpts = []
+                    if include_comments_fallback and it.get("kids"):
+                        top = self._fetch_top_comments(it, limit=2)
+                        excerpts = [(c.get("excerpt") or "") for c in top if c.get("excerpt")]
+
+                    hay = " ".join(filter(None, [title, body_txt] + excerpts)).casefold()
+                    ok = (qn in hay) if mode != "fuzzy" else (self._simple_fuzzy_score(hay, qn) >= 0.78)
+                    if not ok:
+                        continue
+
+                    sid = str(it.get("id"))
+                    if sid in seen_ids:
+                        continue
+                    seen_ids.add(sid)
+
+                    # Build normalized topic
+                    link = it.get("url") or f"https://news.ycombinator.com/item?id={sid}"
+                    topic = {
+                        "type": "story",
+                        "section": feed,
+                        "tag": self._tag_from_title_or_type(it),
+                        "id": it.get("id"),
+                        "title": it.get("title"),
+                        "url": it.get("url"),
+                        "text": it.get("text"),
+                        "text_excerpt": (body_txt[:400] if body_txt else None),
+                        "score": it.get("score"),
+                        "time": it.get("time"),
+                        "time_iso": _iso(it.get("time")),
+                        "author": it.get("by"),
+                        "comment_count": it.get("descendants"),
+                    }
+                    # IMPORTANT: use IdentificationsModel (front requires it)
+                    topic["identifications"] = IdentificationsModel(
+                        input_identification=sid,
+                        title_identification=topic.get("title"),
+                        link_identification=link,
+                        img_link_identification=None,
+                    )
+                    collected.append(topic)
+
+                if len(collected) >= per_page:
+                    break
+
+        collected.sort(key=self._rank_topic, reverse=True)
+        topics = collected[:per_page]
+        has_more = len(collected) > per_page
 
         return {
-            "topics": topics,
+            "item_name": self.item_name,
+            "source_name": self.source_name,
             "page": page,
             "per_page": per_page,
             "has_more": has_more,
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
-            "item_name": self.item_name,
-            "source_name": self.source_name,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "topics": topics,
         }
+
+    def _normalize_algolia_hit(self, h: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Map Algolia hit to our 'story' topic object + IdentificationsModel.
+        Prioritize external URL; fallback to HN discussion link.
+        """
+        from src.domain.models.indentifications_model import IdentificationsModel
+
+        tid = h.get("objectID")
+        if not tid:
+            return None
+        title = h.get("title") or h.get("story_title") or ""
+        if not title.strip():
+            return None
+        url = h.get("url") or h.get("story_url")
+        hn_link = f"https://news.ycombinator.com/item?id={tid}"
+        link = url or hn_link
+
+        text = h.get("story_text") or h.get("comment_text")
+        text_excerpt = _strip_html_to_text(text)[:400] if text else None
+
+        low_title = title.lower()
+        tag = "story"
+        if low_title.startswith("ask hn"):
+            tag = "ask"
+        elif low_title.startswith("show hn"):
+            tag = "show"
+
+        topic = {
+            "type": "story",
+            "section": "search",
+            "tag": tag,
+            "id": tid,
+            "title": title,
+            "url": url,                 # may be None; 'link' below is what UI should open
+            "text": text,
+            "text_excerpt": text_excerpt,
+            "score": h.get("points"),
+            "time": h.get("created_at_i"),
+            "time_iso": _iso(h.get("created_at_i")),
+            "author": h.get("author"),
+            "comment_count": h.get("num_comments"),
+        }
+
+        topic["identifications"] = IdentificationsModel(
+            input_identification=str(tid),
+            title_identification=title,
+            link_identification=link,
+            img_link_identification=None,
+        )
+        return topic
+
+    def _apply_local_filter(self, items: List[Dict[str, Any]], qn: str, *, mode: str) -> List[Dict[str, Any]]:
+        """
+        Filter on title + text_excerpt + text (when present).
+        """
+        out: List[Dict[str, Any]] = []
+        for it in items:
+            title = (it.get("title") or "").casefold()
+            bodye = (it.get("text_excerpt") or "").casefold()
+            body  = (it.get("text") or "").casefold()
+            hay = " ".join((title, bodye, body))
+            if mode == "fuzzy":
+                ok = self._simple_fuzzy_score(hay, qn) >= 0.78
+            else:
+                ok = qn in hay
+            if ok:
+                out.append(it)
+        return out
+
+    def _rank_topic(self, it: Dict[str, Any]):
+        """
+        Higher points first, then newer first, then title tiebreaker.
+        """
+        pts = it.get("score") or 0
+        ts  = it.get("time") or 0
+        return (pts, ts, it.get("title") or "")
+
+
+
 
     # ---------- Input: full item fetch ----------
     def get_input(

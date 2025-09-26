@@ -48,6 +48,7 @@ All notable changes to this project will be documented in this file.
 - *(ai)* Improved to clean useless char data for input
 - *(ai)* Improved to have amount of question and language of route to generate question
 - *(adapter)* Created a search method
+- *(adapter)* Created a search method for all adapters
 
 ### ⚙️ Miscellaneous Tasks
 

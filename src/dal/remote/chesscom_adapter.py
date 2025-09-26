@@ -521,6 +521,313 @@ class ChessComAdapter(BaseAdapter):
         )
 
         return input_5
+    
+        # ---------- SEARCH (bounded local over News + Players) ----------
+    def search(
+        self,
+        q: str,
+        page: int = 1,
+        per_page: int = 20,
+        mode: str = "fulltext",        # "fulltext" | "substring" | "fuzzy"
+        fill_page: bool = True,
+        max_extra_pages: int = 2,      # only used to pull more news pages when filter shrinks results
+        *args: Any,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """
+        No first-class Chess.com search API exists, so we implement:
+          - News: scrape /news?page=N (starting at `page`) → title match; if needed, enrich a bounded set by
+                   fetching article bodies and matching there too.
+          - Players: pull leaderboards once and match on username/title; optionally enrich a few profiles to
+                     match on real 'name' as well.
+        Bounded & fast: we only fetch (page + up to max_extra_pages) news pages when needed, and enrich bodies
+        for at most ~8 articles + ~12 player profiles total per call.
+        """
+        assert isinstance(q, str) and q.strip(), "q must be non-empty"
+        assert page >= 1 and per_page >= 1
+        qn = q.casefold()
+
+        # ------------------- gather candidates -------------------
+        # News: start from requested numeric page
+        news_items = self._fetch_news_page(page)
+
+        # Players: single call to leaderboards (already bounded)
+        players_items = self._fetch_leaderboards()
+
+        # Normalize buckets
+        news_norm = [self._normalize_news_topic(x) for x in news_items]
+        news_norm = [x for x in news_norm if x is not None]
+
+        players_norm = [self._normalize_player_topic(x) for x in players_items]
+        players_norm = [x for x in players_norm if x is not None]
+
+        # ------------------- filtering modes -------------------
+        # For adapters without server pushdown, treat "fulltext" as substring on what we already have.
+        selected: List[Dict[str, Any]] = []
+
+        # 1) first-pass: title/username on already-fetched lists (cheap)
+        if mode in ("fulltext", "substring", "fuzzy"):
+            selected.extend(self._filter_news_light(news_norm, q, mode))
+            selected.extend(self._filter_players_light(players_norm, q, mode))
+
+        # Need more? Enrich content and re-filter (bounded)
+        MIN_OK = min(5, per_page)  # make sure we return something for common queries
+        need_more = len(selected) < MIN_OK
+
+        if need_more:
+            # a) Pull extra news pages (bounded) and re-apply light filter
+            extra_scanned = 0
+            next_page = page + 1
+            while extra_scanned < max_extra_pages and len(selected) < MIN_OK:
+                more_news = self._fetch_news_page(next_page)
+                extra_scanned += 1
+                next_page += 1
+                cand = [self._normalize_news_topic(x) for x in more_news]
+                cand = [x for x in cand if x]
+                selected.extend(self._filter_news_light(cand, q, mode))
+
+            # b) Enrich a limited number of news items with article body and substring/fuzzy into body
+            if len(selected) < MIN_OK:
+                selected = self._enrich_and_filter_news_body(selected, q, limit_enrich=8, mode=mode)
+
+            # c) Enrich a limited number of players with profile 'name' and match there too
+            if len(selected) < per_page:
+                selected = self._enrich_and_filter_player_name(players_norm, q, limit_profiles=12, carry=selected, mode=mode)
+
+        # ------------------- sort & paginate (stable) -------------------
+        # Score: prefer news recency + players rank/score; keep deterministic fallback by title
+        def _rank_key(it: Dict[str, Any]):
+            if it.get("type") == "news":
+                # use published (iso) if present
+                ts = self._iso_to_ts(it.get("published"))
+                return (2, ts or 0, it.get("title") or "")
+            else:
+                # player: higher score/rank first (rank smaller is better → invert)
+                rank = it.get("rank") or 1e9
+                score = it.get("score") or 0
+                return (1, -score, -1.0 / max(rank, 1), it.get("title") or "")
+
+        # dedupe by ident (news slug URL / username)
+        seen = set()
+        deduped: List[Dict[str, Any]] = []
+        for it in selected:
+            ident = it["identifications"].input_identification
+            if ident in seen:
+                continue
+            seen.add(ident)
+            deduped.append(it)
+
+        deduped.sort(key=_rank_key, reverse=True)
+
+        # Pagination of the merged result (we already limited sources; this is UI paging)
+        start = (page - 1) * per_page
+        end = start + per_page
+        topics = deduped[start:end]
+        has_more = end < len(deduped)
+
+        return {
+            "item_name": self.item_name,
+            "source_name": self.source_name,
+            "page": page,
+            "per_page": per_page,
+            "has_more": has_more,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "topics": topics,
+        }
+
+    # ---------- normalization ----------
+    def _normalize_news_topic(self, t: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Accepts one element from _fetch_news_page() and ensures IdentificationsModel is present.
+        """
+        from src.domain.models.indentifications_model import IdentificationsModel
+        title = (t.get("title") or "").strip()
+        url   = (t.get("url") or "").strip()
+        if not title or not url:
+            return None
+        slug = self._news_id_from_url(url) or url
+        ident = IdentificationsModel(
+            input_identification=slug,
+            title_identification=title,
+            link_identification=url,
+            img_link_identification=t.get("image"),
+        )
+        out = dict(t)
+        out["identifications"] = ident
+        return out
+
+    def _normalize_player_topic(self, t: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Accepts one element from _fetch_leaderboards() and ensures IdentificationsModel is present.
+        """
+        from src.domain.models.indentifications_model import IdentificationsModel
+        username = (t.get("username") or "").strip()
+        url      = (t.get("url") or "").strip()
+        if not username or not url:
+            return None
+        title = (t.get("title") or "")  # GM/IM/FM etc.
+        ident = IdentificationsModel(
+            input_identification=username,
+            title_identification=f"{username} {title}".strip(),
+            link_identification=url,
+            img_link_identification=t.get("icon"),
+        )
+        out = dict(t)
+        out["identifications"] = ident
+        # convenience fields for ranking
+        out["rank"] = t.get("rank")
+        out["score"] = t.get("score")
+        return out
+
+    # ---------- light filters on already-fetched lists ----------
+    def _filter_news_light(self, items: List[Dict[str, Any]], q: str, mode: str) -> List[Dict[str, Any]]:
+        qn = q.casefold()
+        out: List[Dict[str, Any]] = []
+        for it in items:
+            title = (it.get("title") or "").casefold()
+            if mode == "fuzzy":
+                if self._simple_fuzzy_score(title, qn) >= 0.78:
+                    out.append(it)
+            else:  # fulltext/substring
+                if qn in title:
+                    out.append(it)
+        return out
+
+    def _filter_players_light(self, items: List[Dict[str, Any]], q: str, mode: str) -> List[Dict[str, Any]]:
+        qn = q.casefold()
+        out: List[Dict[str, Any]] = []
+        for it in items:
+            uname = (it.get("username") or "").casefold()
+            title = (it.get("title") or "").casefold()
+            combo = f"{uname} {title}"
+            if mode == "fuzzy":
+                if self._simple_fuzzy_score(combo, qn) >= 0.78:
+                    out.append(it)
+            else:
+                if (qn in uname) or (qn in title):
+                    out.append(it)
+        return out
+
+    # ---------- enrichment: news body ----------
+    def _enrich_and_filter_news_body(
+        self,
+        selected: List[Dict[str, Any]],
+        q: str,
+        *,
+        limit_enrich: int = 8,
+        mode: str = "substring",
+    ) -> List[Dict[str, Any]]:
+        """
+        For up to `limit_enrich` news items that DON'T yet match by title, fetch article page,
+        extract text blocks, and match q against body (substring/fuzzy).
+        """
+        qn = q.casefold()
+        keep = list(selected)
+        # Choose candidates from recent news not already selected
+        # (we’ll just re-fetch current page; caller already extended pages if needed)
+        tried = 0
+        # Build a small set from 'selected' to avoid duplicates
+        already = {it["identifications"].input_identification for it in selected}
+        # We can re-use the current page news list quickly
+        base_news = self._fetch_news_page(1)  # page 1 is hottest; cheap heuristic
+        for raw in base_news:
+            if tried >= limit_enrich:
+                break
+            n = self._normalize_news_topic(raw)
+            if not n:
+                continue
+            ident = n["identifications"].input_identification
+            if ident in already:
+                continue
+            tried += 1
+
+            url = n.get("url")
+            try:
+                soup = self._get_html(url)
+            except Exception:
+                continue
+
+            # pull a compact body (similar to get_input)
+            main = soup.select_one(".post-view-component, article, main") or soup
+            blocks: List[str] = []
+            for p in main.select("p"):
+                txt = p.get_text(" ", strip=True)
+                if txt:
+                    blocks.append(txt)
+            for li in main.select("li"):
+                txt = li.get_text(" ", strip=True)
+                if txt:
+                    blocks.append(txt)
+            body_text = " \n".join(blocks)[:6000]  # cap
+
+            ok = False
+            if mode == "fuzzy":
+                ok = self._simple_fuzzy_score(body_text.casefold(), qn) >= 0.78
+            else:
+                ok = qn in body_text.casefold()
+
+            if ok:
+                n2 = dict(n)
+                n2["body_hit"] = True
+                keep.append(n2)
+
+        return keep
+
+    # ---------- enrichment: player real name ----------
+    def _enrich_and_filter_player_name(
+        self,
+        players_norm: List[Dict[str, Any]],
+        q: str,
+        *,
+        limit_profiles: int = 12,
+        carry: List[Dict[str, Any]],
+        mode: str = "substring",
+    ) -> List[Dict[str, Any]]:
+        qn = q.casefold()
+        keep = list(carry)
+        already = {it["identifications"].input_identification for it in carry}
+
+        count = 0
+        for it in players_norm:
+            if count >= limit_profiles or len(keep) >= 2 * limit_profiles:
+                break
+            uname = it.get("username")
+            if not uname or uname in already:
+                continue
+            count += 1
+            # Fetch profile to get 'name'
+            try:
+                prof = self._get_json(f"{CHESS_API_BASE}/player/{uname}")
+            except Exception:
+                continue
+            real_name = (prof.get("name") or "").casefold()
+            if not real_name:
+                continue
+
+            ok = False
+            if mode == "fuzzy":
+                ok = self._simple_fuzzy_score(real_name, qn) >= 0.78
+            else:
+                ok = qn in real_name
+
+            if ok:
+                keep.append(it)
+                already.add(uname)
+
+        return keep
+
+
+    def _iso_to_ts(self, iso: Optional[str]) -> Optional[float]:
+        try:
+            if not iso:
+                return None
+            # Best-effort parsing; chess.com sometimes omits TZ—treat as UTC
+            s = iso.replace("T", " ").replace("Z", "")
+            dt = datetime.strptime(s, "%Y-%m-%d %H:%M")
+            return dt.replace(tzinfo=timezone.utc).timestamp()
+        except Exception:
+            return None
+
 
 
     # ---------- Instructions: concise & creativity-friendly ----------

@@ -320,6 +320,99 @@ class CompaniesMarketCapAdapter(BaseAdapter):
             "• Avoid speculation (future prices), investment advice, or unverifiable claims. Keep wording clear and answerable from the context."
         )
 
+        # ---------- SEARCH: bounded list-scan with local filtering ----------
+    def search(
+        self,
+        q: str,
+        *,
+        page: int = 1,
+        per_page: int = 20,
+        mode: str = "fulltext",            # "fulltext" | "substring" | "fuzzy"
+        fill_page: bool = True,            # tenta completar per_page buscando páginas seguintes
+        max_extra_pages: int = 2,          # segurança: máximo de páginas extras além da 'page' solicitada
+        # adapter-specific tunables:
+        start_from_catalog_page: int | None = None,  # força iniciar a varredura a partir de /page/N
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """
+        CompaniesMarketCap não tem busca pública estável; fazemos varredura limitada de /page/<n>/.
+        - 'page' e 'per_page' paginam o *resultado filtrado* (como nos demais adapters).
+        - 'mode':
+            - fulltext -> trata como substring local (name/slug)
+            - substring -> idem
+            - fuzzy -> usa uma heurística barata de similaridade
+        - 'fill_page': se a página filtrada estiver “magra”, busca páginas seguintes até 'max_extra_pages'.
+
+        Retorna o mesmo envelope de /topics com 'topics' normalizados e IdentificationsModel.
+        """
+        assert isinstance(q, str) and q.strip(), "q deve ser não-vazio"
+        assert page >= 1 and per_page >= 1
+
+        qn = q.casefold()
+        if mode not in ("fulltext", "substring", "fuzzy"):
+            mode = "fulltext"
+
+        # De qual página de catálogo começamos a varrer? (por padrão, da 'page' pedida)
+        cat_page = start_from_catalog_page if (isinstance(start_from_catalog_page, int) and start_from_catalog_page >= 1) else page
+
+        # 1) Coleta candidatos da(s) página(s) do catálogo
+        collected: list[dict] = []
+        scanned_pages = 0
+        next_catalog_page = cat_page
+
+        # regra: precisamos coletar pelo menos 'page * per_page' itens correspondentes
+        # para poder “pular” (page-1) páginas filtradas e retornar a 'page' pedida.
+        target_needed = page * per_page
+
+        while next_catalog_page and scanned_pages <= max_extra_pages and len(collected) < max(target_needed, per_page):
+            # reaproveita o parser da listagem
+            soup = self._get_html(f"{BASE}/page/{next_catalog_page}/")
+            raw = self._extract_companies(soup)  # já retorna objetos normalizados + IdentificationsModel
+
+            # Filtragem local
+            filtered = []
+            for it in raw:
+                name = (it.get("name") or "").casefold()
+                link = (it.get("url") or "")
+                slug = (link.strip("/").split("/", 1)[0]).casefold() if link else ""
+                hay = f"{name} {slug}"
+
+                if mode in ("fulltext", "substring"):
+                    ok = (qn in hay)
+                else:  # fuzzy
+                    ok = self._simple_fuzzy_score(hay, qn) >= 0.78
+
+                if ok:
+                    filtered.append(it)
+
+            collected.extend(filtered)
+            scanned_pages += 1
+            next_catalog_page += 1  # próxima página do catálogo
+
+            # se já temos materiais suficientes para montar até a página solicitada, paramos
+            if len(collected) >= target_needed:
+                break
+
+        # 2) Ordenação simples: por nome (estável/alfabética) para experiência previsível
+        collected.sort(key=lambda x: (x.get("name") or "").casefold())
+
+        # 3) Página filtrada: "page" é sobre a lista *filtrada*
+        start = (page - 1) * per_page
+        end = start + per_page
+        topics_page = collected[start:end]
+        has_more = len(collected) > end
+
+        return {
+            "item_name": self.item_name,
+            "source_name": self.source_name,
+            "page": page,
+            "per_page": per_page,
+            "has_more": has_more,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "topics": topics_page,
+        }
+
+
     # ---------- Generate textual context ----------
     def generate_context(self, input_data: Dict[str, Any], amount_question: int = 10) -> str:
         d = input_data or {}

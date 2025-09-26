@@ -426,6 +426,129 @@ class WikipediaAdapter(BaseAdapter):
                 "input_data": {},  # <- EMPTY on error
                 "updated_at": _now_iso(),
             }
+        
+        # ---------------- search ----------------
+    def search(
+        self,
+        *args: Any,
+        q: str,
+        page: int = 1,
+        per_page: int = 30,
+        mode: str = "api",                 # "api" | "fuzzy" | "fulltext"(alias of "api")
+        min_fuzzy: float = 0.60,           # only used when mode="fuzzy" (post-filter threshold)
+        namespace: int = 0,                # 0 = main/article
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """
+        Wikipedia search with paging, optional fuzzy rerank.
+
+        - mode="api": direct MediaWiki 'search' (best relevance) with paging.
+        - mode="fuzzy": fetch via API, then rerank using BaseAdapter._simple_fuzzy_score
+                        over title+snippet; also tries 'prefixsearch' fallback if needed.
+        - mode="fulltext": alias of "api".
+        Returns the same envelope as get_topics().
+        """
+        assert page >= 1 and per_page >= 1
+        q_raw = (q or "").strip()
+        if not q_raw:
+            return {
+                "topics": [],
+                "page": page,
+                "per_page": per_page,
+                "has_more": False,
+                "updated_at": _now_iso(),
+                "item_name": self.item_name,
+                "source_name": self.source_name,
+            }
+
+        mode = mode or "api"
+        if mode == "fulltext":
+            mode = "api"
+
+        # -- primary: list=search (supports sroffset for paging)
+        sroffset = (page - 1) * per_page
+        try:
+            res = self._mw_get({
+                "action": "query",
+                "list": "search",
+                "srsearch": q_raw,
+                "srlimit": min(per_page, 50),
+                "sroffset": sroffset,
+                "srnamespace": namespace,
+            })
+            hits = (res.get("query") or {}).get("search") or []
+            total_hits = int((res.get("query") or {}).get("searchinfo", {}).get("totalhits", 0))
+        except Exception:
+            hits, total_hits = [], 0
+
+        # -- fallback if nothing found: list=prefixsearch (prefix suggester)
+        fallback_used = False
+        if not hits:
+            try:
+                pref = self._mw_get({
+                    "action": "query",
+                    "list": "prefixsearch",
+                    "pssearch": q_raw,
+                    "pslimit": min(per_page, 50),
+                    "psoffset": sroffset,
+                    "psnamespace": namespace,
+                })
+                hits = (pref.get("query") or {}).get("prefixsearch") or []
+                total_hits = len(hits) + sroffset  # best-effort
+                fallback_used = True
+            except Exception:
+                hits, total_hits = [], 0
+
+        # Normalize hits -> (title, snippet, score_like)
+        items: List[Tuple[float, Dict[str, Any]]] = []
+        for h in hits:
+            title = h.get("title")
+            if not title:
+                continue
+            snippet = _strip_html(h.get("snippet") or h.get("matched") or "")
+            link = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
+            base_score = float(h.get("score") or 0.0)
+
+            # Optional fuzzy post-score (title + snippet)
+            if mode == "fuzzy":
+                hay = f"{title} {snippet}".casefold()
+                s = self._simple_fuzzy_score(hay, q_raw.casefold())
+                if s < min_fuzzy:
+                    continue
+                score = base_score + (s * 100.0)  # blend, keep API order meaningful
+            else:
+                score = base_score
+
+            items.append((score, {
+                "type": "article",
+                "title": title,
+                "description": snippet or None,
+                "url": link,
+                "identifications": IdentificationsModel(
+                    input_identification=title,
+                    title_identification=snippet or title,
+                    link_identification=link,
+                    img_link_identification=None,
+                ),
+                "score": score,
+                "fallback": fallback_used,
+            }))
+
+        # Sort (desc by score), then stable by title
+        items.sort(key=lambda t: (-t[0], t[1]["title"].lower()))
+        topics = [it for _, it in items[:per_page]]
+
+        has_more = (page * per_page) < max(total_hits, len(items))
+        return {
+            "topics": topics,
+            "page": page,
+            "per_page": per_page,
+            "has_more": has_more,
+            "updated_at": _now_iso(),
+            "item_name": self.item_name,
+            "source_name": self.source_name,
+        }
+
 
     # ---------------- context ----------------
     def generate_context(self, input_data: Dict[str, Any], amount_question: int = 10) -> str:

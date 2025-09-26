@@ -84,6 +84,20 @@ class BaseAdapter(ABC):
         """
         ...
 
+    def _simple_fuzzy_score(self, text: str, query: str) -> float:
+        if not text or not query:
+            return 0.0
+        if query in text:
+            return min(1.0, 0.6 + len(query) / max(len(text), len(query)))
+        pref = 1.0 if text.startswith(query) else 0.0
+        suff = 1.0 if text.endswith(query) else 0.0
+        best = 0; qlen = len(query)
+        for w in range(min(qlen, 8), 1, -1):
+            if any(query[i:i+w] in text for i in range(0, qlen - w + 1)):
+                best = w; break
+        base = best / qlen
+        return min(1.0, 0.15 + 0.35 * base + 0.25 * pref + 0.25 * suff)
+
     
 
         
