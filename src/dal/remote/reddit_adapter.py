@@ -423,6 +423,242 @@ class RedditAdapter(BaseAdapter):
             "item_name": self.item_name,
             "source_name": self.source_name,
         }
+    
+    def search(
+        self,
+        q: str,
+        *,
+        page: int = 1,
+        per_page: int = 20,
+        mode: str = "fulltext",           # "fulltext" | "substring" | "fuzzy"
+        time_window: str | None = None,   # "hour","day","week","month","year","all"
+        fill_page: bool = True,           # tenta completar per_page após filtrar
+        max_extra_pages: int = 2,         # limite de páginas extras para fill
+    ) -> dict:
+        assert isinstance(q, str) and q.strip(), "q vazio"
+        assert page >= 1 and per_page >= 1
+
+        # 1) Caminhar até a página pedida usando 'after'
+        cursor = None
+        for _ in range(page - 1):
+            _, cursor = self._search_page(q=q, limit=per_page, after=cursor, sort="relevance", t=time_window)
+            if not cursor:
+                return {
+                    "item_name": self.item_name,
+                    "source_name": self.source_name,
+                    "page": page,
+                    "per_page": per_page,
+                    "has_more": False,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "topics": [],
+                }
+
+        children, next_after = self._search_page(q=q, limit=per_page, after=cursor, sort="relevance", t=time_window)
+        items = [self._normalize_search_child(c) for c in children]
+        items = [it for it in items if it is not None]  # remove inválidos
+
+        # 2) Modos de busca
+        if mode in ("substring", "fuzzy"):
+            # enriquecer com corpo p/ filtrar localmente
+            items = self._enrich_with_body(items)
+            items = self._apply_substring(items, q) if mode == "substring" else self._apply_fuzzy(items, q)
+
+            # opcionalmente tentar completar per_page pegando páginas seguintes
+            if fill_page and len(items) < per_page and next_after:
+                items, next_after = self._fill_current_page(
+                    base_items=items,
+                    already_seen_ids={it["identifications"].input_identification for it in items},
+                    q=q,
+                    mode=mode,
+                    time_window=time_window,
+                    after=next_after,
+                    per_page=per_page,
+                    max_extra_pages=max_extra_pages,
+                )
+
+        # 3) Ordenação leve por score e recência
+        items.sort(key=lambda x: ((x.get("score") or 0), self._safe_ts(x.get("created_at"))), reverse=True)
+
+        return {
+            "item_name": self.item_name,
+            "source_name": self.source_name,
+            "page": page,
+            "per_page": per_page,
+            "has_more": bool(next_after),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "topics": items[:per_page],   # drop-in para o grid atual
+        }
+
+    # ---------- HELPERS (SEARCH) ----------
+    def _search_page(self, *, q: str, limit: int, after: str | None, sort: str, t: str | None):
+        params = {"q": q, "limit": max(1, min(limit, 100)), "sort": sort}
+        if t:
+            params["t"] = t
+        if after:                                 # <-- FALTAVA ISSO
+            params["after"] = after
+        data = self._get("/search", params=params).get("data", {}) or {}
+        return (data.get("children", []) or [], data.get("after"))
+
+    def _normalize_search_child(self, child: dict) -> dict | None:
+        from src.domain.models.indentifications_model import IdentificationsModel  # usa seu DataClass
+
+        d = (child or {}).get("data") or {}
+        rid = d.get("name")            # t3_xxx
+        title = (d.get("title") or "").strip()
+        permalink = d.get("permalink")
+        link = (f"https://www.reddit.com{permalink}" if permalink else d.get("url") or "").strip()
+
+        # front exige id + title + link não vazios; se faltar, descarta
+        if not rid or not title or not link:
+            return None
+
+        thumb = d.get("thumbnail")
+        img = thumb if isinstance(thumb, str) and thumb.startswith("http") else None
+
+        ident = IdentificationsModel(
+            input_identification=rid,
+            title_identification=title,
+            link_identification=link,
+            img_link_identification=img,
+        )
+
+        return {
+            "type": "post",
+            "title": title,
+            "url": link,
+            "score": d.get("score"),
+            "created_at": self._utc_to_iso(d.get("created_utc")),
+            "identifications": ident,  # <<-- DataClass, como no get_topics
+        }
+
+    def _enrich_with_body(self, items: list[dict]) -> list[dict]:
+        ids = [it["identifications"].input_identification for it in items]
+        if not ids:
+            return items
+
+        chunk = 50
+        id_chunks = [ids[i:i+chunk] for i in range(0, len(ids), chunk)]
+        by_id = {}
+        for ch in id_chunks:
+            data = self._get("/api/info", params={"id": ",".join(ch)})
+            for c in ((data.get("data") or {}).get("children") or []):
+                d = (c or {}).get("data") or {}
+                by_id[d.get("name")] = d
+
+        enriched = []
+        for it in items:
+            rid = it["identifications"].input_identification
+            d = by_id.get(rid, {})
+            body = (d.get("selftext") or "").strip()
+            it2 = dict(it)
+            it2["body"] = body
+            enriched.append(it2)
+        return enriched
+
+    def _apply_substring(self, items: list[dict], q: str) -> list[dict]:
+        qn = (q or "").casefold()
+        out = []
+        for it in items:
+            title = (it.get("title") or "")
+            body = (it.get("body") or "")
+            if (qn in title.casefold()) or (qn in body.casefold()):
+                it2 = dict(it)
+                it2["highlights"] = self._make_highlights(title, body, q)
+                out.append(it2)
+        return out
+
+    def _apply_fuzzy(self, items: list[dict], q: str, *, threshold: float = 0.78) -> list[dict]:
+        qn = (q or "").casefold()
+        out = []
+        for it in items:
+            title = (it.get("title") or "").casefold()
+            body  = (it.get("body") or "").casefold()
+            st = self._simple_fuzzy_score(title, qn)
+            sb = self._simple_fuzzy_score(body,  qn)
+            if max(st, sb) >= threshold:
+                it2 = dict(it)
+                it2["highlights"] = self._make_highlights(it.get("title") or "", it.get("body") or "", q)
+                out.append(it2)
+        return out
+
+    def _fill_current_page(
+        self,
+        *,
+        base_items: list[dict],
+        already_seen_ids: set[str],
+        q: str,
+        mode: str,
+        time_window: str | None,
+        after: str | None,
+        per_page: int,
+        max_extra_pages: int,
+    ) -> tuple[list[dict], str | None]:
+        """
+        Busca mais 1..N páginas para completar per_page após filtro, sem estourar custo.
+        """
+        items = list(base_items)
+        cursor = after
+        extra_scanned = 0
+
+        while cursor and len(items) < per_page and extra_scanned < max_extra_pages:
+            children, next_after = self._search_page(q=q, limit=per_page, after=cursor, sort="relevance", t=time_window)
+            cand = [self._normalize_search_child(c) for c in children]
+            cand = [it for it in cand if it is not None and it["identifications"].input_identification not in already_seen_ids]
+
+            if mode in ("substring", "fuzzy"):
+                cand = self._enrich_with_body(cand)
+                cand = self._apply_substring(cand, q) if mode == "substring" else self._apply_fuzzy(cand, q)
+
+            for it in cand:
+                if len(items) >= per_page:
+                    break
+                rid = it["identifications"].input_identification
+                if rid in already_seen_ids:
+                    continue
+                already_seen_ids.add(rid)
+                items.append(it)
+
+            cursor = next_after
+            extra_scanned += 1
+
+        return items, cursor
+
+    # ---------- utilitários usados ----------
+    def _make_highlights(self, title: str, body: str, q: str, ctx: int = 40) -> dict:
+        def _hl(txt: str, q_: str) -> str | None:
+            t = txt or ""
+            i = t.casefold().find(q_.casefold())
+            if i == -1: return None
+            start = max(0, i - ctx); end = min(len(t), i + len(q_) + ctx)
+            return t[start:end]
+        return {
+            "title": _hl(title, q) or (title[:80] if title else None),
+            "snippet": _hl(body, q)  or ((body or "")[:160] or None),
+        }
+
+    def _simple_fuzzy_score(self, text: str, query: str) -> float:
+        if not text or not query: return 0.0
+        if query in text: return min(1.0, 0.6 + len(query) / max(len(text), len(query)))
+        pref = 1.0 if text.startswith(query) else 0.0
+        suff = 1.0 if text.endswith(query) else 0.0
+        best = 0; qlen = len(query)
+        for w in range(min(qlen, 8), 1, -1):
+            if any(query[i:i+w] in text for i in range(0, qlen - w + 1)): best = w; break
+        base = best / qlen
+        return min(1.0, 0.15 + 0.35 * base + 0.25 * pref + 0.25 * suff)
+
+    def _utc_to_iso(self, ts: float | int | None) -> str | None:
+        try:
+            if ts is None: return None
+            return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+        except Exception:
+            return None
+
+    def _safe_ts(self, iso: str | None) -> float:
+        try:
+            return datetime.fromisoformat(iso).timestamp() if iso else 0.0
+        except Exception:
+            return 0.0
 
     def generate_context(self, input_data: Dict[str, Any], amount_question: int = 10) -> str:
         post = input_data.get("post", {})

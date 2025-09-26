@@ -698,7 +698,7 @@ class PdfAdapter(BaseAdapter):
         raw = await file.read()
         return cls(raw, file.filename, upload=file)
         
-    
+
 
     def get_preview(self, mode):
         return PreviewModel(
@@ -1075,6 +1075,9 @@ class PdfAdapter(BaseAdapter):
             error(f"Gemini AI injection scan error [{type(e).__name__}]: {e}")
 
             raise e
+        
+    def search(self, query):
+        return super().search(query)
         
     def generate_context(self, input_data, amount_question):
 

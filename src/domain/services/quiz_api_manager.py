@@ -180,6 +180,67 @@ class QuizAPIManager(BaseQuizManager):
             input_data=response_from_adapter.get("input_data", None),
             updated_at=response_from_adapter.get("updated_at", datetime.now(timezone.utc).isoformat()),
         ).to_dict()
+    
+    def search(
+    self,
+    item_name: str,
+    q: str,
+    page: int = 1,
+    per_page: int = 45,
+    mode: str = "fulltext",          # fulltext | substring | fuzzy
+    time_window: str | None = None,
+    fill_page: bool = True,
+    max_extra_pages: int = 2,
+    ) -> dict[str, any]:
+        adapter = self.adapters_factory.get_adapter(item_name)
+        if not adapter:
+            error(f"No adapter found for source: {item_name}")
+            return TopicModel(
+                item_name=item_name,
+                page=page,
+                per_page=per_page,
+                topics=[],
+                has_more=False,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+                source_name=None,
+            ).to_dict()
+
+        try:
+            # DELEGAR para o adapter (o adapter já aplica 'mode')
+            res = adapter.search(
+                q=q,
+                page=page,
+                per_page=per_page,
+                mode=mode,                 # <-- antes estava faltando
+                time_window=time_window,
+                fill_page=fill_page,
+                max_extra_pages=max_extra_pages,
+            ) or {}
+        except Exception as ex:
+            error(f"Adapter search failed for {item_name}: {ex}")
+            return TopicModel(
+                item_name=item_name,
+                page=page,
+                per_page=per_page,
+                topics=[],
+                has_more=False,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+                source_name=None,
+            ).to_dict()
+
+        # Normalizar o envelope — garantir chaves esperadas
+        topics = res.get("topics", []) or []
+        return {
+            "item_name": res.get("item_name", item_name),
+            "source_name": res.get("source_name"),
+            "page": res.get("page", page),
+            "per_page": res.get("per_page", per_page),
+            "has_more": bool(res.get("has_more")),
+            "updated_at": res.get("updated_at", datetime.now(timezone.utc).isoformat()),
+            "topics": topics,
+        }
+    
+
         
     async def generate_context(
         self,

@@ -70,6 +70,12 @@ class BaseAdapter(ABC):
         """
         ...
 
+    @abstractmethod
+    def search(self, *args, **kwargs) -> List[Dict[str, Any]]:
+        """
+        Optional: Search within the adapter's data.
+        """
+        return []
     
     @abstractmethod
     def generate_context(self, input_data: Dict[str, Any], amount_question) -> str:
