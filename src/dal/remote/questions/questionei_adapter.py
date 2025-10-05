@@ -31,6 +31,33 @@ class QuestioneiAdapter(BaseAdapter):
             item_img="https://res.cloudinary.com/dhncdmb2t/image/upload/v1759674527/Screenshot_2025-10-05_212654_z36vec.png",
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
+    
+    def instructions(self) -> str:
+        """
+        Use ONLY the provided Questionei content (statement, metadata, alternatives) to write
+        multiple-choice questions. Requirements:
+
+        • Output MUST be valid JSON in the exact structure provided by context_output_structure().
+        • Each item must include: "question", "correct_answer", "options" (4 strings),
+          "justification" (short, evidence-based), and "difficulty" (1–6, Bloom-like).
+        • Prefer using the existing alternatives from the page. If some options are missing,
+          craft plausible distractors aligned with the statement/meta.
+        • Choose a single, best-supported correct_answer. If none is explicit, infer the
+          most defensible option strictly from the text; do NOT leave placeholders like
+          “not available” and do NOT omit the correct answer.
+        • Keep wording precise and unambiguous; avoid external facts and speculation.
+        • Justification must reference phrases/ideas that appear in the statement or meta
+          (e.g., banca/ano/tema) and briefly explain why the correct option is right.
+        """
+        return (
+            "Use ONLY the provided Questionei content (statement, metadata, alternatives) to write "
+            "multiple-choice questions. Requirements:\n"
+            "Choose a single, best-supported correct_answer. If none is explicit, infer the most defensible option strictly from the text;\n"
+            "• Prefer page alternatives; if incomplete, create plausible distractors from the text/meta.\n"
+            "• Pick one best-supported correct_answer—never use placeholders or omit it.\n"
+            "• Be precise. Justify using phrases/ideas present in the statement/meta."
+            "Justification must reference phrases/ideas that appear in the statement or meta (e.g., banca/ano/tema) and briefly explain why the correct option is right."
+        )
 
     def get_topics(
         self,
@@ -684,8 +711,83 @@ class QuestioneiAdapter(BaseAdapter):
 
     
 
-    def generate_context(self, input_data: Dict[str, Any], amount_question) -> str:
+       # ---------- NEW: compact context generator ----------
+    def generate_context(self, input_data: Dict[str, Any], amount_question=10) -> str:
         """
-        Generate a context string from the input data.
+        Produce a compact, structured context from Questionei input_data,
+        without extra guidance. The model instructions live in instructions().
         """
-        ...
+        # Accept either {"input_data": {...}} or {...} directly
+        idata = input_data.get("input_data") if isinstance(input_data, dict) and "input_data" in input_data else (input_data or {})
+        subject = idata.get("subject") or "unknown-subject"
+        page = idata.get("page")
+        per_page = idata.get("per_page")
+        questions = idata.get("questions") or []
+
+        # Small normalizers to keep the prompt lean
+        def _trim(txt: Optional[str], limit: int = 900) -> str:
+            if not txt:
+                return ""
+            t = " ".join(str(txt).split())
+            return t if len(t) <= limit else (t[:limit].rstrip() + " …")
+
+        def _fmt_meta(meta: Dict[str, Any]) -> str:
+            parts = []
+            for k, v in (meta or {}).items():
+                if isinstance(v, list):
+                    vals = []
+                    for it in v:
+                        if isinstance(it, dict):
+                            t = it.get("text") or ""
+                            href = it.get("href")
+                            vals.append(f"{t} ({href})" if href else t)
+                        else:
+                            vals.append(str(it))
+                    parts.append(f"{k}: {', '.join([x for x in vals if x])}")
+                elif isinstance(v, dict):
+                    t = v.get("text") or ""
+                    href = v.get("href")
+                    parts.append(f"{k}: {t} ({href})" if href else f"{k}: {t}")
+                else:
+                    if v is not None:
+                        parts.append(f"{k}: {v}")
+            return "; ".join(p for p in parts if p)
+
+        lines: List[str] = []
+        lines.append("Questionei Context")
+        lines.append(f"Subject: {subject}")
+        if page is not None:     lines.append(f"Page: {page}")
+        if per_page is not None: lines.append(f"PerPage: {per_page}")
+        lines.append(f"Items: {len(questions)}")
+        lines.append("")
+
+        for i, q in enumerate(questions, start=1):
+            qid = q.get("id") or "unknown-id"
+            qurl = q.get("url") or ""
+            idx = q.get("index")
+            meta = q.get("meta") or {}
+            stmt = _trim(q.get("text"), 1200)
+            alts = q.get("alternatives") or []
+
+            lines.append(f"- Q#{i} id={qid}" + (f" index={idx}" if idx is not None else ""))
+            if qurl:
+                lines.append(f"  source: {qurl}")
+            m = _fmt_meta(meta)
+            if m:
+                lines.append(f"  meta: {m}")
+            lines.append(f"  statement: {stmt or '[missing]'}")
+            if alts:
+                # keep at most 6 alternatives to reduce size
+                lines.append("  alternatives:")
+                for a in alts[:6]:
+                    letter = (a.get("letter") or "").strip()
+                    txt = _trim(a.get("text"), 300)
+                    if txt:
+                        lines.append(f"    - {letter}: {txt}")
+            else:
+                lines.append("  alternatives: [none]")
+
+        lines.append("")
+        context = "\n".join(lines)
+        context += self.context_output_structure(amount_question=amount_question)
+        return context
