@@ -2,6 +2,7 @@
 
 
 
+from src.dal.remote.questions.questionei_adapter import QuestioneiAdapter
 from src.dal.remote.questions.jsq_adapter import JsQuestionsAdapter
 from src.dal.remote.questions.sat_adapter import SatAdapter
 from src.dal.remote.questions.enem_adapter import EnemAdapter
@@ -42,6 +43,7 @@ class AdapterFactory:
         #"sat": SatAdapter,
         #"js-questions": JsQuestionsAdapter,
         "wikipedia": WikipediaAdapter,
+        "questionei": QuestioneiAdapter,
         
     }
 
