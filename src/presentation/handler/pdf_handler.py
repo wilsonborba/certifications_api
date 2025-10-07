@@ -7,7 +7,7 @@ from fastapi import Request, UploadFile
 from src.domain.services.quiz_pdf_manager import QuizPDFManager
 from src.presentation.handler.responses import DocumentNotFoundError, InvalidTotalPagesError, MalwareDetectedError, UnsupportedFileTypeError
 from src.dal.local.pdf_adapter import PdfAdapter
-from src.core.logs import error, debug
+from src.core.logs import error, debug, info
 from typing import List, Dict, Any, Optional, Tuple
 
 from src.dal.local.redis_adapter import RedisAdapter
@@ -102,6 +102,7 @@ async def get_context_from_pdf(
         request: Request, 
         document_id: str, 
         selected_language: str,
+        user_uuid_id: str,
         selected_pages: str = 'all', 
         amount_question: int = 10,
         ) -> dict:
@@ -113,6 +114,25 @@ async def get_context_from_pdf(
             amount_question=amount_question,
             selected_language=selected_language
         )
+    
+    status_code = quiz_pdf_manager.pdf_adapter.gemini.last_status_code or 200
+    attempts = quiz_pdf_manager.pdf_adapter.gemini.last_attempts or 1
+    latency_ms = quiz_pdf_manager.pdf_adapter.gemini.last_latency_ms or 0.0
+
+    user_usage_tracking = quiz_pdf_manager.save_ai_user_usage(
+            user_uuid_id=user_uuid_id,
+            raw_context=response,
+            status_code=status_code,
+            attempts=attempts,
+            latency_ms=latency_ms,
+            source_item_name=None,
+            source_input_identification=None,
+            is_for_pdf=True
+        )
+    
+    info(f"User usage tracking saved: {user_usage_tracking}")
+    
+    
 
     return response
 

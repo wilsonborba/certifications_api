@@ -1,11 +1,13 @@
 
 
+from datetime import datetime
 from typing import List
 from abc import ABC, abstractmethod
 import re, unicodedata, hashlib
 from typing import List, Dict, Any, Optional
 from math import sqrt
 from difflib import SequenceMatcher
+from src.dal.local.db_adapter import DBAdapter
 from src.core.logs import debug, error
 
 def _cosine_sim(vec_a: list[float], vec_b: list[float]) -> float:
@@ -49,6 +51,9 @@ def _sha256(s: str) -> str:
 
 
 class BaseQuizManager(ABC):
+
+    def __init__(self):
+        self.db_adapter = DBAdapter()
 
     
     @abstractmethod
@@ -185,3 +190,132 @@ class BaseQuizManager(ABC):
                     return True
 
         return False
+    
+    
+    def save_ai_user_usage(
+        self, 
+        user_uuid_id: str,
+        raw_context: dict[str, Any],
+        status_code: int,
+        attempts: int,
+        latency_ms: float,
+        source_item_name: str,
+        source_input_identification: str,
+        is_for_pdf: bool,
+        ):
+        """
+        # app/models.py
+        import uuid
+        from django.db import models
+
+        from accredit.models.source_input import Input
+        from accredit.models.source_item import SourceItem
+
+
+        class AIUsageEvent(models.Model):
+
+            id = models.BigAutoField(primary_key=True)
+
+            # Who
+            user_uuid_id = models.UUIDField(db_index=True)
+
+            # What (human-readable; e.g. "google: gemini-2.5-flash")
+            provider_model_description = models.CharField(max_length=200)
+
+            # Usage
+            total_tokens = models.IntegerField()
+
+            # Timing / status
+            created_at = models.DateTimeField(auto_now_add=True)  # store UTC at the DB/app level
+            latency_ms = models.IntegerField()
+            status_code = models.IntegerField()  # e.g., 200, 429, 500
+
+            attempts = models.IntegerField(default=1)  # number of attempts (1 = first try, 2 = one retry, etc)
+
+            is_for_pdf = models.BooleanField()
+
+            source_item = models.ForeignKey(SourceItem, on_delete=models.CASCADE, null=True)
+            source_input = models.ForeignKey(Input, on_delete=models.CASCADE, null=True)
+
+
+            # Everything else from the provider (usageMetadata, responseId, etc.)
+            raw_usage = models.JSONField()  # postgres jsonb under the hood
+
+            class Meta:
+                indexes = [
+                    models.Index(fields=["user_uuid_id", "created_at"]),
+                    models.Index(fields=["created_at"]),
+                    models.Index(fields=["status_code"]),
+                ]
+
+            def __str__(self) -> str:
+                return f"{self.provider_model_description} user={self.user_id} {self.created_at:%Y-%m-%d %H:%M:%S}Z"
+
+                
+        """
+
+        
+            
+
+        usage_metadata = raw_context.get("usageMetadata", {})
+        total_tokens = usage_metadata.get("totalTokenCount", 0)
+
+        usage_metadata.update({'responseId': raw_context.get("responseId", "")})
+
+        provider_model_description = raw_context.get("modelVersion", "unknown")
+
+        source_item_db = None
+        input_db = None
+
+        if not is_for_pdf:
+
+            source_item_db = self.db_adapter.read_where_one(
+                "accredit_sourceitem", {"item_name": source_item_name}
+            )
+
+            if not source_item_db:
+                error(f"Source item not found in DB for item_name: {source_item_name}")
+                raise ValueError("Source item must be cached before saving questions.")
+            
+            input_db = self.db_adapter.read_where_one(
+                "accredit_input",
+                {"source_item_id": source_item_db["id"], "input_identification": source_input_identification}
+            )
+            if not input_db:
+                error(f"Input not found in DB for item_name: {source_item_name}, input_identification: {source_input_identification}")
+                raise ValueError("Input must be cached before saving questions.")
+        
+        # user_uuid_id is a string, but the DB field is UUIDField, so it will be converted automatically
+        # for example to generate a random UUID: import uuid; str(uuid.uuid4())
+
+        return self.db_adapter.insert_row(
+            "accredit_aiusageevent",
+            {
+                "user_uuid_id": user_uuid_id or "00000000-0000-0000-0000-000000000000",
+                "provider_model_description": provider_model_description,
+                "total_tokens": total_tokens,
+                "latency_ms": int(latency_ms),
+                "status_code": status_code,
+                "attempts": attempts,
+                "is_for_pdf": is_for_pdf,
+                "source_item_id": source_item_db["id"] if source_item_db else None,
+                "source_input_id": input_db["id"] if input_db else None,
+                "raw_usage": usage_metadata,
+                "created_at": datetime.now(),
+            }
+        )
+
+
+
+
+
+
+        
+
+
+
+        
+
+
+
+

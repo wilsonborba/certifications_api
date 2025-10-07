@@ -19,7 +19,7 @@ class QuizAPIManager(BaseQuizManager):
     
     def __init__(self):
         super().__init__()
-        self.db_adapter = DBAdapter()
+        
         self.adapters_factory = AdapterFactory()
         self.gemini_client = GeminiClient()
 
@@ -472,8 +472,7 @@ class QuizAPIManager(BaseQuizManager):
 
         return {"inserted": inserted, "skipped_exact": skipped_exact, "skipped_similar": skipped_similar}
 
-    
-
+   
 
 
 

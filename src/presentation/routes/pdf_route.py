@@ -43,20 +43,21 @@ async def get_topic_pdf(
 
     except ValueError as e:
         # from adapter.validate() or your own checks
-        response.status_code = status.HTTP_400_BAD_REQUEST
         error(f"PDF ingestion error: {e}")
+        response.status_code = status.HTTP_400_BAD_REQUEST
         return MyResponse(data=None, message=f"A bad request was made, please check your input...")
     except UnsupportedFileTypeError as e:
-        response.status_code = status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
         error(f"Unsupported file type: {e}")
+        response.status_code = status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
         return MyResponse(data=None, message=str(e))
     except MalwareDetectedError as e:
+        error(f"Malware detected in uploaded file: {e}")
         response.status_code = status.HTTP_409_CONFLICT
         return MyResponse(data=None, message=str(e))
     except Exception as e:
         # unexpected errors
-        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
         error(f"Internal server error: {e}")
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
         return MyResponse(data=None, message="Internal server error...")
 
  
@@ -82,13 +83,16 @@ async def get_pdf_input(
             message="PDF input retrieved successfully.",
         )
     except ValueError as e:
+        error(f"PDF input retrieval error: {e}")
         response.status_code = status.HTTP_400_BAD_REQUEST
         return MyResponse(data=None, message=f"A bad request was made, please check your input...")
     except DocumentNotFoundError as e:
+        error(f"Document not found: {e}")
         response.status_code = status.HTTP_404_NOT_FOUND
         return MyResponse(data=None, message=str(e))
     
     except InvalidTotalPagesError as e:
+        error(f"Invalid total pages: {e}")
         response.status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
         return MyResponse(data=None, message=str(e))
     
@@ -111,13 +115,16 @@ async def get_pdf_context(
     amount_question: int = Query(10, description="Number of questions to generate")
 ):
     
+    user_uuid_id = request.headers.get("x-uuid")
+    
     try:
         ai_result = await get_context_from_pdf(
             request=request,
             document_id=document_id,
             selected_pages=selected_pages,
             amount_question=amount_question,
-            selected_language=selected_language
+            selected_language=selected_language,
+            user_uuid_id=user_uuid_id
         )
         response.status_code = status.HTTP_200_OK
         return MyResponse(
@@ -138,22 +145,27 @@ async def get_pdf_context(
         )
     
     except AIGenerationError as e:
+        error(f"AI generation error: {e}")
         response.status_code  = status.HTTP_503_SERVICE_UNAVAILABLE
         return MyResponse(data=None, message=str(e))
     
     except MalwareDetectedError as e:
+        error(f"Malware detected in document: {e}")
         response.status_code = status.HTTP_409_CONFLICT
         return MyResponse(data=None, message=str(e))
 
 
     except ValueError as e:
+        error(f"PDF context retrieval error: {e}")
         response.status_code = status.HTTP_400_BAD_REQUEST
         return MyResponse(data=None, message=f"A bad request was made, please check your input...")
     
     except DocumentNotFoundError as e:
+        error(f"Document not found: {e}")
         response.status_code = status.HTTP_404_NOT_FOUND
         return MyResponse(data=None, message=str(e))
     except InvalidTotalPagesError as e:
+        error(f"Invalid total pages: {e}")
         response.status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
         return MyResponse(data=None, message=str(e))
     

@@ -56,6 +56,20 @@ class GeminiClient:
         self.cfg = cfg or GeminiConfig()
         self._own_client = client is None
         self._client = client or httpx.AsyncClient(timeout=self.cfg.timeout)
+        self._last_status_code: int | None = None
+        self._last_attempts: int = 0
+        self._last_latency_ms: float = 0.0
+
+    @property
+    def last_status_code(self) -> int | None: return self._last_status_code
+
+    @property
+    def last_attempts(self) -> int: return self._last_attempts
+
+    @property
+    def last_latency_ms(self) -> float: return self._last_latency_ms
+
+
 
     # --------------- public API ---------------
 
@@ -260,20 +274,28 @@ class GeminiClient:
         max_retries: int = 3,
     ) -> httpx.Response:
         attempt = 0
+        
+        
+        t0 = time.perf_counter()
         while True:
             attempt += 1
             resp = await self._client.request(method, url, headers=headers, params=params, json=json, content=content)
             if resp.status_code < 400:
+                self._last_status_code = resp.status_code
+                self._last_attempts = attempt
+                self._last_latency_ms = (time.perf_counter() - t0) * 1000.0
                 return resp
 
-            # Retry 429/5xx with simple backoff (respect Retry-After if present)
             if resp.status_code in (429, 500, 502, 503, 504) and attempt <= max_retries:
                 retry_after = resp.headers.get("retry-after")
                 delay = float(retry_after) if retry_after and retry_after.isdigit() else min(2.0 * attempt, 10.0)
                 await asyncio.sleep(delay)
                 continue
 
-            # Surface structured error
+            # failure path
+            self._last_status_code = resp.status_code
+            self._last_attempts = attempt
+            self._last_latency_ms = (time.perf_counter() - t0) * 1000.0
             try:
                 payload = resp.json()
             except Exception:
