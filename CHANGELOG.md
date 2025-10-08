@@ -57,6 +57,7 @@ All notable changes to this project will be documented in this file.
 ### 🐛 Bug Fixes
 
 - *(pdf)* Fixed some errors to load correctly the quiz
+- *(cards)* Fixed the return from db or ai
 
 ### ⚙️ Miscellaneous Tasks
 

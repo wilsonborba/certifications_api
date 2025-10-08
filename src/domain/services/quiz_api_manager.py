@@ -264,6 +264,10 @@ class QuizAPIManager(BaseQuizManager):
             cached = self.get_questions(item_name=item_name, input_identification=input_identification, amount_question=amount_question)
             if cached:
                 debug(f"Questions found in DB for {item_name} - {input_identification}")
+                for item in cached['questions']:
+                    item.pop("correct_answer")
+                    item.pop("justification")
+                
                 return cached
             else:
                 debug(f"Questions NOT found in DB for {item_name} - {input_identification}. Generating...")
@@ -455,6 +459,7 @@ class QuizAPIManager(BaseQuizManager):
             saved_questions.append({
                 "id": question_id,
                 "question_text": qtext,
+                "options": options,
             })
 
             # Insert Answers

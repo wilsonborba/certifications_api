@@ -44,11 +44,17 @@ async def generate_and_save_questions(
         
         info(f"User usage tracking saved: {user_usage_tracking}")
 
-        raw_json_str = context['candidates'][0]['content']['parts'][0]['text']
-        parsed = json.loads(raw_json_str)
-        result = quiz_handler.save_questions(item_name=item_name, input_identification=input_identification, response=parsed)
+
         
-        saved_questions = [q for q in result.saved_questions]
+        if "questions" in context and "candidates" not in context:
+            saved_questions = context["questions"]
+
+        else:
+            debug(f"{'questions' in context} not found, trying candidates...")
+            raw_json_str = context['candidates'][0]['content']['parts'][0]['text']
+            parsed = json.loads(raw_json_str)
+            result = quiz_handler.save_questions(item_name=item_name, input_identification=input_identification, response=parsed)
+            saved_questions = [q for q in result.saved_questions]
 
         return saved_questions
 
