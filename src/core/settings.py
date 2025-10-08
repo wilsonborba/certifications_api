@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://127.0.0.1:6379/0"
     REDIS_NAMESPACE: str = "accredit_api:"
 
+    QUESTIONS_PREFIX: str = "questions"
+    
+
+
     @property
     def accredit_db(self) -> DatabaseConfig:
         return DatabaseConfig(

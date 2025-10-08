@@ -1,13 +1,19 @@
 
 
 
+import datetime
 from typing import Any, Dict
 from fastapi import UploadFile
+from src.core.settings import app_settings
+from src.domain.models.quiz_result_model import QuizResultModel
 from src.core.logs import error
 
 from src.presentation.handler.responses import AIGenerationError, MalwareDetectedError
 from src.dal.local.pdf_adapter import PdfAdapter
 from src.domain.services.quiz_base import BaseQuizManager
+
+
+settings = app_settings()
 
 
 class QuizPDFManager(BaseQuizManager):
@@ -46,8 +52,67 @@ class QuizPDFManager(BaseQuizManager):
     def get_input(self, selected_pages: str | None, total_pages: int, input_data) -> Dict[str, Any]:
         return self.pdf_adapter.get_input(selected_pages, total_pages, input_data)
     
-    def save_questions(self):
-        pass
+    def save_questions(
+        self,
+        response: dict[str, any],
+        document_id: str,
+        amount_question: int,
+        attempt_index: int,
+        user_uuid_id: str,
+        *args,
+        **kwargs
+        ) -> QuizResultModel:
+
+        """Will save question into Redis, (bcuz if the user didnt start the quiz, no need to save into main DB )"""
+
+        items = response.get("questions", []) or []
+
+        saved_questions = []
+
+        questions_pdf_id = self.redis_adapter.k(
+        settings.QUESTIONS_PREFIX,
+        document_id,
+        attempt_index
+        )
+
+        for idx, item in enumerate(items):
+            qtext = (item.get("question") or "").strip()
+            correct = item.get("correct_answer")
+            options = item.get("options", []) or []
+            difficulty = item.get("difficulty")
+            justification = item.get("justification")
+
+
+            question_data = {
+                "question_id": idx + 1,
+                "user_uuid_id": user_uuid_id,
+                "question": qtext,
+                "correct_answer": correct,
+                "options": options,
+                "difficulty": difficulty,
+                "justification": justification
+            }
+
+        
+
+
+
+        saved_questions.append(question_data)
+
+        self.redis_adapter.set(questions_pdf_id, saved_questions, ex=1800 + (amount_question * 60))  # 30 min + amount of question == minutes expiration
+
+        # remove correct answer from options for quiz taking, and justification and remove user_uuid_id
+        for q in saved_questions:
+            q.pop("correct_answer", None)
+            q.pop("justification", None)
+            q.pop("user_uuid_id", None)
+
+
+        return QuizResultModel(
+            saved_questions=saved_questions,
+            identification=document_id,
+            created_at=datetime.now().isoformat()
+        )
 
     def get_questions(self):
         pass

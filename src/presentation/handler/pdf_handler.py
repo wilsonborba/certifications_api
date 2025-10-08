@@ -2,12 +2,13 @@
 
 
 
+import json
 from fastapi import Request, UploadFile
 
 from src.domain.services.quiz_pdf_manager import QuizPDFManager
 from src.presentation.handler.responses import DocumentNotFoundError, InvalidTotalPagesError, MalwareDetectedError, UnsupportedFileTypeError
 from src.dal.local.pdf_adapter import PdfAdapter
-from src.core.logs import error, debug, info
+from src.core.logs import error, debug, info, warning
 from typing import List, Dict, Any, Optional, Tuple
 
 from src.dal.local.redis_adapter import RedisAdapter
@@ -98,6 +99,57 @@ async def get_input_from_pdf(request: Request, document_id: str, selected_pages:
     return inputs
 
 
+async def generate_and_save_questions(
+        request: Request,
+        document_id: str,
+        selected_language: str,
+        user_uuid_id: str,
+        attempt_index: int,
+        selected_pages: str = 'all',
+        amount_question: int = 10,
+    ) -> dict:
+
+    input_data = await get_input_from_pdf(request, document_id, selected_pages)
+
+    response = await quiz_pdf_manager.generate_context(
+        input_data=input_data,
+        selected_language=selected_language,
+        user_uuid_id=user_uuid_id,
+        amount_question=amount_question
+    )
+
+    status_code = quiz_pdf_manager.pdf_adapter.gemini.last_status_code or 200
+    attempts = quiz_pdf_manager.pdf_adapter.gemini.last_attempts or 1
+    latency_ms = quiz_pdf_manager.pdf_adapter.gemini.last_latency_ms or 0.0
+
+    user_usage_tracking = quiz_pdf_manager.save_ai_user_usage(
+        user_uuid_id=user_uuid_id,
+        raw_context=response,
+        status_code=status_code,
+        attempts=attempts,
+        latency_ms=latency_ms,
+        source_item_name=None,
+        source_input_identification=None,
+        is_for_pdf=True
+    )
+
+    info(f"User usage tracking saved: {user_usage_tracking}")
+
+    raw_json_str = response['candidates'][0]['content']['parts'][0]['text']
+    parsed = json.loads(raw_json_str)
+    result = quiz_pdf_manager.save_questions(
+        user_uuid_id=user_uuid_id,
+        response=parsed,
+        document_id=document_id,
+        amount_question=amount_question,
+        attempt_index=attempt_index
+    )
+
+    saved_questions = [q for q in result.saved_questions]
+
+    return saved_questions
+
+
 async def get_context_from_pdf(
         request: Request, 
         document_id: str, 
@@ -107,34 +159,47 @@ async def get_context_from_pdf(
         amount_question: int = 10,
         ) -> dict:
     
-    input_data = await get_input_from_pdf(request, document_id, selected_pages)
 
-    response = await quiz_pdf_manager.generate_context(
-            input_data=input_data,
-            amount_question=amount_question,
-            selected_language=selected_language
-        )
-    
-    status_code = quiz_pdf_manager.pdf_adapter.gemini.last_status_code or 200
-    attempts = quiz_pdf_manager.pdf_adapter.gemini.last_attempts or 1
-    latency_ms = quiz_pdf_manager.pdf_adapter.gemini.last_latency_ms or 0.0
+    try:
 
-    user_usage_tracking = quiz_pdf_manager.save_ai_user_usage(
+        saved_questions = await generate_and_save_questions(
+            request=request,
+            document_id=document_id,
+            selected_language=selected_language,
             user_uuid_id=user_uuid_id,
-            raw_context=response,
-            status_code=status_code,
-            attempts=attempts,
-            latency_ms=latency_ms,
-            source_item_name=None,
-            source_input_identification=None,
-            is_for_pdf=True
+            selected_pages=selected_pages,
+            amount_question=amount_question,
+            attempt_index=1
         )
+
+        if len(saved_questions) > amount_question:
+            saved_questions = saved_questions[:amount_question]
     
-    info(f"User usage tracking saved: {user_usage_tracking}")
-    
+        if len(saved_questions) < amount_question:
+            warning(f"Only {len(saved_questions)} questions were saved, less than requested {amount_question}")
+        
+
+            new_saved_questions = await generate_and_save_questions(
+                request=request,
+                document_id=document_id,
+                selected_language=selected_language,
+                user_uuid_id=user_uuid_id,
+                selected_pages=selected_pages,
+                amount_question=amount_question,
+                attempt_index=2
+            )
+            
+            saved_questions = saved_questions + new_saved_questions
+
+
+        return saved_questions
+
+    except Exception as e:
+        raise e
     
 
-    return response
+
+    
 
 
 

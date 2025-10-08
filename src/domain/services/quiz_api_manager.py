@@ -3,6 +3,7 @@
 
 from datetime import datetime, timezone
 import json
+from src.domain.models.quiz_result_model import QuizResultModel
 from src.domain.services.quiz_base import BaseQuizManager, _normalize_text, _sha256
 from src.core.settings import app_settings
 from src.dal.remote.gemini import GeminiClient
@@ -365,7 +366,7 @@ class QuizAPIManager(BaseQuizManager):
     *,
     item_name: str,
     input_identification: str,
-    ) -> dict[str, any]:
+    ) -> QuizResultModel:
         """
         Persist Gemini questions for the given (item_name, input_identification).
         Skips exact duplicates by hash and near-duplicates by similarity rule (>=0.71).
@@ -394,6 +395,8 @@ class QuizAPIManager(BaseQuizManager):
         inserted = 0
         skipped_exact = 0
         skipped_similar = 0
+
+        saved_questions = []
 
         for q in items:
             qtext = (q.get("question") or "").strip()
@@ -449,6 +452,11 @@ class QuizAPIManager(BaseQuizManager):
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
 
+            saved_questions.append({
+                "id": question_id,
+                "question_text": qtext,
+            })
+
             # Insert Answers
             for idx, opt in enumerate(options):
                 opt_text = (opt or "").strip()
@@ -470,7 +478,11 @@ class QuizAPIManager(BaseQuizManager):
 
             inserted += 1
 
-        return {"inserted": inserted, "skipped_exact": skipped_exact, "skipped_similar": skipped_similar}
+        return QuizResultModel(
+            saved_questions=saved_questions,
+            identification=f"{item_name}:{input_identification}",
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
 
    
 

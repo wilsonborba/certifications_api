@@ -7,6 +7,7 @@ import re, unicodedata, hashlib
 from typing import List, Dict, Any, Optional
 from math import sqrt
 from difflib import SequenceMatcher
+from domain.models.quiz_result_model import QuizResultModel
 from src.dal.local.db_adapter import DBAdapter
 from src.core.logs import debug, error
 
@@ -73,7 +74,7 @@ class BaseQuizManager(ABC):
         raise NotImplementedError("Subclasses must implement this method.")
     
     @abstractmethod
-    def save_questions(self):
+    def save_questions(self)-> QuizResultModel:
         raise NotImplementedError("Subclasses must implement this method.")
     
     def _is_too_similar(

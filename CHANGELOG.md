@@ -52,6 +52,7 @@ All notable changes to this project will be documented in this file.
 - *(adapter)* Created a questionei adapters for questions
 - *(adapter)* Created a questionei adapter generation context
 - *(analytics)* Created a tracking ai user usage process
+- *(question)* Removed answers from quiz and saved pdf in redis
 
 ### ⚙️ Miscellaneous Tasks
 
