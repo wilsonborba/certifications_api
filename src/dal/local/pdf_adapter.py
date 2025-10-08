@@ -11,7 +11,8 @@ from typing import List, Dict, Any, Optional, Tuple
 from PIL import Image
 import pytesseract
 from unstructured.partition.pdf import partition_pdf
-from dal.local.redis_adapter import RedisAdapter
+from src.core.settings import app_settings
+from src.dal.local.redis_adapter import RedisAdapter
 from src.dal.remote.gemini import GeminiClient, GeminiConfig
 from src.dal.remote.base import BaseAdapter
 from src.domain.models.preview_model import PreviewModel
@@ -23,6 +24,8 @@ import os, time, re, json
 import hashlib
 import textwrap
 
+
+settings = app_settings()
 
 try:
     import clamd
@@ -692,7 +695,7 @@ class PdfAdapter(BaseAdapter):
             )
 
         self.gemini = GeminiClient(GeminiConfig(timeout=240.0))
-        self.redis = RedisAdapter()
+        
 
 
     @classmethod

@@ -5,6 +5,7 @@
 import json
 from fastapi import Request, UploadFile
 
+from src.core.utils import get_redis_adapter
 from src.domain.services.quiz_pdf_manager import QuizPDFManager
 from src.presentation.handler.responses import DocumentNotFoundError, InvalidTotalPagesError, MalwareDetectedError, UnsupportedFileTypeError
 from src.dal.local.pdf_adapter import PdfAdapter
@@ -109,12 +110,13 @@ async def generate_and_save_questions(
         amount_question: int = 10,
     ) -> dict:
 
+    redis_adapter = get_redis_adapter(request)
+
     input_data = await get_input_from_pdf(request, document_id, selected_pages)
 
     response = await quiz_pdf_manager.generate_context(
         input_data=input_data,
         selected_language=selected_language,
-        user_uuid_id=user_uuid_id,
         amount_question=amount_question
     )
 
@@ -137,12 +139,13 @@ async def generate_and_save_questions(
 
     raw_json_str = response['candidates'][0]['content']['parts'][0]['text']
     parsed = json.loads(raw_json_str)
-    result = quiz_pdf_manager.save_questions(
+    result = await quiz_pdf_manager.save_questions(
         user_uuid_id=user_uuid_id,
+        redis_adapter=redis_adapter,
         response=parsed,
         document_id=document_id,
         amount_question=amount_question,
-        attempt_index=attempt_index
+        attempt_index=attempt_index,
     )
 
     saved_questions = [q for q in result.saved_questions]
@@ -173,10 +176,13 @@ async def get_context_from_pdf(
         )
 
         if len(saved_questions) > amount_question:
+            debug(f"More questions saved than requested: {len(saved_questions)} > {amount_question}\n\n{saved_questions}")
             saved_questions = saved_questions[:amount_question]
     
         if len(saved_questions) < amount_question:
             warning(f"Only {len(saved_questions)} questions were saved, less than requested {amount_question}")
+
+            debug(f"Questions so far: {saved_questions}")
         
 
             new_saved_questions = await generate_and_save_questions(

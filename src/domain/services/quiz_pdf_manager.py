@@ -1,9 +1,10 @@
 
 
 
-import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
 from fastapi import UploadFile
+from src.dal.local.redis_adapter import RedisAdapter
 from src.core.settings import app_settings
 from src.domain.models.quiz_result_model import QuizResultModel
 from src.core.logs import error
@@ -52,9 +53,10 @@ class QuizPDFManager(BaseQuizManager):
     def get_input(self, selected_pages: str | None, total_pages: int, input_data) -> Dict[str, Any]:
         return self.pdf_adapter.get_input(selected_pages, total_pages, input_data)
     
-    def save_questions(
+    async def save_questions(
         self,
         response: dict[str, any],
+        redis_adapter: RedisAdapter,
         document_id: str,
         amount_question: int,
         attempt_index: int,
@@ -69,7 +71,7 @@ class QuizPDFManager(BaseQuizManager):
 
         saved_questions = []
 
-        questions_pdf_id = self.redis_adapter.k(
+        questions_pdf_id = redis_adapter.k(
         settings.QUESTIONS_PREFIX,
         document_id,
         attempt_index
@@ -93,13 +95,9 @@ class QuizPDFManager(BaseQuizManager):
                 "justification": justification
             }
 
-        
+            saved_questions.append(question_data)
 
-
-
-        saved_questions.append(question_data)
-
-        self.redis_adapter.set(questions_pdf_id, saved_questions, ex=1800 + (amount_question * 60))  # 30 min + amount of question == minutes expiration
+        await redis_adapter.set(questions_pdf_id, saved_questions, ex=1800 + (amount_question * 60))  # 30 min + amount of question == minutes expiration
 
         # remove correct answer from options for quiz taking, and justification and remove user_uuid_id
         for q in saved_questions:
@@ -111,7 +109,7 @@ class QuizPDFManager(BaseQuizManager):
         return QuizResultModel(
             saved_questions=saved_questions,
             identification=document_id,
-            created_at=datetime.now().isoformat()
+            created_at=datetime.now(timezone.utc).isoformat()
         )
 
     def get_questions(self):

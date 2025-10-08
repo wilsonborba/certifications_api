@@ -7,7 +7,7 @@ import re, unicodedata, hashlib
 from typing import List, Dict, Any, Optional
 from math import sqrt
 from difflib import SequenceMatcher
-from domain.models.quiz_result_model import QuizResultModel
+from src.domain.models.quiz_result_model import QuizResultModel
 from src.dal.local.db_adapter import DBAdapter
 from src.core.logs import debug, error
 

@@ -54,6 +54,10 @@ All notable changes to this project will be documented in this file.
 - *(analytics)* Created a tracking ai user usage process
 - *(question)* Removed answers from quiz and saved pdf in redis
 
+### 🐛 Bug Fixes
+
+- *(pdf)* Fixed some errors to load correctly the quiz
+
 ### ⚙️ Miscellaneous Tasks
 
 - *(env)* Initial structure of app created
