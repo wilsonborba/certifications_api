@@ -24,9 +24,9 @@ class AIGenerationError(Exception):
     pass
 
 
-
-
-
+class NotEnoughQuestionsGeneratedError(Exception):
+    """Custom exception when not enough questions are generated."""
+    pass
 
 
 

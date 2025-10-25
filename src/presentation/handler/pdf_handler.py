@@ -7,7 +7,7 @@ from fastapi import Request, UploadFile
 
 from src.core.utils import get_redis_adapter
 from src.domain.services.quiz_pdf_manager import QuizPDFManager
-from src.presentation.handler.responses import DocumentNotFoundError, InvalidTotalPagesError, MalwareDetectedError, UnsupportedFileTypeError
+from src.presentation.handler.responses import DocumentNotFoundError, InvalidTotalPagesError, MalwareDetectedError, NotEnoughQuestionsGeneratedError, UnsupportedFileTypeError
 from src.dal.local.pdf_adapter import PdfAdapter
 from src.core.logs import error, debug, info, warning
 from typing import List, Dict, Any, Optional, Tuple
@@ -196,6 +196,13 @@ async def get_context_from_pdf(
             )
             
             saved_questions = saved_questions + new_saved_questions
+
+            if len(saved_questions) > amount_question:
+                saved_questions = saved_questions[:amount_question]
+
+            if len(saved_questions) < amount_question:
+                error(f"After second attempt, only {len(saved_questions)} questions were saved, less than requested {amount_question}")
+                raise NotEnoughQuestionsGeneratedError(f"Only {len(saved_questions)} questions were generated after two attempts, less than requested {amount_question}")
 
 
         return saved_questions

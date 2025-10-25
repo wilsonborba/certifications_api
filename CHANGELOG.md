@@ -54,6 +54,7 @@ All notable changes to this project will be documented in this file.
 - *(analytics)* Created a tracking ai user usage process
 - *(question)* Removed answers from quiz and saved pdf in redis
 - *(route)* Added a route for user request new sources
+- *(app)* Added error if no enough questions
 
 ### 🐛 Bug Fixes
 

@@ -2,7 +2,10 @@ from fastapi import APIRouter, Query, Request, Response, status, APIRouter, Uplo
 from fastapi.responses import JSONResponse
 
 from src.presentation.handler.pdf_handler import  get_context_from_pdf, get_input_from_pdf, get_topic_from_pdf
-from ..handler.responses import AIGenerationError, DocumentNotFoundError, InvalidTotalPagesError, MalwareDetectedError, MyResponse, UnsupportedFileTypeError
+from ..handler.responses import (
+    AIGenerationError, DocumentNotFoundError, InvalidTotalPagesError,
+      MalwareDetectedError, MyResponse, NotEnoughQuestionsGeneratedError, UnsupportedFileTypeError
+      )
 from src.core.logs import error
 from src.dal.remote.gemini import GeminiError
 
@@ -93,7 +96,7 @@ async def get_pdf_input(
     
     except InvalidTotalPagesError as e:
         error(f"Invalid total pages: {e}")
-        response.status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+        response.status_code = status.HTTP_412_PRECONDITION_FAILED
         return MyResponse(data=None, message=str(e))
     
 
@@ -131,6 +134,11 @@ async def get_pdf_context(
             data=ai_result,
             message="PDF context retrieved successfully.",
         )
+    
+    except NotEnoughQuestionsGeneratedError as e:
+        error(f"Not enough questions generated: {e}")
+        response.status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+        return MyResponse(data=None, message=str(e))
     
     except GeminiError as e:
         # Map upstream → gateway-ish status
