@@ -354,7 +354,7 @@ class QuizAPIManager(BaseQuizManager):
                 continue
 
             payload["questions"].append({
-                "question": q["question_text"],
+                "question_text": q["question_text"],
                 "correct_answer": correct,
                 "options": options,
                 "justification": q.get("justification"),
