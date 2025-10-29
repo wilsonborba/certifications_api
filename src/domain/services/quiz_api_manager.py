@@ -354,6 +354,7 @@ class QuizAPIManager(BaseQuizManager):
                 continue
 
             payload["questions"].append({
+                "id": q["id"],
                 "question_text": q["question_text"],
                 "correct_answer": correct,
                 "options": options,
@@ -428,9 +429,7 @@ class QuizAPIManager(BaseQuizManager):
                 continue
 
             # 70% similarity rule (vector if possible, text otherwise)
-
             debug(f"Checking similarity for question: {qtext}")
-
 
             if self._is_too_similar(
                 input_id=input_db["id"],
@@ -471,7 +470,8 @@ class QuizAPIManager(BaseQuizManager):
                 opt_hash = _sha256(opt_norm)
                 is_correct = (opt_text == correct)
 
-                self.db_adapter.insert_row("accredit_answer", {
+                # NOTE: do NOT overwrite the 'inserted' counter with the DB return value.
+                _ = self.db_adapter.insert_row("accredit_answer", {
                     "question_id": question_id,
                     "text": opt_text,
                     "normalized_text": opt_norm,
@@ -481,6 +481,7 @@ class QuizAPIManager(BaseQuizManager):
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 })
 
+            # Bump the inserted counter once per question persisted
             inserted += 1
 
         return QuizResultModel(
@@ -488,6 +489,7 @@ class QuizAPIManager(BaseQuizManager):
             identification=f"{item_name}:{input_identification}",
             created_at=datetime.now(timezone.utc).isoformat(),
         )
+
 
    
 

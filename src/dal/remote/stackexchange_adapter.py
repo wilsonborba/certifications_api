@@ -241,17 +241,19 @@ class StackExchangeOverflowAdapter(BaseAdapter):
         - If a URL is provided, tries to resolve question_id and/or answer_id.
         - If topic_type == 'answer' or an answer_id is present, fetches the parent question as well.
         Returns:
-          {
+        {
             "input_identification": <canonical string>,
             "input_data": {
-              "question": {...},
-              "answers": [...],
-              "comments": [...],          # question comments
-              "answer_comments": {...}    # optional map: answer_id -> [comments]
+            "question": {...},
+            "answers": [...],
+            "comments": [...],          # question comments
+            "answer_comments": {...}    # optional map: answer_id -> [comments]
             },
             "updated_at": <iso>,
-          }
+        }
         """
+        import urllib.parse  # local import so you can drop-in without touching module imports
+
         assert answers_limit >= 0 and comments_limit >= 0
 
         # Resolve IDs from URL if needed
@@ -264,21 +266,27 @@ class StackExchangeOverflowAdapter(BaseAdapter):
         qid: Optional[int] = None
         aid: Optional[int] = None
 
+        # Helper to robustly extract the first integer from messy strings
+        def _first_int(segment: str) -> Optional[int]:
+            m = re.search(r"\d+", segment or "")
+            return int(m.group(0)) if m else None
+
         if input_identification:
+            # Unquote and strip common wrappers/brackets/punctuation
+            s = urllib.parse.unquote_plus(str(input_identification)).strip()
+            s = s.strip(" \t\r\n'\"{}[]()")
             # Support "q:12345" / "a:67890" or plain "12345" (assume question)
-            if input_identification.startswith("q:"):
-                qid = int(input_identification[2:])
+            sl = s.lower()
+            if sl.startswith("q:"):
+                qid = _first_int(s[2:])
                 topic_type = topic_type or "question"
-            elif input_identification.startswith("a:"):
-                aid = int(input_identification[2:])
+            elif sl.startswith("a:"):
+                aid = _first_int(s[2:])
                 topic_type = "answer"
             else:
-                # best-effort: assume numeric question id
-                try:
-                    qid = int(input_identification)
+                qid = _first_int(s)
+                if qid is not None:
                     topic_type = topic_type or "question"
-                except Exception:
-                    pass
 
         if qid is None and qid_from_url is not None:
             qid = qid_from_url
@@ -287,7 +295,7 @@ class StackExchangeOverflowAdapter(BaseAdapter):
             topic_type = topic_type or "answer"
 
         if not qid and not aid:
-            return {"error": "missing input_identification and permalink_or_url"}
+            return {"error": "missing or unparsable input_identification/permalink_or_url"}
 
         # If we only have an answer, fetch its parent question id
         if aid and not qid:
@@ -398,6 +406,7 @@ class StackExchangeOverflowAdapter(BaseAdapter):
         )
 
         return input_
+
     
         # ------------ SEARCH (robust: title+body+comments with fallbacks) ------------
     def search(

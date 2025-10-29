@@ -29,7 +29,7 @@ class GeminiConfig:
         api_key: Optional[str] = None,
         model: str = "gemini-2.5-flash",  # adjust if you need Pro
         base_url: str = "https://generativelanguage.googleapis.com",
-        timeout: float = 900,
+        timeout: float = 3000,
     ) -> None:
         self.api_key = api_key or app_settings().GEMINI_API_KEY
         if not self.api_key:

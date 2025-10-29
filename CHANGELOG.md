@@ -55,6 +55,7 @@ All notable changes to this project will be documented in this file.
 - *(question)* Removed answers from quiz and saved pdf in redis
 - *(route)* Added a route for user request new sources
 - *(app)* Added error if no enough questions
+- *(user)* Patch some info about the user
 
 ### 🐛 Bug Fixes
 
