@@ -1,4 +1,5 @@
 import time
+from src.presentation.handler.responses import NotEnoughQuestionsGeneratedError
 from src.domain.services.quiz_api_manager import QuizAPIManager
 from src.core.logs import info, warning, error, debug
 import json
@@ -109,7 +110,7 @@ async def get_context_from_app(
         )
         if new_saved_questions is None or len(new_saved_questions) == 0:
             error(f"Failed to generate enough questions after forcing new generation for item: {item_name}, identification: {input_identification}")
-            return None
+            raise NotEnoughQuestionsGeneratedError(f"Could not generate enough questions for item: {item_name}, identification: {input_identification}")
 
         info(f"Successfully re-generated questions for item: {item_name}, identification: {input_identification}")
 
@@ -119,6 +120,10 @@ async def get_context_from_app(
 
         # merge old and new questions, ( when inserted its already check for duplicates )
         saved_questions = saved_questions + new_saved_questions
+
+        if len(saved_questions) < amount_question:
+            error(f"Still not enough questions after re-generation for item: {item_name}, identification: {input_identification}")
+            raise NotEnoughQuestionsGeneratedError(f"Could not generate enough questions for item: {item_name}, identification: {input_identification}")
 
 
     return saved_questions

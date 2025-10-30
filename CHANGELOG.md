@@ -56,6 +56,7 @@ All notable changes to this project will be documented in this file.
 - *(route)* Added a route for user request new sources
 - *(app)* Added error if no enough questions
 - *(user)* Patch some info about the user
+- *(proxy)* Improved to return the same code status proxied
 
 ### 🐛 Bug Fixes
 
