@@ -1,3 +1,4 @@
+import json
 import re
 from time import time
 from urllib.parse import urlencode, urljoin, urlparse, parse_qs
@@ -711,83 +712,26 @@ class QuestioneiAdapter(BaseAdapter):
 
     
 
-       # ---------- NEW: compact context generator ----------
-    def generate_context(self, input_data: Dict[str, Any], amount_question=10) -> str:
+     # ---------------- context ----------------
+    def generate_context(self, input_data: Dict[str, Any], amount_question: int = 10) -> str:
         """
-        Produce a compact, structured context from Questionei input_data,
-        without extra guidance. The model instructions live in instructions().
+        Builds a plain-text context string combining all key/value pairs in input_data
+        and the model output structure, separated by newlines.
         """
-        # Accept either {"input_data": {...}} or {...} directly
-        idata = input_data.get("input_data") if isinstance(input_data, dict) and "input_data" in input_data else (input_data or {})
-        subject = idata.get("subject") or "unknown-subject"
-        page = idata.get("page")
-        per_page = idata.get("per_page")
-        questions = idata.get("questions") or []
 
-        # Small normalizers to keep the prompt lean
-        def _trim(txt: Optional[str], limit: int = 900) -> str:
-            if not txt:
-                return ""
-            t = " ".join(str(txt).split())
-            return t if len(t) <= limit else (t[:limit].rstrip() + " …")
+        context_lines: list[str] = []
 
-        def _fmt_meta(meta: Dict[str, Any]) -> str:
-            parts = []
-            for k, v in (meta or {}).items():
-                if isinstance(v, list):
-                    vals = []
-                    for it in v:
-                        if isinstance(it, dict):
-                            t = it.get("text") or ""
-                            href = it.get("href")
-                            vals.append(f"{t} ({href})" if href else t)
-                        else:
-                            vals.append(str(it))
-                    parts.append(f"{k}: {', '.join([x for x in vals if x])}")
-                elif isinstance(v, dict):
-                    t = v.get("text") or ""
-                    href = v.get("href")
-                    parts.append(f"{k}: {t} ({href})" if href else f"{k}: {t}")
-                else:
-                    if v is not None:
-                        parts.append(f"{k}: {v}")
-            return "; ".join(p for p in parts if p)
-
-        lines: List[str] = []
-        lines.append("Questionei Context")
-        lines.append(f"Subject: {subject}")
-        if page is not None:     lines.append(f"Page: {page}")
-        if per_page is not None: lines.append(f"PerPage: {per_page}")
-        lines.append(f"Items: {len(questions)}")
-        lines.append("")
-
-        for i, q in enumerate(questions, start=1):
-            qid = q.get("id") or "unknown-id"
-            qurl = q.get("url") or ""
-            idx = q.get("index")
-            meta = q.get("meta") or {}
-            stmt = _trim(q.get("text"), 1200)
-            alts = q.get("alternatives") or []
-
-            lines.append(f"- Q#{i} id={qid}" + (f" index={idx}" if idx is not None else ""))
-            if qurl:
-                lines.append(f"  source: {qurl}")
-            m = _fmt_meta(meta)
-            if m:
-                lines.append(f"  meta: {m}")
-            lines.append(f"  statement: {stmt or '[missing]'}")
-            if alts:
-                # keep at most 6 alternatives to reduce size
-                lines.append("  alternatives:")
-                for a in alts[:6]:
-                    letter = (a.get("letter") or "").strip()
-                    txt = _trim(a.get("text"), 300)
-                    if txt:
-                        lines.append(f"    - {letter}: {txt}")
+        # Safely iterate key/value pairs — stringify everything
+        for key, value in (input_data or {}).items():
+            # Represent complex values like dicts/lists in a readable way
+            if isinstance(value, (dict, list, tuple, set)):
+                context_lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}")
             else:
-                lines.append("  alternatives: [none]")
+                context_lines.append(f"{key}: {value}")
 
-        lines.append("")
-        context = "\n".join(lines)
-        context += self.context_output_structure(amount_question=amount_question)
-        return context
+        # Add your output structure
+        output_structure = self.context_output_structure(amount_question=amount_question)
+        context_lines.append(str(output_structure))
+
+        # Join them all with newline separators
+        return "\n".join(context_lines)

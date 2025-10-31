@@ -23,7 +23,8 @@ class BaseAdapter(ABC):
                 "correct_answer": "string",
                 "options": ["string", "string", "string", "string"],
                 "justification": "string",
-                "difficulty": integer (1 to 6, based on Bloom’s Taxonomy levels)
+                "difficulty": integer (1 to 6, based on Bloom’s Taxonomy levels),
+                "selected_language": "string (English, Português, Español, Français, Deutsch, ไทย, 日本語, 한국어, 中文 (简体), 中文 (繁體), हिन्दी, العربية)"
                 }
             ]
             }
@@ -33,6 +34,9 @@ class BaseAdapter(ABC):
     
     def instructions(self) -> str:
         pass
+
+    def language_instructions(self, selected_language: str) -> str:
+        return f"**Regardless of the content language, produce all questions AND answers in {selected_language}.**"
 
     @abstractmethod
     def get_preview(self) -> PreviewModel:

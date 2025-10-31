@@ -3,6 +3,7 @@
 
 from datetime import datetime, timezone
 import json
+from src.domain.models.available_languages import is_valid_language
 from src.domain.models.quiz_result_model import QuizResultModel
 from src.domain.services.quiz_base import BaseQuizManager, _normalize_text, _sha256
 from src.core.settings import app_settings
@@ -250,6 +251,7 @@ class QuizAPIManager(BaseQuizManager):
         input_data: dict[str, any],
         input_identification: str,
         amount_question: int,
+        selected_language: str,
         force_new_generation: bool = False,
         *args,
         **kwargs
@@ -261,7 +263,12 @@ class QuizAPIManager(BaseQuizManager):
 
         # Caminho rápido: buscar no DB, a menos que force_new_generation esteja True
         if not force_new_generation:
-            cached = self.get_questions(item_name=item_name, input_identification=input_identification, amount_question=amount_question)
+            cached = self.get_questions(
+                item_name=item_name, 
+                input_identification=input_identification, 
+                amount_question=amount_question,
+                selected_language=selected_language
+                )
             if cached:
                 debug(f"Questions found in DB for {item_name} - {input_identification}")
                 for item in cached['questions']:
@@ -276,7 +283,7 @@ class QuizAPIManager(BaseQuizManager):
         prompt = adapter.generate_context(input_data=input_data, amount_question=amount_question, *args, **kwargs)
         response = await self.gemini_client.generate_text(
             prompt=prompt,
-            system_instruction=adapter.instructions(),
+            system_instruction=adapter.instructions() + "\n" + adapter.language_instructions(selected_language=selected_language),
             response_mime_type="application/json",
             temperature=0.7,
         )
@@ -288,9 +295,14 @@ class QuizAPIManager(BaseQuizManager):
         item_name: str,
         amount_question: int,
         input_identification: str | None = None,
+        selected_language: str = "English",
     ) -> dict[str, any] | None:
 
         if not input_identification:
+            return None
+
+        if not is_valid_language(selected_language):
+            error(f"Invalid language selected: {selected_language}")
             return None
 
         # 1) SourceItem
@@ -318,7 +330,11 @@ class QuizAPIManager(BaseQuizManager):
         # 3) ALL questions for this input
         questions_db = self.db_adapter.read_where_many(
             "accredit_question",
-            {"input_id": input_db["id"]},
+            {
+            "input_id": input_db["id"],
+            "selected_language": selected_language
+            },
+            
             # You can add order_by here if your adapter prefers a stable order
         )
 
@@ -360,6 +376,8 @@ class QuizAPIManager(BaseQuizManager):
                 "options": options,
                 "justification": q.get("justification"),
                 "difficulty": q.get("difficulty"),
+                "selected_language": q.get("selected_language"),
+
             })
 
         return payload if payload["questions"] else None
@@ -371,6 +389,7 @@ class QuizAPIManager(BaseQuizManager):
     *,
     item_name: str,
     input_identification: str,
+    selected_language: str,
     ) -> QuizResultModel:
         """
         Persist Gemini questions for the given (item_name, input_identification).
@@ -381,6 +400,10 @@ class QuizAPIManager(BaseQuizManager):
         items = response.get("questions", []) or []
 
         debug(f"Saving {len(items)} questions for {item_name} / {input_identification}")
+
+        if not is_valid_language(selected_language):
+            error(f"Invalid language selected: {selected_language}")
+            raise ValueError("Invalid selected language.")
 
         source_item_db = self.db_adapter.read_where_one(
             "accredit_sourceitem", {"item_name": item_name}
@@ -420,10 +443,19 @@ class QuizAPIManager(BaseQuizManager):
             nhash = _sha256(norm)
 
             # Exact duplicate by normalized hash?
+
+
+            pld = {
+                    "input_id": input_db["id"], 
+                    "normalized_text_hash": nhash,
+                    "selected_language": selected_language  
+                }
+
             existing = self.db_adapter.read_where_one(
                 "accredit_question",
-                {"input_id": input_db["id"], "normalized_text_hash": nhash}
+                pld
             )
+           
             if existing:
                 skipped_exact += 1
                 continue
@@ -453,6 +485,8 @@ class QuizAPIManager(BaseQuizManager):
                 "difficulty": difficulty,
                 "embedding": cand_vec,  # None is fine if you can't embed yet
                 "updated_at": datetime.now(timezone.utc).isoformat(),
+                "selected_language": q.get("selected_language"),
+
             })
 
             saved_questions.append({

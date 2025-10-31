@@ -118,6 +118,8 @@ async def get_pdf_context(
     amount_question: int = Query(10, description="Number of questions to generate")
 ):
     
+    
+    
     user_uuid_id = request.headers.get("x-uuid")
     
     try:

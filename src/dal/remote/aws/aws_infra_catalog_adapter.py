@@ -1,6 +1,7 @@
 # src/dal/remote/aws_infra_catalog_adapter.py
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 import requests
@@ -467,56 +468,26 @@ class AwsInfraCatalogAdapter(BaseAdapter):
         }
 
 
-    # ---------- Generate textual quiz context ----------
+     # ---------------- context ----------------
     def generate_context(self, input_data: Dict[str, Any], amount_question: int = 10) -> str:
-        meta = (input_data or {}).get("meta", {}) or {}
-        regions = (input_data or {}).get("regions", []) or []
+        """
+        Builds a plain-text context string combining all key/value pairs in input_data
+        and the model output structure, separated by newlines.
+        """
 
-        code = meta.get("service_code") or "unknown"
-        name = meta.get("service_name") or code
-        ext = meta.get("external_url") or f"https://aws.amazon.com/{code}/"
-        docs = meta.get("docs_url")
-        offer = meta.get("pricing_offer_code")
-        idx_hint = meta.get("pricing_index_hint")
-        endpoint_prefix = meta.get("endpoint_prefix")
-        protocol = meta.get("protocol")
-        sigv = meta.get("signature_version")
-        apiv = meta.get("api_version")
-        ops = meta.get("operations_count")
+        context_lines: list[str] = []
 
-        lines: List[str] = []
-        lines.append("AWS Service Context")
-        lines.append(f"Service: {name}  (code: {code})")
-        lines.append(f"Product page: {ext}")
-        if docs: lines.append(f"Docs (best-effort): {docs}")
-        if offer: lines.append(f"Pricing offer code: {offer}")
-        if idx_hint: lines.append(f"Pricing index hint: {idx_hint}")
-        if endpoint_prefix or protocol or sigv or apiv or ops is not None:
-            lines.append("")
-            lines.append("API/Model metadata:")
-            if endpoint_prefix: lines.append(f"- endpoint_prefix: {endpoint_prefix}")
-            if protocol: lines.append(f"- protocol: {protocol}")
-            if sigv: lines.append(f"- signature_version: {sigv}")
-            if apiv: lines.append(f"- api_version: {apiv}")
-            if ops is not None: lines.append(f"- operations_count: {ops}")
+        # Safely iterate key/value pairs — stringify everything
+        for key, value in (input_data or {}).items():
+            # Represent complex values like dicts/lists in a readable way
+            if isinstance(value, (dict, list, tuple, set)):
+                context_lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}")
+            else:
+                context_lines.append(f"{key}: {value}")
 
-        if regions:
-            lines.append("")
-            lines.append(f"Regions & hostnames ({len(regions)}):")
-            preview = regions[:20]
-            for r in preview:
-                region = r.get("region")
-                host = r.get("hostname")
-                lines.append(f"- {region}: {host or 'n/a'}")
-            if len(regions) > len(preview):
-                lines.append(f"... (+{len(regions) - len(preview)} more)")
+        # Add your output structure
+        output_structure = self.context_output_structure(amount_question=amount_question)
+        context_lines.append(str(output_structure))
 
-        lines.append("")
-        lines.append(
-            "Guidance: Ask factual questions about service name/code, pricing identifiers, API metadata, "
-            "and region availability/hostnames. Keep wording precise and grounded in this context."
-        )
-
-        context = "\n".join(lines)
-        context += self.context_output_structure(amount_question=amount_question)
-        return context
+        # Join them all with newline separators
+        return "\n".join(context_lines)

@@ -1,6 +1,7 @@
 # src/dal/remote/chess_adapter.py
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 import requests
@@ -851,93 +852,26 @@ class ChessComAdapter(BaseAdapter):
             "• Keep wording clear, neutral, and concise; each question should be answerable using the provided context."
         )
 
-    # ---------- Generate textual context for the quiz model ----------
+    # ---------------- context ----------------
     def generate_context(self, input_data: Dict[str, Any], amount_question: int = 10) -> str:
         """
-        Create a compact, readable text context from the item returned by get_input(),
-        then append the required context_output_structure(amount_question=...).
+        Builds a plain-text context string combining all key/value pairs in input_data
+        and the model output structure, separated by newlines.
         """
-        t = (input_data or {}).get("type") or (input_data.get("post", {}) or {}).get("type")  # safety
-        lines: list[str] = []
 
-        if t == "news":
-            title = input_data.get("title")
-            url = input_data.get("url")
-            author = input_data.get("author")
-            published = input_data.get("published")
-            hero = input_data.get("hero_image")
-            key_points = input_data.get("key_points") or []
+        context_lines: list[str] = []
 
-            lines.append("Chess.com News Context")
-            if title:     lines.append(f"Title: {title}")
-            if author:    lines.append(f"Author: {author}")
-            if published: lines.append(f"Published: {published}")
-            if url:       lines.append(f"URL: {url}")
-            if hero:      lines.append(f"Image: {hero}")
-            lines.append("")
-            lines.append("Key points (verbatim facts from the article):")
-            for p in key_points:
-                lines.append(f"- {p}")
+        # Safely iterate key/value pairs — stringify everything
+        for key, value in (input_data or {}).items():
+            # Represent complex values like dicts/lists in a readable way
+            if isinstance(value, (dict, list, tuple, set)):
+                context_lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}")
+            else:
+                context_lines.append(f"{key}: {value}")
 
-        elif t == "player":
-            username = input_data.get("username")
-            title = input_data.get("title")
-            name = input_data.get("name")
-            status = input_data.get("status")
-            country = input_data.get("country")
-            joined = input_data.get("joined")
-            last_online = input_data.get("last_online")
-            url = input_data.get("url")
-            fide = input_data.get("fide")
-            ratings = input_data.get("ratings") or {}
+        # Add your output structure
+        output_structure = self.context_output_structure(amount_question=amount_question)
+        context_lines.append(str(output_structure))
 
-            def _fmt_rate(lbl: str, r: dict | None) -> str:
-                if not isinstance(r, dict):
-                    return f"{lbl}: n/a"
-                last = r.get("last")
-                best = r.get("best")
-                wl = []
-                if r.get("wins") is not None:   wl.append(f"W {r.get('wins')}")
-                if r.get("losses") is not None: wl.append(f"L {r.get('losses')}")
-                if r.get("draws") is not None:  wl.append(f"D {r.get('draws')}")
-                record = f" ({', '.join(wl)})" if wl else ""
-                last_s = f"{last}" if last is not None else "n/a"
-                best_s = f"{best}" if best is not None else "n/a"
-                return f"{lbl}: last {last_s}, best {best_s}{record}"
-
-            lines.append("Chess.com Player Context")
-            lines.append(f"Username: {username or 'n/a'}")
-            if name:      lines.append(f"Name: {name}")
-            if title:     lines.append(f"Title: {title}")
-            if fide:      lines.append(f"FIDE: {fide}")
-            if country:   lines.append(f"Country: {country}")
-            if status:    lines.append(f"Account status: {status}")
-            if joined:    lines.append(f"Joined (epoch): {joined}")
-            if last_online: lines.append(f"Last online (epoch): {last_online}")
-            if url:       lines.append(f"Profile: {url}")
-            lines.append("")
-            lines.append("Ratings snapshot:")
-            lines.append(_fmt_rate("Blitz", ratings.get("blitz")))
-            lines.append(_fmt_rate("Rapid", ratings.get("rapid")))
-            lines.append(_fmt_rate("Bullet", ratings.get("bullet")))
-            lines.append(_fmt_rate("Daily", ratings.get("daily")))
-            # Optional extras
-            tac = ratings.get("tactics")
-            if tac:
-                lines.append(f"Tactics best: {tac.get('rating', 'n/a')} (score: {tac.get('score', 'n/a')})")
-            pr = ratings.get("puzzles_rush")
-            if pr:
-                lines.append(f"Puzzle Rush best: {pr.get('score', 'n/a')} in {pr.get('total_attempts', 'n/a')} attempts")
-        else:
-            # Unknown type—print whatever is present to remain helpful
-            lines.append("Chess context (untyped)")
-            for k, v in (input_data or {}).items():
-                lines.append(f"- {k}: {v}")
-
-        lines.append("")
-        lines.append("Guidance: Ask about facts explicitly present here (names, dates, results, ratings, key points).")
-        lines.append("You may write playful or serious questions, but keep numbers/dates precise and avoid speculation.")
-
-        context = "\n".join(lines)
-        context += self.context_output_structure(amount_question=amount_question)
-        return context
+        # Join them all with newline separators
+        return "\n".join(context_lines)

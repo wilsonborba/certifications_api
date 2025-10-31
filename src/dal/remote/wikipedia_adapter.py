@@ -1,6 +1,7 @@
 # src/dal/remote/wikipedia_adapter.py
 from __future__ import annotations
 
+import json
 from time import time
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone, timedelta
@@ -61,9 +62,11 @@ class WikipediaAdapter(BaseAdapter):
     def instructions(self) -> str:
         return (
             "You are given a Wikipedia article with summary and key sections. "
-            "Create clear, factual, and non-controversial quiz questions based ONLY on the provided content. "
-            "Focus on who/what/when/where facts, definitions, notable events, and widely accepted details. "
-            "Avoid subjective or disputed claims. Keep questions concise and answerable from the context."
+            "Create clear, factual, and sometimes controversial (for fun or as a tricky question) quiz questions based on the provided content. "
+            "If the content is insufficient to create the requested number of questions, you can play along and create plausible questions based on common knowledge about the topic."
+            "You can also use related articles for additional context. But do NOT invent information. "
+            "Try to vary the question write-ups and avoid repeating the same phrasing or structure."
+
         )
 
     # ---------------- low-level helpers ----------------
@@ -552,38 +555,24 @@ class WikipediaAdapter(BaseAdapter):
 
     # ---------------- context ----------------
     def generate_context(self, input_data: Dict[str, Any], amount_question: int = 10) -> str:
-        page = (input_data or {}).get("page", {}) or {}
-        sections = (input_data or {}).get("sections", []) or []
-        related = (input_data or {}).get("related", []) or []
+        """
+        Builds a plain-text context string combining all key/value pairs in input_data
+        and the model output structure, separated by newlines.
+        """
 
-        title = page.get("title", "Unknown")
-        desc = page.get("description") or ""
-        extract = page.get("extract") or ""
+        context_lines: list[str] = []
 
-        context = []
-        context.append(f"Wikipedia article title: {title}")
-        if desc:
-            context.append(f"Short description: {desc}")
-        context.append("")
-        context.append("Lead extract:")
-        context.append(_strip_html(extract) or "[no text]")
-        context.append("")
+        # Safely iterate key/value pairs — stringify everything
+        for key, value in (input_data or {}).items():
+            # Represent complex values like dicts/lists in a readable way
+            if isinstance(value, (dict, list, tuple, set)):
+                context_lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}")
+            else:
+                context_lines.append(f"{key}: {value}")
 
-        if sections:
-            context.append("Key sections:")
-            for s in sections[:8]:
-                line = s.get("line") or ""
-                context.append(f"- {line}")
-            context.append("")
+        # Add your output structure
+        output_structure = self.context_output_structure(amount_question=amount_question)
+        context_lines.append(str(output_structure))
 
-        if related:
-            context.append("Related pages:")
-            for r in related[:6]:
-                rtitle = r.get("title")
-                rdesc = r.get("description")
-                if rtitle:
-                    context.append(f"- {rtitle}" + (f": {rdesc}" if rdesc else ""))
-            context.append("")
-
-        context.append(self.context_output_structure(amount_question=amount_question))
-        return "\n".join(context)
+        # Join them all with newline separators
+        return "\n".join(context_lines)

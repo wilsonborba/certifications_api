@@ -30,7 +30,7 @@ class RedditAdapter(BaseAdapter):
             item_img="https://res.cloudinary.com/dhncdmb2t/image/upload/v1756293205/reddit_logo_t93flf.png",
             updated_at=datetime.now(timezone.utc).isoformat()
         )
-    
+
     def instructions(self) -> str:
         return (
             "You are given a Reddit post with comments. "
@@ -40,6 +40,7 @@ class RedditAdapter(BaseAdapter):
             "Keep the questions clear, light, and grounded in the content. "
             "All questions should be understandable and answerable by most users based on the provided context. "
             "Use a casual and fun tone. If needed, reference the post title or author to ground the question."
+            
     )
 
 
