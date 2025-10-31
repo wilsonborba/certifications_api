@@ -12,7 +12,9 @@ from src.domain.models.input_model import InputModel
 from src.domain.models.topics_model import TopicModel
 from src.dal.remote.factory import AdapterFactory
 from src.dal.local.db_adapter import DBAdapter
-from src.core.logs import error, debug
+from src.core.logs import error, debug, warning
+from sqlalchemy.exc import IntegrityError
+from psycopg2.errors import UniqueViolation
 
 
 
@@ -78,6 +80,30 @@ class QuizAPIManager(BaseQuizManager):
         )
 
         return db_item
+    
+    def save_solicitation_new_topic(self, app_url: str, user_uuid_id: str) -> None:
+
+        try:
+            insert_result = self.db_adapter.insert_row("accredit_solicitationnewitemtopic", {
+                "user_uuid_id": user_uuid_id,
+                "app_url": app_url,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            debug(f"New topic solicitation saved for URL: {app_url}")
+
+            return insert_result
+        except IntegrityError as e:
+        # Ignore only if it's a unique violation (duplicate key)
+            if isinstance(e.orig, UniqueViolation):
+                warning(f"Duplicate solicitation ignored for URL: {app_url}")
+                return None  # or return the existing ID if you prefer
+            else:
+                error(f"Database integrity error for '{app_url}': {e}")
+                raise  # re-raise all other IntegrityError types
+        
+        except Exception as e:
+            error(f"Failed to save new topic solicitation for URL '{app_url}': {e}")
+            raise
     
     def get_topics(
         self,

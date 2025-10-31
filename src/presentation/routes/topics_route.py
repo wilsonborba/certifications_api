@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Query, Request, Response, status
 
-from src.presentation.handler.topics_handler import get_topics_from_app
+from src.presentation.handler.topics_handler import add_new_topic_request_to_db, get_topics_from_app
 
 
 from ..handler.responses import MyResponse
@@ -35,13 +35,13 @@ async def add_new_topic_request(
     # get from body the website_url from request
     body = await request.json()
     
-    website_url = body.get("url", "")
+    app_url = body.get("url", "")
 
+    await add_new_topic_request_to_db(app_url=app_url, user_uuid_id=request.headers["x-uuid"])
 
-
-    debug(f"New topic request received from {request.headers["x-uuid"]}  with website URL: {website_url}")
+    debug(f"New topic request received from {request.headers["x-uuid"]}  with website URL: {app_url}")
 
     return MyResponse(
         message=f"New topic request added successfully.",
-        data={"website_url": website_url},
+        data=app_url,
     )

@@ -58,6 +58,7 @@ All notable changes to this project will be documented in this file.
 - *(user)* Patch some info about the user
 - *(proxy)* Improved to return the same code status proxied
 - *(unkown)* I forgot but is good to save
+- *(topics)* Added a new solicitation adjustment
 
 ### 🐛 Bug Fixes
 
