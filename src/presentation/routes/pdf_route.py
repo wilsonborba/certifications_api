@@ -115,7 +115,7 @@ async def get_pdf_context(
     selected_pages: str = Query('all', description="Selected pages in format '1,2,5-10' or 'all'/'-4'/'2-'"),
     mode: str = Query('both', description="Mode: playful, serious, both"),
     selected_language: str = Query('English', description="Selected language for context generation"),
-    amount_question: int = Query(10, description="Number of questions to generate")
+    amount_question: int = Query(15, description="Number of questions to generate")
 ):
     
     

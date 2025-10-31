@@ -17,7 +17,7 @@ async def get_context(
     input_identification: str, 
     response: Response,
     force_new_generation: bool = Query(False, description="Force new generation of questions, ignoring cached ones"),
-    amount_question: int = Query(10, ge=1, le=20, description="Number of questions to generate"),
+    amount_question: int = Query(15, ge=1, le=20, description="Number of questions to generate"),
     selected_language: str = Query("English", description="Selected language for the questions")
     ):
 

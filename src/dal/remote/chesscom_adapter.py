@@ -848,7 +848,6 @@ class ChessComAdapter(BaseAdapter):
             "do not contradict or fill gaps with guesses.\n"
             "• Good question ideas: identify key facts, compare ratings or streaks, ‘which month/score/title’, cause/effect described "
             "in the article, who/what/when/where, ordering (highest→lowest ratings), and short scenario questions grounded in the data.\n"
-            "• Avoid: speculation about future events, personal judgments, sensitive private info, or unverifiable claims.\n"
             "• Keep wording clear, neutral, and concise; each question should be answerable using the provided context."
         )
 
