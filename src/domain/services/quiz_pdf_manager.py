@@ -111,6 +111,12 @@ class QuizPDFManager(BaseQuizManager):
             identification=document_id,
             created_at=datetime.now(timezone.utc).isoformat()
         )
+    
+    def save_complaint(self,user_uuid_id: str, complaint_text: str, document_id: str):
+        return {"user_uuid_id": user_uuid_id, "complaint_text": complaint_text, "document_id": document_id}
+
+    def update_question(self):
+        pass
 
     def get_questions(self):
         pass

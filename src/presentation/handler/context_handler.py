@@ -130,6 +130,18 @@ async def get_context_from_app(
     return saved_questions
 
 
-
+def save_complaint(
+    complaint_text: str,
+    question_id: str,
+    user_uuid_id: str
+    ) -> dict:
+    
+    quiz_pdf_manager = QuizAPIManager()
+    complaint_result = quiz_pdf_manager.save_complaint(
+        user_uuid_id=user_uuid_id,
+        complaint_text=complaint_text,
+        question_id=question_id
+    )
+    return complaint_result
     
 

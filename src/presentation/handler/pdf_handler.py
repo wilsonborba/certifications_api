@@ -212,7 +212,19 @@ async def get_context_from_pdf(
     
 
 
+def save_complaint_pdf(
+    user_uuid_id: str,
+    complaint_text: str,
+    document_id: str
+) -> dict:
     
+    complaint_record = quiz_pdf_manager.save_complaint(
+        user_uuid_id=user_uuid_id,
+        complaint_text=complaint_text,
+        document_id=document_id
+    )
 
 
+    info(f"Complaint saved: {complaint_record}")
+    return complaint_record
 

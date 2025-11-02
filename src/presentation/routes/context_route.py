@@ -1,7 +1,7 @@
 
-from fastapi import APIRouter, Query, Request, Response, status
+from fastapi import APIRouter, Query, Request, Response, status, Body
 
-from src.presentation.handler.context_handler import get_context_from_app
+from src.presentation.handler.context_handler import get_context_from_app, save_complaint
 from src.core.logs import debug, error
 from urllib.parse import unquote
 
@@ -49,3 +49,34 @@ async def get_context(
         return MyResponse(data=None, message="Internal server error...")
     
     return MyResponse(data=context, message="Context found")
+
+
+@context_router.post("/context/complaints", response_model=MyResponse)
+async def create_complaint(
+    request: Request,
+    response: Response,
+    body: dict = Body(...),
+    ):
+    
+    user_uuid_id = request.headers.get("x-uuid")
+
+    complain = await request.json()
+
+    complaint_text = complain.get("complaint_text")
+    question_id = complain.get("question_id")
+    
+    try:
+        complaint_result =  save_complaint(
+            complaint_text=complaint_text,
+            question_id=question_id,
+            user_uuid_id=user_uuid_id
+        )
+        response.status_code = status.HTTP_201_CREATED
+        return MyResponse(
+            data=complaint_result,
+            message="Complaint saved successfully.",
+        )
+    except Exception as e:
+        error(f"Internal server error: {e}")
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return MyResponse(data=None, message="Internal server error...")

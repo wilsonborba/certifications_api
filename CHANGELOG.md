@@ -59,6 +59,7 @@ All notable changes to this project will be documented in this file.
 - *(proxy)* Improved to return the same code status proxied
 - *(unkown)* I forgot but is good to save
 - *(topics)* Added a new solicitation adjustment
+- *(quiz)* Addded some routes for complaining questions
 
 ### 🐛 Bug Fixes
 

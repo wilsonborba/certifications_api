@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Query, Request, Response, status, APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, Query, Request, Response, status, APIRouter, UploadFile, File, Body
 from fastapi.responses import JSONResponse
 
-from src.presentation.handler.pdf_handler import  get_context_from_pdf, get_input_from_pdf, get_topic_from_pdf
+from src.presentation.handler.pdf_handler import  get_context_from_pdf, get_input_from_pdf, get_topic_from_pdf, save_complaint_pdf
 from ..handler.responses import (
     AIGenerationError, DocumentNotFoundError, InvalidTotalPagesError,
       MalwareDetectedError, MyResponse, NotEnoughQuestionsGeneratedError, UnsupportedFileTypeError
@@ -187,4 +187,34 @@ async def get_pdf_context(
     
 
 
-   
+
+@pdf_router.post("/pdf/context/complaints", response_model=MyResponse)
+async def create_complaint_pdf(
+    response: Response,
+    request: Request,
+    body: dict = Body(...),
+):
+    user_uuid_id = request.headers.get("x-uuid")
+
+    complaint = await request.json()
+
+    complaint_text = complaint.get("complaint_text")
+
+    document_id = complaint.get("document_id")
+
+    try:
+        complaint_result =  save_complaint_pdf(
+            complaint_text=complaint_text,
+            document_id=document_id,
+            user_uuid_id=user_uuid_id
+        )
+        response.status_code = status.HTTP_201_CREATED
+        return MyResponse(
+            data=complaint_result,
+            message="Complaint created successfully.",
+        )
+
+    except Exception as e:
+        error(f"Error creating complaint: {e}")
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return MyResponse(data=None, message="Internal server error...")
