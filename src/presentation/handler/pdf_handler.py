@@ -211,20 +211,21 @@ async def get_context_from_pdf(
         raise e
     
 
-
-def save_complaint_pdf(
+async def save_complaint_pdf(
+    request: Request,
     user_uuid_id: str,
     complaint_text: str,
-    document_id: str
+    document_id: str,
+    pdf_question_id: str,
 ) -> dict:
-    
-    complaint_record = quiz_pdf_manager.save_complaint(
+    redis_adapter = get_redis_adapter(request)
+    complaint_record = await quiz_pdf_manager.save_complaint(   # <-- await
+        redis_adapter=redis_adapter,
         user_uuid_id=user_uuid_id,
         complaint_text=complaint_text,
-        document_id=document_id
+        document_id=document_id,
+        pdf_question_id=pdf_question_id,
     )
-
-
     info(f"Complaint saved: {complaint_record}")
     return complaint_record
 

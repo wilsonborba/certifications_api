@@ -6,7 +6,7 @@ from ..handler.responses import (
     AIGenerationError, DocumentNotFoundError, InvalidTotalPagesError,
       MalwareDetectedError, MyResponse, NotEnoughQuestionsGeneratedError, UnsupportedFileTypeError
       )
-from src.core.logs import error
+from src.core.logs import error, debug
 from src.dal.remote.gemini import GeminiError
 
 pdf_router = APIRouter()
@@ -196,17 +196,23 @@ async def create_complaint_pdf(
 ):
     user_uuid_id = request.headers.get("x-uuid")
 
-    complaint = await request.json()
+    complaint = body
+
+    # debug(f"Received complaint: {complaint}")
 
     complaint_text = complaint.get("complaint_text")
 
     document_id = complaint.get("document_id")
 
+    pdf_question_id = complaint.get("pdf_question_id")
+
     try:
-        complaint_result =  save_complaint_pdf(
+        complaint_result =  await save_complaint_pdf(
+            request=request,
             complaint_text=complaint_text,
             document_id=document_id,
-            user_uuid_id=user_uuid_id
+            user_uuid_id=user_uuid_id,
+            pdf_question_id=pdf_question_id
         )
         response.status_code = status.HTTP_201_CREATED
         return MyResponse(

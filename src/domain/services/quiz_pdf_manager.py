@@ -2,17 +2,17 @@
 
 
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from fastapi import UploadFile
 from src.dal.local.redis_adapter import RedisAdapter
 from src.core.settings import app_settings
 from src.domain.models.quiz_result_model import QuizResultModel
-from src.core.logs import error
+from src.core.logs import error, debug
 
 from src.presentation.handler.responses import AIGenerationError, MalwareDetectedError
 from src.dal.local.pdf_adapter import PdfAdapter
 from src.domain.services.quiz_base import BaseQuizManager
-
+import uuid
 
 settings = app_settings()
 
@@ -86,13 +86,14 @@ class QuizPDFManager(BaseQuizManager):
 
 
             question_data = {
-                "question_id": idx + 1,
+                "pdf_question_id": uuid.uuid4().hex,
                 "user_uuid_id": user_uuid_id,
                 "question": qtext,
                 "correct_answer": correct,
                 "options": options,
                 "difficulty": difficulty,
-                "justification": justification
+                "justification": justification,
+                "complaint_text": None,
             }
 
             saved_questions.append(question_data)
@@ -112,14 +113,74 @@ class QuizPDFManager(BaseQuizManager):
             created_at=datetime.now(timezone.utc).isoformat()
         )
     
-    def save_complaint(self,user_uuid_id: str, complaint_text: str, document_id: str):
-        return {"user_uuid_id": user_uuid_id, "complaint_text": complaint_text, "document_id": document_id}
-
-    def update_question(self):
-        pass
+    async def save_complaint(
+        self,
+        redis_adapter: RedisAdapter,
+        user_uuid_id: str,
+        complaint_text: str,
+        document_id: str,
+        pdf_question_id: str,
+    ) -> dict:
+        ok = await self.update_question(   # <-- await
+            redis_adapter=redis_adapter,
+            document_id=document_id,
+            key="complaint_text",
+            value=complaint_text,
+            where_clause={"pdf_question_id": pdf_question_id},
+        )
+        # (optional) check ok and log/raise if needed
+        return {
+            # "user_uuid_id": user_uuid_id,
+            "complaint_text": complaint_text,
+            "document_id": document_id,
+            "pdf_question_id": pdf_question_id,
+        }
 
     def get_questions(self):
-        pass
+        return super().get_questions()
+
+    async def update_question(
+        self,
+        redis_adapter: RedisAdapter,
+        document_id: str,
+        key: str,
+        value: Any,
+        where_clause: Optional[Dict[str, Any]] = None,
+        *,
+        update_many: bool = False,
+    ) -> bool:
+        where = where_clause or {}
+        
+        updated_any = False
+
+        for idx in (1, 2):
+            k = redis_adapter.k(settings.QUESTIONS_PREFIX, document_id, idx)
+            data = await redis_adapter.get(k)
+            if not isinstance(data, list):
+                continue
+
+            updated = 0
+            for q in data:
+                if isinstance(q, dict) and all(q.get(wk) == wv for wk, wv in where.items()):
+                    q[key] = value
+                    debug(f"Updated question in Redis {k}: set {key}={value} where {where}")
+                    updated += 1
+                    if not update_many:
+                        break
+
+            if updated:
+                ttl = await redis_adapter.ttl(k)
+                ex = ttl if isinstance(ttl, int) and ttl > 0 else None
+                await redis_adapter.set(k, data, ex=ex)
+                updated_any = True
+
+                if not update_many:
+                    break  # stop after first matching attempt if doing single update
+
+        return updated_any
+
+
+
 
     async def generate_context(self, input_data, amount_question, selected_language: str = "English") -> str:
 

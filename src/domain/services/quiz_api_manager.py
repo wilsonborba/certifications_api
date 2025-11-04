@@ -82,7 +82,18 @@ class QuizAPIManager(BaseQuizManager):
         return db_item
     
     def save_complaint(self, complaint_text: str, question_id: str, user_uuid_id: str):
-        return {"user_uuid_id": user_uuid_id, "complaint_text": complaint_text, "question_id": question_id}
+
+        _ = self.db_adapter.insert_row("accredit_questioncomplaint", {
+            "user_uuid_id": user_uuid_id,
+            "complaint_text": complaint_text,
+            "question_id": question_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "is_pdf": False,
+        })
+
+        debug(f"Complaint saved: {_}")
+
+        return {"complaint_text": complaint_text, "question_id": question_id}
     
     def save_solicitation_new_topic(self, app_url: str, user_uuid_id: str) -> None:
 

@@ -71,6 +71,9 @@ async def create_complaint(
             question_id=question_id,
             user_uuid_id=user_uuid_id
         )
+
+        
+
         response.status_code = status.HTTP_201_CREATED
         return MyResponse(
             data=complaint_result,
