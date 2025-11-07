@@ -3,6 +3,7 @@
 
 from datetime import datetime, timezone
 import json
+from src.domain.models.user_answer_model import UserAnswerModel
 from src.domain.models.available_languages import is_valid_language
 from src.domain.models.quiz_result_model import QuizResultModel
 from src.domain.services.quiz_base import BaseQuizManager, _normalize_text, _sha256
@@ -80,6 +81,109 @@ class QuizAPIManager(BaseQuizManager):
         )
 
         return db_item
+    
+    def process_quiz_revision(
+        self,
+        answers: list, 
+        time_spent_seconds: float, 
+        certification_title: str, 
+        full_name: str,
+        language: str,
+        user_uuid_id: str,
+        ):
+
+        for ans in answers:
+            question_id = ans.get("questionId")
+            selected_index = ans.get("selectedIndex")
+            selected_text = ans.get("selectedText")
+
+            answers_from_question = self.db_adapter.read_where_many(
+                table_name="accredit_answer", 
+                where={
+                    "question_id": question_id,
+                    # "is_correct": True
+                    })
+            
+            # debug(f"Answers from question {question_id}: {answers_from_question}")
+
+            # both text hashed for comparison
+            if answers_from_question and selected_text:
+                
+                ua_list = []
+                
+                for ans in answers_from_question:
+                    user_answer = UserAnswerModel()
+                    # debug(f"\n\n Answer: {ans}\n\n")
+                    if _normalize_text(ans.get("text", "")) == _normalize_text(selected_text) and ans.get("is_correct") in (True, 1):
+                        # debug(f"Question {question_id} answered correctly.")
+                        # save user answer as correct
+                        # ==== TABLE USER_ANSWER ====
+                        # id table self identification 
+                        # id from user_certification
+                        # id from question_id
+                        # id from right answer
+                        # selected answer (nullable)
+                        # id from user
+
+
+                        user_answer.user_certification_id = 0  # Placeholder, should be set properly
+                        user_answer.question_id = question_id
+                        user_answer.correct_answer_id = ans.get("id")
+                        user_answer.selected_answer_id = ans.get("id")
+                        user_answer.is_correct = True
+                        user_answer.user_uuid_id = user_uuid_id
+                        user_answer.updated_at = datetime.now(timezone.utc).isoformat()
+                        # self.db_adapter.insert_row(
+                        #     table_name="accredit_useranswer",
+                        #     row_data=user_answer.to_dict()
+                        # )
+                        ua_list.append(user_answer.to_dict())
+                    elif _normalize_text(ans.get("text", "")) == _normalize_text(selected_text) and ans.get("is_correct") not in (True, 1):
+                        # debug(f"Question {question_id} answered incorrectly.")
+                        # save user answer as incorrect
+                        user_answer.user_certification_id = 0  # Placeholder, should be set properly
+                        user_answer.question_id = question_id
+                        user_answer.correct_answer_id = next((a.get("id") for a in answers_from_question if a.get("is_correct") in (True, 1)), None)
+                        user_answer.selected_answer_id = ans.get("id")
+                        user_answer.is_correct = False
+                        user_answer.user_uuid_id = user_uuid_id
+                        user_answer.updated_at = datetime.now(timezone.utc).isoformat()
+                        ua_list.append(user_answer.to_dict())
+
+
+                    
+
+                    
+                    
+                for l in ua_list:
+                    debug(f"Inserting user answer: {l}")
+                        
+                        
+                    # ==== TABLE USER_CERTIFICATION ====
+                    # id table self identification 
+                    # id from certification_title
+                    # id from user
+                    # character varying full name (at moment of certification)
+                    # timestamp time spent
+                    # timestamp created at
+                    # is_pdf boolean
+                    # score float
+                    # total_questions integer
+                    # correct_questions integer
+                    # wrong_questions integer
+
+
+
+
+
+
+                        
+            
+
+
+
+
+            
     
     def save_complaint(self, complaint_text: str, question_id: str, user_uuid_id: str):
 

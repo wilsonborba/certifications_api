@@ -8,6 +8,7 @@ from src.presentation.routes.input_route import input_router
 from src.presentation.routes.context_route import context_router
 from src.presentation.routes.pdf_route import pdf_router
 from src.presentation.routes.search_route import search_router
+from src.presentation.routes.quiz_route import quiz_router
 from src.core.settings import app_settings
 
 settings = app_settings()
@@ -77,4 +78,9 @@ app.include_router(
 app.include_router(
     pdf_router,
     tags=["pdf"]
+)
+
+app.include_router(
+    quiz_router,
+    tags=["quiz"]
 )

@@ -37,7 +37,7 @@ def _text_sim_ratio(a: str, b: str) -> float:
 _NORM_RE = re.compile(r"[^a-z0-9\s]+")
 
 def _normalize_text(s: str) -> str:
-    debug(f"Normalizing text of length {len(s)}")
+    # debug(f"Normalizing text of length {len(s)}")
 
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
     s = s.lower()

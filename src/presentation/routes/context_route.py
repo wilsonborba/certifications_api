@@ -13,9 +13,9 @@ context_router = APIRouter()
 @context_router.get("/context/{item_name}/{input_identification:path}", response_model=MyResponse)
 async def get_context(
     request: Request,
+    response: Response,
     item_name: str, 
     input_identification: str, 
-    response: Response,
     force_new_generation: bool = Query(False, description="Force new generation of questions, ignoring cached ones"),
     amount_question: int = Query(15, ge=1, le=20, description="Number of questions to generate"),
     selected_language: str = Query("English", description="Selected language for the questions")

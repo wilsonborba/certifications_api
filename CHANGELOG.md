@@ -61,6 +61,7 @@ All notable changes to this project will be documented in this file.
 - *(topics)* Added a new solicitation adjustment
 - *(quiz)* Addded some routes for complaining questions
 - *(quiz)* Added a complain for pdf save in redis
+- *(quiz)* Added initial models for quiz submit
 
 ### 🐛 Bug Fixes
 

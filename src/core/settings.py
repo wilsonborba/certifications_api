@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     REDIS_NAMESPACE: str = "accredit_api:"
 
     QUESTIONS_PREFIX: str = "questions"
+
     
 
 
