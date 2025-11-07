@@ -1,8 +1,9 @@
 
 
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
+from src.domain.models.user_certification import UserCertificationModel
 from src.domain.models.user_answer_model import UserAnswerModel
 from src.domain.models.available_languages import is_valid_language
 from src.domain.models.quiz_result_model import QuizResultModel
@@ -92,6 +93,7 @@ class QuizAPIManager(BaseQuizManager):
         user_uuid_id: str,
         ):
 
+        ua_list = []
         for ans in answers:
             question_id = ans.get("questionId")
             selected_index = ans.get("selectedIndex")
@@ -109,21 +111,13 @@ class QuizAPIManager(BaseQuizManager):
             # both text hashed for comparison
             if answers_from_question and selected_text:
                 
-                ua_list = []
+                
                 
                 for ans in answers_from_question:
                     user_answer = UserAnswerModel()
-                    # debug(f"\n\n Answer: {ans}\n\n")
+                    
                     if _normalize_text(ans.get("text", "")) == _normalize_text(selected_text) and ans.get("is_correct") in (True, 1):
-                        # debug(f"Question {question_id} answered correctly.")
-                        # save user answer as correct
-                        # ==== TABLE USER_ANSWER ====
-                        # id table self identification 
-                        # id from user_certification
-                        # id from question_id
-                        # id from right answer
-                        # selected answer (nullable)
-                        # id from user
+
 
 
                         user_answer.user_certification_id = 0  # Placeholder, should be set properly
@@ -133,14 +127,10 @@ class QuizAPIManager(BaseQuizManager):
                         user_answer.is_correct = True
                         user_answer.user_uuid_id = user_uuid_id
                         user_answer.updated_at = datetime.now(timezone.utc).isoformat()
-                        # self.db_adapter.insert_row(
-                        #     table_name="accredit_useranswer",
-                        #     row_data=user_answer.to_dict()
-                        # )
                         ua_list.append(user_answer.to_dict())
+
                     elif _normalize_text(ans.get("text", "")) == _normalize_text(selected_text) and ans.get("is_correct") not in (True, 1):
-                        # debug(f"Question {question_id} answered incorrectly.")
-                        # save user answer as incorrect
+
                         user_answer.user_certification_id = 0  # Placeholder, should be set properly
                         user_answer.question_id = question_id
                         user_answer.correct_answer_id = next((a.get("id") for a in answers_from_question if a.get("is_correct") in (True, 1)), None)
@@ -150,28 +140,48 @@ class QuizAPIManager(BaseQuizManager):
                         user_answer.updated_at = datetime.now(timezone.utc).isoformat()
                         ua_list.append(user_answer.to_dict())
 
+            if not answers_from_question or not selected_text:
+                # User did not select an answer or no answers available
+                user_answer = UserAnswerModel()
+                user_answer.user_certification_id = 0  # Placeholder, should be set properly
+                user_answer.question_id = question_id
+                user_answer.correct_answer_id = next((a.get("id") for a in answers_from_question if a.get("is_correct") in (True, 1)), None)
+                user_answer.selected_answer_id = None
+                user_answer.is_correct = False
+                user_answer.user_uuid_id = user_uuid_id
+                user_answer.updated_at = datetime.now(timezone.utc).isoformat()
 
+                ua_list.append(user_answer.to_dict())
                     
+        correct_questions = sum(1 for ua in ua_list if ua['is_correct'])
+        total_questions = len(ua_list)
 
-                    
-                    
-                for l in ua_list:
-                    debug(f"Inserting user answer: {l}")
-                        
-                        
-                    # ==== TABLE USER_CERTIFICATION ====
-                    # id table self identification 
-                    # id from certification_title
-                    # id from user
-                    # character varying full name (at moment of certification)
-                    # timestamp time spent
-                    # timestamp created at
-                    # is_pdf boolean
-                    # score float
-                    # total_questions integer
-                    # correct_questions integer
-                    # wrong_questions integer
 
+        user_certification = UserCertificationModel()
+
+        user_certification.certification_title = certification_title
+        user_certification.user_uuid_id = user_uuid_id
+        user_certification.full_name = full_name
+        user_certification.language = language
+        # interval in seconds to isoformat
+        user_certification.time_spent = str(timedelta(seconds=time_spent_seconds))
+        user_certification.created_at = datetime.now(timezone.utc).isoformat()
+        user_certification.is_pdf = False
+        user_certification.correct_questions = correct_questions
+        user_certification.wrong_questions = total_questions - correct_questions
+        user_certification.total_questions = total_questions
+        user_certification.score = (correct_questions / total_questions) * 100 if total_questions > 0 else 0.0
+
+        certification_id = self.db_adapter.insert_row("accredit_usercertification", user_certification.to_dict())
+
+        for ua in ua_list:
+            ua['user_certification_id'] = certification_id[0]
+            _ = self.db_adapter.insert_row("accredit_useranswer", ua)
+        
+        return {
+            "certification_id": certification_id[0],
+            # "user_answers": ua_list
+        }
 
 
 
@@ -637,6 +647,7 @@ class QuizAPIManager(BaseQuizManager):
                 "id": question_id,
                 "question_text": qtext,
                 "options": options,
+                "difficulty": difficulty,
             })
 
             # Insert Answers

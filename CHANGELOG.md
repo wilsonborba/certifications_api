@@ -62,6 +62,7 @@ All notable changes to this project will be documented in this file.
 - *(quiz)* Addded some routes for complaining questions
 - *(quiz)* Added a complain for pdf save in redis
 - *(quiz)* Added initial models for quiz submit
+- *(quiz)* Added initial change for pdf quiz saving
 
 ### 🐛 Bug Fixes
 

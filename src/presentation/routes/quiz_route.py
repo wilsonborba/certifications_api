@@ -36,7 +36,7 @@ async def get_quiz_revision(
     # 'language': 'English',
     # 'is_for_pdf': False
     # }
-    user_uuid_id = request.headers.get("x-uuid")
+    user_uuid_id = request.headers.get("x-uuid") or "00000000-0000-0000-0000-000000000000"
 
     answers = body.get("answers", [])
     time_spent_seconds = body.get("time_spent_seconds", 0)
@@ -45,12 +45,27 @@ async def get_quiz_revision(
     language = body.get("language", "")
     is_for_pdf = body.get("is_for_pdf", False)
 
-    result_quiz = submit_quiz_revision(
-        request, response,
-        answers, time_spent_seconds, 
-        certification_title, full_name, 
-        language, is_for_pdf,
-        user_uuid_id
-    )
+
+    document_id = body.get("document_id")
+
+    if is_for_pdf and not document_id:
+        error("Document ID must be provided for PDF quizzes")
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return MyResponse(data=None, message="Document ID is required for PDF quizzes")
+
+    try:
+        result_quiz = await submit_quiz_revision(
+            request, response,
+            answers, time_spent_seconds, 
+            certification_title, full_name, 
+            language, is_for_pdf,
+            user_uuid_id,
+            document_id
+        )
+    except Exception as e:
+        error(f"Error processing quiz revision: {e}")
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return MyResponse(data=None, message="Internal server error during quiz revision processing")
+    
     response.status_code = status.HTTP_200_OK
     return MyResponse(data=result_quiz, message="Quiz revision successful")

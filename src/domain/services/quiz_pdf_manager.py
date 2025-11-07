@@ -136,8 +136,15 @@ class QuizPDFManager(BaseQuizManager):
             "pdf_question_id": pdf_question_id,
         }
 
-    def get_questions(self):
-        return super().get_questions()
+    async def get_questions(self, redis_adapter: RedisAdapter, document_id: str) -> list[dict]:
+
+        questions = []
+        for idx in (1, 2):
+            k = redis_adapter.k(settings.QUESTIONS_PREFIX, document_id, idx)
+            data = await redis_adapter.get(k)
+            if isinstance(data, list):
+                questions.extend(data)
+        return questions
 
     async def update_question(
         self,

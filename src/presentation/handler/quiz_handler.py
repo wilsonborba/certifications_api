@@ -1,12 +1,16 @@
 
 from fastapi import Request, Response # APIRouter, Query,  status, Body
 
+from src.core.utils import get_redis_adapter
+from src.domain.services.quiz_pdf_manager import QuizPDFManager
 from src.domain.services.quiz_api_manager import QuizAPIManager
+from src.core.logs import debug
+
 quiz_handler = QuizAPIManager()
 
+quiz_pdf_manager = QuizPDFManager()
 
-
-def submit_quiz_revision_for_pdf(
+async def submit_quiz_revision_for_pdf(
     request: Request,
     response: Response,
     answers: list, 
@@ -14,9 +18,16 @@ def submit_quiz_revision_for_pdf(
     certification_title: str, 
     full_name: str,
     language: str,
-    user_uuid_id: str
+    user_uuid_id: str,
+    document_id: str | None = None
     ):
-    pass
+    redis_adapter = get_redis_adapter(request)
+
+    questions = await quiz_pdf_manager.get_questions(redis_adapter, document_id=document_id)
+
+    debug(f"PDF Questions retrieved for revision: {questions}")
+
+    return 
 
 
 
@@ -29,7 +40,8 @@ def submit_quiz_revision(
     full_name: str, 
     language: str, 
     is_for_pdf: bool,
-    user_uuid_id: str
+    user_uuid_id: str,
+    document_id: str | None = None
     ):
     pass
 
@@ -42,7 +54,8 @@ def submit_quiz_revision(
             certification_title,
             full_name,
             language,
-            user_uuid_id
+            user_uuid_id,
+            document_id
         )
     
     # Normal quiz revision processing
@@ -55,6 +68,8 @@ def submit_quiz_revision(
         language=language,
         user_uuid_id=user_uuid_id
     )
+
+    return result
 
 
 
