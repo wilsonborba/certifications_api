@@ -25,6 +25,10 @@ async def submit_quiz_revision_for_pdf(
 
     questions = await quiz_pdf_manager.get_questions(redis_adapter, document_id=document_id)
 
+    for q in questions:
+        pdf_question_id = q.get("pdf_question_id")
+        
+
     debug(f"PDF Questions retrieved for revision: {questions}")
 
     return 
