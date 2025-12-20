@@ -1,37 +1,32 @@
-
-
-
-from datetime import datetime, timedelta, timezone
 import json
-from src.domain.models.user_certification import UserCertificationModel
-from src.domain.models.user_answer_model import UserAnswerModel
-from src.domain.models.available_languages import is_valid_language
-from src.domain.models.quiz_result_model import QuizResultModel
-from src.domain.services.quiz_base import BaseQuizManager, _normalize_text, _sha256
-from src.core.settings import app_settings
-from src.dal.remote.gemini import GeminiClient
-from src.domain.models.input_model import InputModel
-from src.domain.models.topics_model import TopicModel
-from src.dal.remote.factory import AdapterFactory
-from src.dal.local.db_adapter import DBAdapter
-from src.core.logs import error, debug, warning
-from sqlalchemy.exc import IntegrityError
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+
 from psycopg2.errors import UniqueViolation
+from sqlalchemy.exc import IntegrityError
 
-
+from src.core.logs import debug, error, warning
+from src.core.settings import app_settings
+from src.dal.local.db_adapter import DBAdapter
+from src.dal.remote.factory import AdapterFactory
+from src.dal.remote.gemini import GeminiClient
+from src.domain.models.available_languages import is_valid_language
+from src.domain.models.input_model import InputModel
+from src.domain.models.quiz_result_model import QuizResultModel
+from src.domain.models.topics_model import TopicModel
+from src.domain.models.user_answer_model import UserAnswerModel
+from src.domain.models.user_certification import UserCertificationModel
+from src.domain.services.quiz_base import BaseQuizManager, _normalize_text, _sha256
 
 
 class QuizAPIManager(BaseQuizManager):
-    
     def __init__(self):
         super().__init__()
-        
+
         self.adapters_factory = AdapterFactory()
         self.gemini_client = GeminiClient()
 
-
     def get_all_sources(self):
-        
         db_sources = self.db_adapter.read_all("accredit_sourceitem")
 
         list_of_sources = []
@@ -42,24 +37,20 @@ class QuizAPIManager(BaseQuizManager):
                 list_of_sources.append(source_name)
 
         return list_of_sources
-    
-    def get_source(self, source_name):
 
+    def get_source(self, source_name):
         db_source = self.db_adapter.read_by_id(
-            "accredit_sourceitem", 
-            source_name, 
-            id_column="source_name"
+            "accredit_sourceitem", source_name, id_column="source_name"
         )
 
         return db_source
-    
+
     def get_item_preview(self, item_name):
         adapter = self.adapters_factory.get_adapter(item_name)
         if not adapter:
             return None
         preview = adapter.get_preview()
         return preview
-    
 
     def get_all_items(self):
         db_items = self.db_adapter.read_all("accredit_sourceitem")
@@ -72,27 +63,23 @@ class QuizAPIManager(BaseQuizManager):
                 list_of_items.append(item_name)
 
         return list_of_items
-    
+
     def get_item(self, item_name):
-        
         db_item = self.db_adapter.read_by_id(
-            "accredit_sourceitem", 
-            item_name, 
-            id_column="item_name"
+            "accredit_sourceitem", item_name, id_column="item_name"
         )
 
         return db_item
-    
+
     def process_quiz_revision(
         self,
-        answers: list, 
-        time_spent_seconds: float, 
-        certification_title: str, 
+        answers: list,
+        time_spent_seconds: float,
+        certification_title: str,
         full_name: str,
         language: str,
         user_uuid_id: str,
-        ):
-
+    ):
         ua_list = []
         for ans in answers:
             question_id = ans.get("questionId")
@@ -100,27 +87,26 @@ class QuizAPIManager(BaseQuizManager):
             selected_text = ans.get("selectedText")
 
             answers_from_question = self.db_adapter.read_where_many(
-                table_name="accredit_answer", 
+                table_name="accredit_answer",
                 where={
                     "question_id": question_id,
                     # "is_correct": True
-                    })
-            
+                },
+            )
+
             # debug(f"Answers from question {question_id}: {answers_from_question}")
 
             # both text hashed for comparison
             if answers_from_question and selected_text:
-                
-                
-                
                 for ans in answers_from_question:
                     user_answer = UserAnswerModel()
-                    
-                    if _normalize_text(ans.get("text", "")) == _normalize_text(selected_text) and ans.get("is_correct") in (True, 1):
 
-
-
-                        user_answer.user_certification_id = 0  # Placeholder, should be set properly
+                    if _normalize_text(ans.get("text", "")) == _normalize_text(
+                        selected_text
+                    ) and ans.get("is_correct") in (True, 1):
+                        user_answer.user_certification_id = (
+                            0  # Placeholder, should be set properly
+                        )
                         user_answer.question_id = question_id
                         user_answer.correct_answer_id = ans.get("id")
                         user_answer.selected_answer_id = ans.get("id")
@@ -129,11 +115,21 @@ class QuizAPIManager(BaseQuizManager):
                         user_answer.updated_at = datetime.now(timezone.utc).isoformat()
                         ua_list.append(user_answer.to_dict())
 
-                    elif _normalize_text(ans.get("text", "")) == _normalize_text(selected_text) and ans.get("is_correct") not in (True, 1):
-
-                        user_answer.user_certification_id = 0  # Placeholder, should be set properly
+                    elif _normalize_text(ans.get("text", "")) == _normalize_text(
+                        selected_text
+                    ) and ans.get("is_correct") not in (True, 1):
+                        user_answer.user_certification_id = (
+                            0  # Placeholder, should be set properly
+                        )
                         user_answer.question_id = question_id
-                        user_answer.correct_answer_id = next((a.get("id") for a in answers_from_question if a.get("is_correct") in (True, 1)), None)
+                        user_answer.correct_answer_id = next(
+                            (
+                                a.get("id")
+                                for a in answers_from_question
+                                if a.get("is_correct") in (True, 1)
+                            ),
+                            None,
+                        )
                         user_answer.selected_answer_id = ans.get("id")
                         user_answer.is_correct = False
                         user_answer.user_uuid_id = user_uuid_id
@@ -143,23 +139,33 @@ class QuizAPIManager(BaseQuizManager):
             if not answers_from_question or not selected_text:
                 # User did not select an answer or no answers available
                 user_answer = UserAnswerModel()
-                user_answer.user_certification_id = 0  # Placeholder, should be set properly
+                user_answer.user_certification_id = (
+                    0  # Placeholder, should be set properly
+                )
                 user_answer.question_id = question_id
-                user_answer.correct_answer_id = next((a.get("id") for a in answers_from_question if a.get("is_correct") in (True, 1)), None)
+                user_answer.correct_answer_id = next(
+                    (
+                        a.get("id")
+                        for a in answers_from_question
+                        if a.get("is_correct") in (True, 1)
+                    ),
+                    None,
+                )
                 user_answer.selected_answer_id = None
                 user_answer.is_correct = False
                 user_answer.user_uuid_id = user_uuid_id
                 user_answer.updated_at = datetime.now(timezone.utc).isoformat()
 
                 ua_list.append(user_answer.to_dict())
-                    
-        correct_questions = sum(1 for ua in ua_list if ua['is_correct'])
-        total_questions = len(ua_list)
 
+        correct_questions = sum(1 for ua in ua_list if ua["is_correct"])
+        total_questions = len(ua_list)
 
         user_certification = UserCertificationModel()
 
         user_certification.certification_title = certification_title
+        user_certification.uuid_certification = uuid4().hex
+
         user_certification.user_uuid_id = user_uuid_id
         user_certification.full_name = full_name
         user_certification.language = language
@@ -170,79 +176,76 @@ class QuizAPIManager(BaseQuizManager):
         user_certification.correct_questions = correct_questions
         user_certification.wrong_questions = total_questions - correct_questions
         user_certification.total_questions = total_questions
-        user_certification.score = (correct_questions / total_questions) * 100 if total_questions > 0 else 0.0
+        user_certification.score = (
+            (correct_questions / total_questions) * 100 if total_questions > 0 else 0.0
+        )
 
-        certification_id = self.db_adapter.insert_row("accredit_usercertification", user_certification.to_dict())
+        certification_id = self.db_adapter.insert_row(
+            "accredit_usercertification", user_certification.to_dict()
+        )
 
         for ua in ua_list:
-            ua['user_certification_id'] = certification_id[0]
+            ua["user_certification_id"] = certification_id[0]
             _ = self.db_adapter.insert_row("accredit_useranswer", ua)
-        
+
         return {
-            "certification_id": certification_id[0],
+            # return uuid_certification_id instead of DB PK
+            "certification_id": user_certification.uuid_certification,
             # "user_answers": ua_list
         }
 
-
-
-
-
-                        
-            
-
-
-
-
-            
-    
     def save_complaint(self, complaint_text: str, question_id: str, user_uuid_id: str):
-
-        _ = self.db_adapter.insert_row("accredit_questioncomplaint", {
-            "user_uuid_id": user_uuid_id,
-            "complaint_text": complaint_text,
-            "question_id": question_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "is_pdf": False,
-        })
+        _ = self.db_adapter.insert_row(
+            "accredit_questioncomplaint",
+            {
+                "user_uuid_id": user_uuid_id,
+                "complaint_text": complaint_text,
+                "question_id": question_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "is_pdf": False,
+            },
+        )
 
         debug(f"Complaint saved: {_}")
 
         return {"complaint_text": complaint_text, "question_id": question_id}
-    
-    def save_solicitation_new_topic(self, app_url: str, user_uuid_id: str) -> None:
 
+    def save_solicitation_new_topic(self, app_url: str, user_uuid_id: str) -> None:
         try:
-            insert_result = self.db_adapter.insert_row("accredit_solicitationnewitemtopic", {
-                "user_uuid_id": user_uuid_id,
-                "app_url": app_url,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            })
+            insert_result = self.db_adapter.insert_row(
+                "accredit_solicitationnewitemtopic",
+                {
+                    "user_uuid_id": user_uuid_id,
+                    "app_url": app_url,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
             debug(f"New topic solicitation saved for URL: {app_url}")
 
             return insert_result
         except IntegrityError as e:
-        # Ignore only if it's a unique violation (duplicate key)
+            # Ignore only if it's a unique violation (duplicate key)
             if isinstance(e.orig, UniqueViolation):
                 warning(f"Duplicate solicitation ignored for URL: {app_url}")
                 return None  # or return the existing ID if you prefer
             else:
                 error(f"Database integrity error for '{app_url}': {e}")
                 raise  # re-raise all other IntegrityError types
-        
+
         except Exception as e:
             error(f"Failed to save new topic solicitation for URL '{app_url}': {e}")
             raise
-    
+
     def get_topics(
         self,
         item_name: str,
         *,
         page: int = 1,
         per_page: int = 45,
-        **adapter_kwargs,   # adapter-specific knobs if needed (e.g., time_window, tagged)
+        **adapter_kwargs,  # adapter-specific knobs if needed (e.g., time_window, tagged)
     ) -> dict[str, any]:
         adapter = self.adapters_factory.get_adapter(item_name)
-        
+
         if not adapter:
             error(f"No adapter found for source: {item_name}")
             return TopicModel(
@@ -266,7 +269,7 @@ class QuizAPIManager(BaseQuizManager):
             updated_at=res.get("updated_at", datetime.now(timezone.utc).isoformat()),
             source_name=res.get("source_name"),
         ).to_dict()
-    
+
     def get_input(
         self,
         item_name: str,
@@ -286,8 +289,7 @@ class QuizAPIManager(BaseQuizManager):
 
         # 1) find SourceItem row
         source_item_db = self.db_adapter.read_where_one(
-            "accredit_sourceitem",
-            {"item_name": item_name}
+            "accredit_sourceitem", {"item_name": item_name}
         )
         if not source_item_db:
             error(f"Source item not found in DB for item_name: {item_name}")
@@ -306,47 +308,65 @@ class QuizAPIManager(BaseQuizManager):
         # 2) try cache in accredit_input
         row = self.db_adapter.read_where_one(
             "accredit_input",
-            {"source_item_id": source_item_id, "input_identification": input_identification}
+            {
+                "source_item_id": source_item_id,
+                "input_identification": input_identification,
+            },
         )
         if row:
             debug(f"Input found in DB for {item_name} - {input_identification}")
             return InputModel(
                 source_name=source_name,
                 item_name=item_name_from_db,
-                input_identification=row.get("input_identification", input_identification),
+                input_identification=row.get(
+                    "input_identification", input_identification
+                ),
                 input_data=row.get("input_data", None),
-                updated_at=row.get("updated_at", datetime.now(timezone.utc).isoformat()),
+                updated_at=row.get(
+                    "updated_at", datetime.now(timezone.utc).isoformat()
+                ),
             ).to_dict()
 
         # 3) fetch from adapter and persist
-        debug(f"Input NOT found in DB for {item_name} - {input_identification}. Fetching from source...")
-        response_from_adapter = adapter.get_input(input_identification=input_identification, **adapter_kwargs)
+        debug(
+            f"Input NOT found in DB for {item_name} - {input_identification}. Fetching from source..."
+        )
+        response_from_adapter = adapter.get_input(
+            input_identification=input_identification, **adapter_kwargs
+        )
 
-        inserted_pk = self.db_adapter.insert_row("accredit_input", {
-            "source_item_id": source_item_id,
-            "input_identification": input_identification,
-            "input_data": response_from_adapter.get("input_data", None),
-            "updated_at": response_from_adapter.get("updated_at", datetime.now(timezone.utc).isoformat()),
-        })
+        inserted_pk = self.db_adapter.insert_row(
+            "accredit_input",
+            {
+                "source_item_id": source_item_id,
+                "input_identification": input_identification,
+                "input_data": response_from_adapter.get("input_data", None),
+                "updated_at": response_from_adapter.get(
+                    "updated_at", datetime.now(timezone.utc).isoformat()
+                ),
+            },
+        )
 
         return InputModel(
             source_name=source_name,
             item_name=item_name_from_db,
             input_identification=input_identification,
             input_data=response_from_adapter.get("input_data", None),
-            updated_at=response_from_adapter.get("updated_at", datetime.now(timezone.utc).isoformat()),
+            updated_at=response_from_adapter.get(
+                "updated_at", datetime.now(timezone.utc).isoformat()
+            ),
         ).to_dict()
-    
+
     def search(
-    self,
-    item_name: str,
-    q: str,
-    page: int = 1,
-    per_page: int = 45,
-    mode: str = "fulltext",          # fulltext | substring | fuzzy
-    time_window: str | None = None,
-    fill_page: bool = True,
-    max_extra_pages: int = 2,
+        self,
+        item_name: str,
+        q: str,
+        page: int = 1,
+        per_page: int = 45,
+        mode: str = "fulltext",  # fulltext | substring | fuzzy
+        time_window: str | None = None,
+        fill_page: bool = True,
+        max_extra_pages: int = 2,
     ) -> dict[str, any]:
         adapter = self.adapters_factory.get_adapter(item_name)
         if not adapter:
@@ -363,15 +383,18 @@ class QuizAPIManager(BaseQuizManager):
 
         try:
             # DELEGAR para o adapter (o adapter já aplica 'mode')
-            res = adapter.search(
-                q=q,
-                page=page,
-                per_page=per_page,
-                mode=mode,                 # <-- antes estava faltando
-                time_window=time_window,
-                fill_page=fill_page,
-                max_extra_pages=max_extra_pages,
-            ) or {}
+            res = (
+                adapter.search(
+                    q=q,
+                    page=page,
+                    per_page=per_page,
+                    mode=mode,  # <-- antes estava faltando
+                    time_window=time_window,
+                    fill_page=fill_page,
+                    max_extra_pages=max_extra_pages,
+                )
+                or {}
+            )
         except Exception as ex:
             error(f"Adapter search failed for {item_name}: {ex}")
             return TopicModel(
@@ -395,12 +418,9 @@ class QuizAPIManager(BaseQuizManager):
             "updated_at": res.get("updated_at", datetime.now(timezone.utc).isoformat()),
             "topics": topics,
         }
-    
 
-        
     async def generate_context(
         self,
-
         item_name: str,
         input_data: dict[str, any],
         input_identification: str,
@@ -408,7 +428,7 @@ class QuizAPIManager(BaseQuizManager):
         selected_language: str,
         force_new_generation: bool = False,
         *args,
-        **kwargs
+        **kwargs,
     ) -> dict[str, any]:
         adapter = self.adapters_factory.get_adapter(item_name)
         if not adapter:
@@ -418,32 +438,37 @@ class QuizAPIManager(BaseQuizManager):
         # Caminho rápido: buscar no DB, a menos que force_new_generation esteja True
         if not force_new_generation:
             cached = self.get_questions(
-                item_name=item_name, 
-                input_identification=input_identification, 
+                item_name=item_name,
+                input_identification=input_identification,
                 amount_question=amount_question,
-                selected_language=selected_language
-                )
+                selected_language=selected_language,
+            )
             if cached:
                 debug(f"Questions found in DB for {item_name} - {input_identification}")
-                for item in cached['questions']:
+                for item in cached["questions"]:
                     item.pop("correct_answer")
                     item.pop("justification")
-                
+
                 return cached
             else:
-                debug(f"Questions NOT found in DB for {item_name} - {input_identification}. Generating...")
+                debug(
+                    f"Questions NOT found in DB for {item_name} - {input_identification}. Generating..."
+                )
 
         # Gera UMA vez (ou porque forçou, ou porque não há no DB)
-        prompt = adapter.generate_context(input_data=input_data, amount_question=amount_question, *args, **kwargs)
+        prompt = adapter.generate_context(
+            input_data=input_data, amount_question=amount_question, *args, **kwargs
+        )
         response = await self.gemini_client.generate_text(
             prompt=prompt,
-            system_instruction=adapter.instructions() + "\n" + adapter.language_instructions(selected_language=selected_language),
+            system_instruction=adapter.instructions()
+            + "\n"
+            + adapter.language_instructions(selected_language=selected_language),
             response_mime_type="application/json",
             temperature=0.7,
         )
         return response
 
-    
     def get_questions(
         self,
         item_name: str,
@@ -451,7 +476,6 @@ class QuizAPIManager(BaseQuizManager):
         input_identification: str | None = None,
         selected_language: str = "English",
     ) -> dict[str, any] | None:
-
         if not input_identification:
             return None
 
@@ -461,8 +485,7 @@ class QuizAPIManager(BaseQuizManager):
 
         # 1) SourceItem
         source_item_db = self.db_adapter.read_where_one(
-            "accredit_sourceitem",
-            {"item_name": item_name}
+            "accredit_sourceitem", {"item_name": item_name}
         )
         if not source_item_db:
             error(f"Source item not found in DB for item_name: {item_name}")
@@ -473,32 +496,31 @@ class QuizAPIManager(BaseQuizManager):
         # 2) Input
         input_db = self.db_adapter.read_where_one(
             "accredit_input",
-            {"source_item_id": source_item_db["id"], "input_identification": input_identification}
+            {
+                "source_item_id": source_item_db["id"],
+                "input_identification": input_identification,
+            },
         )
         if not input_db:
             debug(f"Input not cached yet for {item_name} / {input_identification}")
             return None
-        
+
         debug(f"Input found in DB for {item_name} / {input_identification}")
 
         # 3) ALL questions for this input
         questions_db = self.db_adapter.read_where_many(
             "accredit_question",
-            {
-            "input_id": input_db["id"],
-            "selected_language": selected_language
-            },
-            
+            {"input_id": input_db["id"], "selected_language": selected_language},
             # You can add order_by here if your adapter prefers a stable order
         )
 
-        debug(f"Fetched {len(questions_db)} questions from DB for {item_name} / {input_identification}")
+        debug(
+            f"Fetched {len(questions_db)} questions from DB for {item_name} / {input_identification}"
+        )
 
         if not questions_db:
             debug(f"No questions in DB for {item_name} / {input_identification}")
             return None
-        
-
 
         payload = {"questions": []}
 
@@ -506,7 +528,7 @@ class QuizAPIManager(BaseQuizManager):
         for q in questions_db[:amount_question]:  # limit to amount_question
             # print override the same  line in terminal
             if app_settings().development_mode:
-                print(f"Processing question ID {q['id']}", end='\r')
+                print(f"Processing question ID {q['id']}", end="\r")
 
             answers = self.db_adapter.read_where_many(
                 "accredit_answer",
@@ -518,32 +540,34 @@ class QuizAPIManager(BaseQuizManager):
                 continue
 
             options = [a["text"] for a in answers]
-            correct = next((a["text"] for a in answers if a.get("is_correct") in (True, 1)), None)
+            correct = next(
+                (a["text"] for a in answers if a.get("is_correct") in (True, 1)), None
+            )
             if not correct:
                 # inconsistent data; skip
                 continue
 
-            payload["questions"].append({
-                "id": q["id"],
-                "question_text": q["question_text"],
-                "correct_answer": correct,
-                "options": options,
-                "justification": q.get("justification"),
-                "difficulty": q.get("difficulty"),
-                "selected_language": q.get("selected_language"),
-
-            })
+            payload["questions"].append(
+                {
+                    "id": q["id"],
+                    "question_text": q["question_text"],
+                    "correct_answer": correct,
+                    "options": options,
+                    "justification": q.get("justification"),
+                    "difficulty": q.get("difficulty"),
+                    "selected_language": q.get("selected_language"),
+                }
+            )
 
         return payload if payload["questions"] else None
 
-    
     def save_questions(
-    self,
-    response: dict[str, any],
-    *,
-    item_name: str,
-    input_identification: str,
-    selected_language: str,
+        self,
+        response: dict[str, any],
+        *,
+        item_name: str,
+        input_identification: str,
+        selected_language: str,
     ) -> QuizResultModel:
         """
         Persist Gemini questions for the given (item_name, input_identification).
@@ -568,10 +592,15 @@ class QuizAPIManager(BaseQuizManager):
 
         input_db = self.db_adapter.read_where_one(
             "accredit_input",
-            {"source_item_id": source_item_db["id"], "input_identification": input_identification}
+            {
+                "source_item_id": source_item_db["id"],
+                "input_identification": input_identification,
+            },
         )
         if not input_db:
-            error(f"Input not found in DB for item_name: {item_name}, input_identification: {input_identification}")
+            error(
+                f"Input not found in DB for item_name: {item_name}, input_identification: {input_identification}"
+            )
             raise ValueError("Input must be cached before saving questions.")
 
         inserted = 0
@@ -598,18 +627,14 @@ class QuizAPIManager(BaseQuizManager):
 
             # Exact duplicate by normalized hash?
 
-
             pld = {
-                    "input_id": input_db["id"], 
-                    "normalized_text_hash": nhash,
-                    "selected_language": selected_language  
-                }
+                "input_id": input_db["id"],
+                "normalized_text_hash": nhash,
+                "selected_language": selected_language,
+            }
 
-            existing = self.db_adapter.read_where_one(
-                "accredit_question",
-                pld
-            )
-           
+            existing = self.db_adapter.read_where_one("accredit_question", pld)
+
             if existing:
                 skipped_exact += 1
                 continue
@@ -630,25 +655,29 @@ class QuizAPIManager(BaseQuizManager):
             cand_vec = self._embed_question_text(qtext)
 
             # Insert Question
-            [question_id] = self.db_adapter.insert_row("accredit_question", {
-                "input_id": input_db["id"],
-                "question_text": qtext,
-                "normalized_text": norm,
-                "normalized_text_hash": nhash,
-                "justification": justification,
-                "difficulty": difficulty,
-                "embedding": cand_vec,  # None is fine if you can't embed yet
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "selected_language": q.get("selected_language"),
+            [question_id] = self.db_adapter.insert_row(
+                "accredit_question",
+                {
+                    "input_id": input_db["id"],
+                    "question_text": qtext,
+                    "normalized_text": norm,
+                    "normalized_text_hash": nhash,
+                    "justification": justification,
+                    "difficulty": difficulty,
+                    "embedding": cand_vec,  # None is fine if you can't embed yet
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "selected_language": q.get("selected_language"),
+                },
+            )
 
-            })
-
-            saved_questions.append({
-                "id": question_id,
-                "question_text": qtext,
-                "options": options,
-                "difficulty": difficulty,
-            })
+            saved_questions.append(
+                {
+                    "id": question_id,
+                    "question_text": qtext,
+                    "options": options,
+                    "difficulty": difficulty,
+                }
+            )
 
             # Insert Answers
             for idx, opt in enumerate(options):
@@ -657,18 +686,21 @@ class QuizAPIManager(BaseQuizManager):
                     continue
                 opt_norm = _normalize_text(opt_text)
                 opt_hash = _sha256(opt_norm)
-                is_correct = (opt_text == correct)
+                is_correct = opt_text == correct
 
                 # NOTE: do NOT overwrite the 'inserted' counter with the DB return value.
-                _ = self.db_adapter.insert_row("accredit_answer", {
-                    "question_id": question_id,
-                    "text": opt_text,
-                    "normalized_text": opt_norm,
-                    "normalized_text_hash": opt_hash,
-                    "is_correct": 1 if is_correct else 0,
-                    "position": idx,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                })
+                _ = self.db_adapter.insert_row(
+                    "accredit_answer",
+                    {
+                        "question_id": question_id,
+                        "text": opt_text,
+                        "normalized_text": opt_norm,
+                        "normalized_text_hash": opt_hash,
+                        "is_correct": 1 if is_correct else 0,
+                        "position": idx,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
 
             # Bump the inserted counter once per question persisted
             inserted += 1
@@ -678,10 +710,3 @@ class QuizAPIManager(BaseQuizManager):
             identification=f"{item_name}:{input_identification}",
             created_at=datetime.now(timezone.utc).isoformat(),
         )
-
-
-   
-
-
-
-            

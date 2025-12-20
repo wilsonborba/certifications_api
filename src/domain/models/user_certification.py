@@ -1,11 +1,10 @@
-
-
 from dataclasses import asdict, dataclass
 
 
 @dataclass
 class UserCertificationModel:
     certification_title: str | None = None
+    uuid_certification: str | None = None
     user_uuid_id: str | None = None
     full_name: str | None = None
     language: str | None = None
