@@ -39,7 +39,7 @@ async def add_new_topic_request(
 
     await add_new_topic_request_to_db(app_url=app_url, user_uuid_id=request.headers["x-uuid"])
 
-    debug(f"New topic request received from {request.headers["x-uuid"]}  with website URL: {app_url}")
+    debug(f"New topic request received from {request.headers['x-uuid']}  with website URL: {app_url}")
 
     return MyResponse(
         message=f"New topic request added successfully.",

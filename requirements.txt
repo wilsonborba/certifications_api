@@ -19,7 +19,6 @@ fastparquet
 httpx
 pgvector
 PyMuPDF
-unstructured[pdf]
 pillow
 pytesseract
 clamd

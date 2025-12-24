@@ -83,4 +83,6 @@ async def fetch_certification(certification_id):
         "accredit_usercertification", certification_id, id_column="uuid_certification"
     )
 
-    return result[0] if result else None
+    debug(f"Result: {result}")
+
+    return result
