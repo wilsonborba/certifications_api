@@ -69,7 +69,8 @@ async def get_quiz_revision(
     # 'certification_title': 'Test',
     # 'full_name': 'Wilson Borba',
     # 'language': 'English',
-    # 'is_for_pdf': False
+    # 'is_for_pdf': False,
+    # 'document_id': 'some-document-id'
     # }
     user_uuid_id = (
         request.headers.get("x-uuid") or "00000000-0000-0000-0000-000000000000"
@@ -83,6 +84,10 @@ async def get_quiz_revision(
     is_for_pdf = body.get("is_for_pdf", False)
 
     document_id = body.get("document_id")
+
+    debug(
+        f"Quiz Revision Details - User UUID: {user_uuid_id}, Answers: {answers}, Time Spent: {time_spent_seconds}, Certification Title: {certification_title}, Full Name: {full_name}, Language: {language}, Is for PDF: {is_for_pdf}, Document ID: {document_id}"
+    )
 
     if is_for_pdf and not document_id:
         error("Document ID must be provided for PDF quizzes")
