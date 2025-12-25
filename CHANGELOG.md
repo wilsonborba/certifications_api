@@ -61,6 +61,7 @@
 - *(quiz)* Added initial change for pdf quiz saving
 - *(forgot)* Idk
 - *(pdf)* Start implementation to save from redis to postgres
+- *(pdf)* Saving question and answer into postgres from redis ok
 
 ### 🐛 Bug Fixes
 

@@ -58,7 +58,14 @@ async def submit_quiz_revision_for_pdf(
 
     inserted_input = db_adapter.insert_row("accredit_input", payload_input)
 
-    debug(f"Inserted input: {inserted_input}")
+    saved_questions = quiz_handler.save_questions(
+        response={"questions": questions},
+        item_name="pdf",
+        input_identification=document_id,
+        selected_language=language,
+    )
+
+    debug(f"Saved questions: {saved_questions}")
 
     return
 
