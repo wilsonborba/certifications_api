@@ -65,6 +65,7 @@
 - *(questions)* Added a field to help compare right answers in pdf quiz
 - *(pdf)* Verifying if pdf answer is right implemented
 - *(pdf)* Added a mapper for right id insert on db
+- *(pdf)* Adjuster map to ignore missing question
 
 ### 🐛 Bug Fixes
 

@@ -19,42 +19,56 @@ db_adapter = DBAdapter()
 def remap_frontend_question_ids_to_db_ids(
     answers: List[Dict[str, Any]],
     saved_questions: List[Dict[str, Any]],
+    *,
+    drop_unmapped: bool = True,
 ) -> List[Dict[str, Any]]:
     """
-    Remapeia answers[*].questionId (pdf_question_id vindo do front)
-    para o ID numérico da questão salva no DB (saved_questions[*].id),
-    fazendo match por saved_questions[*].pdf_question_id.
+    Troca answers[*].questionId (pdf_question_id do front) por saved_questions[*].id (BIGINT do DB).
+    Match: ans.questionId == saved_question.pdf_question_id.
 
-    Retorna:
-      - new_answers: lista com questionId sobrescrito quando houver match
-      - report: métricas e itens não mapeados para debug/monitoramento
+    Se drop_unmapped=True:
+      - Remove do retorno qualquer answer que não puder ser mapeado.
+      - Isso evita InvalidTextRepresentation (UUID em coluna BIGINT) e não penaliza o usuário,
+        porque o score passa a considerar apenas questões válidas.
+
+    Retorna: lista de answers prontos para process_quiz_revision.
     """
-    # Mapa: pdf_question_id (uuid) -> question db id (int)
+
+    # pdf_question_id (str) -> db question id (int)
     pdf_to_db: Dict[str, int] = {}
     duplicates: Dict[str, List[int]] = {}
 
     for q in saved_questions or []:
         pdf_id = q.get("pdf_question_id")
         db_id = q.get("id")
+
         if not pdf_id or db_id is None:
             continue
 
-        if pdf_id in pdf_to_db and pdf_to_db[pdf_id] != db_id:
-            duplicates.setdefault(pdf_id, [pdf_to_db[pdf_id]]).append(db_id)
-        pdf_to_db[pdf_id] = db_id
+        try:
+            db_id_int = int(db_id)
+        except (TypeError, ValueError):
+            continue
 
-    new_answers: List[Dict[str, Any]] = []
+        if pdf_id in pdf_to_db and pdf_to_db[pdf_id] != db_id_int:
+            duplicates.setdefault(pdf_id, [pdf_to_db[pdf_id]]).append(db_id_int)
+
+        pdf_to_db[pdf_id] = db_id_int
+
+    remapped: List[Dict[str, Any]] = []
     unmapped: List[Dict[str, Any]] = []
-    mapped_count = 0
 
     for ans in answers or []:
-        # Copia para não mutar a lista original (opcional)
         ans_copy = dict(ans)
 
         front_qid = ans_copy.get("questionId")
         if not front_qid:
             unmapped.append({"reason": "missing_questionId", "answer": ans_copy})
-            new_answers.append(ans_copy)
+            if not drop_unmapped:
+                # Se você realmente quiser manter, zera com None para evitar BIGINT error.
+                # (Mas note: isso pode causar FK/consulta vazia dependendo do seu adapter.)
+                ans_copy["questionId"] = None
+                remapped.append(ans_copy)
             continue
 
         db_qid = pdf_to_db.get(front_qid)
@@ -62,24 +76,25 @@ def remap_frontend_question_ids_to_db_ids(
             unmapped.append(
                 {"reason": "no_match_for_pdf_question_id", "questionId": front_qid}
             )
-            new_answers.append(ans_copy)
+            if not drop_unmapped:
+                ans_copy["questionId"] = None
+                remapped.append(ans_copy)
             continue
 
-        ans_copy["questionId"] = db_qid
-        mapped_count += 1
-        new_answers.append(ans_copy)
+        ans_copy["questionId"] = db_qid  # BIGINT seguro
+        remapped.append(ans_copy)
 
     report = {
-        "total_answers": len(answers or []),
+        "total_answers_in": len(answers or []),
         "total_saved_questions": len(saved_questions or []),
-        "mapped": mapped_count,
-        "unmapped": unmapped,
+        "mapped": len(remapped),
+        "unmapped_dropped" if drop_unmapped else "unmapped_kept_as_null": len(unmapped),
+        "unmapped_samples": unmapped[:5],
         "duplicate_pdf_ids_in_saved_questions": duplicates,
     }
-
     debug(f"Remap report: {report}")
 
-    return new_answers
+    return remapped
 
 
 async def submit_quiz_revision_for_pdf(
