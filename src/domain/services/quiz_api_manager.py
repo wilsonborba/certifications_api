@@ -677,7 +677,7 @@ class QuizAPIManager(BaseQuizManager):
                     "question_text": qtext,
                     "options": options,
                     "difficulty": difficulty,
-                    "pdf_question_id": pdf_question_id
+                    "pdf_question_id": pdf_question_id,
                 }
             )
 

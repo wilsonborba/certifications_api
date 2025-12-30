@@ -48,7 +48,7 @@ async def submit_quiz_revision_for_pdf(
     # we need get the id of the itemsource to add a
 
     source_item_id = itemsource["id"]  # itemsource[0]["id"] if itemsource else None
-    
+
     debug(f"Questions: {questions}")
 
     payload_input = {
@@ -69,7 +69,16 @@ async def submit_quiz_revision_for_pdf(
 
     debug(f"Saved questions: {saved_questions}")
 
-    return
+    result = quiz_handler.process_quiz_revision(
+        answers=answers,
+        time_spent_seconds=time_spent_seconds,
+        certification_title=certification_title,
+        full_name=full_name,
+        language=language,
+        user_uuid_id=user_uuid_id,
+    )
+
+    return result
 
 
 async def submit_quiz_revision(
