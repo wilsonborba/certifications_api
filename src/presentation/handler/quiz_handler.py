@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Tuple
 
 from fastapi import Request, Response  # APIRouter, Query,  status, Body
 
@@ -13,6 +14,72 @@ quiz_handler = QuizAPIManager()
 
 quiz_pdf_manager = QuizPDFManager()
 db_adapter = DBAdapter()
+
+
+def remap_frontend_question_ids_to_db_ids(
+    answers: List[Dict[str, Any]],
+    saved_questions: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Remapeia answers[*].questionId (pdf_question_id vindo do front)
+    para o ID numérico da questão salva no DB (saved_questions[*].id),
+    fazendo match por saved_questions[*].pdf_question_id.
+
+    Retorna:
+      - new_answers: lista com questionId sobrescrito quando houver match
+      - report: métricas e itens não mapeados para debug/monitoramento
+    """
+    # Mapa: pdf_question_id (uuid) -> question db id (int)
+    pdf_to_db: Dict[str, int] = {}
+    duplicates: Dict[str, List[int]] = {}
+
+    for q in saved_questions or []:
+        pdf_id = q.get("pdf_question_id")
+        db_id = q.get("id")
+        if not pdf_id or db_id is None:
+            continue
+
+        if pdf_id in pdf_to_db and pdf_to_db[pdf_id] != db_id:
+            duplicates.setdefault(pdf_id, [pdf_to_db[pdf_id]]).append(db_id)
+        pdf_to_db[pdf_id] = db_id
+
+    new_answers: List[Dict[str, Any]] = []
+    unmapped: List[Dict[str, Any]] = []
+    mapped_count = 0
+
+    for ans in answers or []:
+        # Copia para não mutar a lista original (opcional)
+        ans_copy = dict(ans)
+
+        front_qid = ans_copy.get("questionId")
+        if not front_qid:
+            unmapped.append({"reason": "missing_questionId", "answer": ans_copy})
+            new_answers.append(ans_copy)
+            continue
+
+        db_qid = pdf_to_db.get(front_qid)
+        if db_qid is None:
+            unmapped.append(
+                {"reason": "no_match_for_pdf_question_id", "questionId": front_qid}
+            )
+            new_answers.append(ans_copy)
+            continue
+
+        ans_copy["questionId"] = db_qid
+        mapped_count += 1
+        new_answers.append(ans_copy)
+
+    report = {
+        "total_answers": len(answers or []),
+        "total_saved_questions": len(saved_questions or []),
+        "mapped": mapped_count,
+        "unmapped": unmapped,
+        "duplicate_pdf_ids_in_saved_questions": duplicates,
+    }
+
+    debug(f"Remap report: {report}")
+
+    return new_answers
 
 
 async def submit_quiz_revision_for_pdf(
@@ -60,17 +127,24 @@ async def submit_quiz_revision_for_pdf(
 
     inserted_input = db_adapter.insert_row("accredit_input", payload_input)
 
-    saved_questions = quiz_handler.save_questions(
+    saved_questions_model = quiz_handler.save_questions(
         response={"questions": questions},
         item_name="pdf",
         input_identification=document_id,
         selected_language=language,
     )
 
-    debug(f"Saved questions: {saved_questions}")
+    saved_questions = getattr(saved_questions_model, "saved_questions", None) or []
+
+    debug(f"Saved questions: {saved_questions_model}")
+
+    answers_mapped = remap_frontend_question_ids_to_db_ids(
+        answers=answers,
+        saved_questions=saved_questions,
+    )
 
     result = quiz_handler.process_quiz_revision(
-        answers=answers,
+        answers=answers_mapped,
         time_spent_seconds=time_spent_seconds,
         certification_title=certification_title,
         full_name=full_name,

@@ -64,6 +64,7 @@
 - *(pdf)* Saving question and answer into postgres from redis ok
 - *(questions)* Added a field to help compare right answers in pdf quiz
 - *(pdf)* Verifying if pdf answer is right implemented
+- *(pdf)* Added a mapper for right id insert on db
 
 ### 🐛 Bug Fixes
 
