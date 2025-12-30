@@ -615,6 +615,7 @@ class QuizAPIManager(BaseQuizManager):
             options = q.get("options", []) or []
             difficulty = q.get("difficulty")
             justification = q.get("justification")
+            pdf_question_id = q.get("pdf_question_id", {})
 
             if not qtext or not correct or not options:
                 error(f"Invalid question data (missing parts): {q}")
@@ -676,6 +677,7 @@ class QuizAPIManager(BaseQuizManager):
                     "question_text": qtext,
                     "options": options,
                     "difficulty": difficulty,
+                    "pdf_question_id": pdf_question_id
                 }
             )
 

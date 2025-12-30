@@ -48,6 +48,8 @@ async def submit_quiz_revision_for_pdf(
     # we need get the id of the itemsource to add a
 
     source_item_id = itemsource["id"]  # itemsource[0]["id"] if itemsource else None
+    
+    debug(f"Questions: {questions}")
 
     payload_input = {
         "source_item_id": source_item_id,
