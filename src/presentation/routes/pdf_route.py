@@ -7,7 +7,7 @@ from ..handler.responses import (
       MalwareDetectedError, MyResponse, NotEnoughQuestionsGeneratedError, UnsupportedFileTypeError
       )
 from src.core.logs import error, debug
-from src.dal.remote.gemini import GeminiError
+from src.dal.remote.ai.gemini import GeminiError
 
 pdf_router = APIRouter()
 

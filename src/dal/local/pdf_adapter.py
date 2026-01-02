@@ -13,7 +13,7 @@ import pytesseract
 from unstructured.partition.pdf import partition_pdf
 from src.core.settings import app_settings
 from src.dal.local.redis_adapter import RedisAdapter
-from src.dal.remote.gemini import GeminiClient, GeminiConfig
+from src.dal.remote.ai.gemini import GeminiClient, GeminiConfig
 from src.dal.remote.base import BaseAdapter
 from src.domain.models.preview_model import PreviewModel
 from src.presentation.handler.responses import MalwareDetectedError, UnsupportedFileTypeError
