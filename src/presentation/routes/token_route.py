@@ -84,39 +84,6 @@ async def create_user_ai_token(
     """
     Endpoint to create a new AI token for the user.
 
-    class UserTokens(models.Model):
-        id = models.BigAutoField(primary_key=True)
-        user_uuid_id = models.UUIDField(db_index=True)
-        token_name = models.CharField(max_length=255, db_index=True)
-        model_version = models.CharField(max_length=100, null=True, blank=True)
-        token_value = models.TextField()
-        is_default = models.BooleanField(default=False)
-
-        def __str__(self):
-            return f"UserTokens[{self.pk}] for User[{self.user_uuid_id}] TokenName[{self.token_name}]"
-
-        class Meta:
-            # can only have one token_name per user and only one default token per user
-            #
-            # e.g., user_uuid_id + token_name must be unique
-            # and user_uuid_id + is_default=True must be unique
-
-            constraints = [
-                models.UniqueConstraint(
-                    fields=[
-                        "user_uuid_id",
-                        "token_name",
-                    ],
-                    name="uniq_user_token_name_per_user",
-                ),
-                models.UniqueConstraint(
-                    fields=[
-                        "user_uuid_id",
-                    ],
-                    condition=models.Q(is_default=True),
-                    name="uniq_user_default_token_per_user",
-                ),
-            ]
     """
 
     try:
@@ -129,7 +96,7 @@ async def create_user_ai_token(
 
         token_name = body.get("token_name", None)
         token_value = body.get("token_value", None)
-        model_version = body.get("model_version", None)
+        # model_version = body.get("model_version", None)
         is_default = body.get("is_default", None)
 
         missing_fields, missing_field_names = is_missing_important_fields(body)

@@ -44,6 +44,24 @@ class AiTokenManager:
     ):
         existing_token = self.get_unique_token(user_uuid_id, token_name)
 
+        # need to get the default token to unset it if the new one is set as default
+        # only if is_default is True
+        # this is to ensure only one default token per user
+        if is_default:
+            default_token = self.get_default_token(user_uuid_id)
+            if default_token and default_token["token_name"] != token_name:
+                self.db_adapter.update_row(
+                    "accredit_usertokens",
+                    default_token["id"],
+                    {
+                        "is_default": False,
+                    },
+                )
+
+        # Update or insert the token
+        # If the token already exists, update it; otherwise, insert a new one
+        # Return the token ID
+
         if existing_token:
             # Update existing token
             self.db_adapter.update_row(
