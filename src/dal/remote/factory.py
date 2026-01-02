@@ -1,50 +1,45 @@
-
-
-
-
-from src.dal.remote.questions.questionei_adapter import QuestioneiAdapter
-from src.dal.remote.questions.jsq_adapter import JsQuestionsAdapter
-from src.dal.remote.questions.sat_adapter import SatAdapter
-from src.dal.remote.questions.enem_adapter import EnemAdapter
-from src.dal.remote.worldbankgov_adapter import WorldbankgovAdapter
-from src.dal.remote.countriesnow_adapter import CountriesnowAdapter
-from src.dal.remote.blsgov_adapter import BlsgovAdapter
-from src.dal.remote.exploitdb_adapter import ExploitDBAdapter
-from src.dal.remote.devto_adapter import DevToAdapter
-from src.dal.remote.aws.aws_infra_catalog_adapter import  AwsInfraCatalogAdapter # AwsWhitepaperServicesAdapter
-from src.dal.remote.killedbygoogle_adapter import KilledByGoogleAdapter
-from src.dal.remote.companies_marketcap_adapter import CompaniesMarketCapAdapter
-from src.dal.remote.hackernews_adapter import HackerNewsAdapter
-from src.dal.remote.chesscom_adapter import ChessComAdapter
-from src.dal.remote.stackexchange_adapter import StackExchangeOverflowAdapter
-from src.dal.remote.reddit_adapter import RedditAdapter
-from src.dal.remote.wikipedia_adapter import WikipediaAdapter
 from src.core.logs import error
+from src.dal.remote.aws.aws_infra_catalog_adapter import (
+    AwsInfraCatalogAdapter,  # AwsWhitepaperServicesAdapter
+)
+from src.dal.remote.blsgov_adapter import BlsgovAdapter
+from src.dal.remote.chesscom_adapter import ChessComAdapter
+from src.dal.remote.companies_marketcap_adapter import CompaniesMarketCapAdapter
+from src.dal.remote.countriesnow_adapter import CountriesnowAdapter
+from src.dal.remote.devto_adapter import DevToAdapter
+from src.dal.remote.exploitdb_adapter import ExploitDBAdapter
+from src.dal.remote.hackernews_adapter import HackerNewsAdapter
+from src.dal.remote.killedbygoogle_adapter import KilledByGoogleAdapter
+from src.dal.remote.questions.enem_adapter import EnemAdapter
+from src.dal.remote.questions.jsq_adapter import JsQuestionsAdapter
+from src.dal.remote.questions.questionei_adapter import QuestioneiAdapter
+from src.dal.remote.questions.sat_adapter import SatAdapter
+from src.dal.remote.reddit_adapter import RedditAdapter
+from src.dal.remote.stackexchange_adapter import StackExchangeOverflowAdapter
+from src.dal.remote.wikipedia_adapter import WikipediaAdapter
+from src.dal.remote.worldbankgov_adapter import WorldbankgovAdapter
+
 
 class AdapterFactory:
-
     adapters = {
         "reddit": RedditAdapter,
         "stack_exchange_overflow": StackExchangeOverflowAdapter,
         "chess_com": ChessComAdapter,
         "hacker_news": HackerNewsAdapter,
-       
         "companies_marketcap": CompaniesMarketCapAdapter,
         "killed_by_google": KilledByGoogleAdapter,
         # "aws_whitepaper_services": AwsWhitepaperServicesAdapter # have a api that is better than scraping
         "aws_infra_catalog": AwsInfraCatalogAdapter,
         "devto": DevToAdapter,
-
         "exploitdb": ExploitDBAdapter,
         "blsgov": BlsgovAdapter,
         "countriesnow": CountriesnowAdapter,
         "worldbankgov": WorldbankgovAdapter,
-        #"enem": EnemAdapter,
-        #"sat": SatAdapter,
-        #"js-questions": JsQuestionsAdapter,
+        # "enem": EnemAdapter,
+        # "sat": SatAdapter,
+        # "js-questions": JsQuestionsAdapter,
         "wikipedia": WikipediaAdapter,
         "questionei": QuestioneiAdapter,
-        
     }
 
     @classmethod

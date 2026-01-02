@@ -8,8 +8,8 @@ from sqlalchemy.exc import IntegrityError
 from src.core.logs import debug, error, warning
 from src.core.settings import app_settings
 from src.dal.local.db_adapter import DBAdapter
+from src.dal.remote.ai.gemini import GeminiClient
 from src.dal.remote.factory import AdapterFactory
-from src.dal.remote.gemini import GeminiClient
 from src.domain.models.available_languages import is_valid_language
 from src.domain.models.input_model import InputModel
 from src.domain.models.quiz_result_model import QuizResultModel

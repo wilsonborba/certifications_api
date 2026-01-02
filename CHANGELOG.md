@@ -66,6 +66,7 @@
 - *(pdf)* Verifying if pdf answer is right implemented
 - *(pdf)* Added a mapper for right id insert on db
 - *(pdf)* Adjuster map to ignore missing question
+- *(tokens)* Created some routes and handlers for communication
 
 ### 🐛 Bug Fixes
 

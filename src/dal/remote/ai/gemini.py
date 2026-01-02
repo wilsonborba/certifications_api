@@ -8,10 +8,12 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 import httpx
 
 from src.core.settings import app_settings
+from src.domain.services.ai_client_base import AiClientBase
 
 
 class GeminiError(RuntimeError):
     """Raised when the Gemini API returns an error response."""
+
     def __init__(self, status_code: int, payload: Dict[str, Any] | None):
         self.status_code = status_code
         self.payload = payload or {}
@@ -24,6 +26,7 @@ class GeminiConfig:
     - api_key is read from your app settings by default.
     - model defaults to a fast, cheap model good for MVPs.
     """
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -39,7 +42,7 @@ class GeminiConfig:
         self.timeout = timeout
 
 
-class GeminiClient:
+class GeminiClient(AiClientBase):
     """
     Async client for Gemini API (AI Studio). Uses:
       - generateContent for text-only prompts
@@ -52,7 +55,11 @@ class GeminiClient:
       - response_mime_type='application/json' forces structured JSON output.
     """
 
-    def __init__(self, cfg: Optional[GeminiConfig] = None, client: Optional[httpx.AsyncClient] = None) -> None:
+    def __init__(
+        self,
+        cfg: Optional[GeminiConfig] = None,
+        client: Optional[httpx.AsyncClient] = None,
+    ) -> None:
         self.cfg = cfg or GeminiConfig()
         self._own_client = client is None
         self._client = client or httpx.AsyncClient(timeout=self.cfg.timeout)
@@ -61,15 +68,16 @@ class GeminiClient:
         self._last_latency_ms: float = 0.0
 
     @property
-    def last_status_code(self) -> int | None: return self._last_status_code
+    def last_status_code(self) -> int | None:
+        return self._last_status_code
 
     @property
-    def last_attempts(self) -> int: return self._last_attempts
+    def last_attempts(self) -> int:
+        return self._last_attempts
 
     @property
-    def last_latency_ms(self) -> float: return self._last_latency_ms
-
-
+    def last_latency_ms(self) -> float:
+        return self._last_latency_ms
 
     # --------------- public API ---------------
 
@@ -77,12 +85,12 @@ class GeminiClient:
         if self._own_client:
             await self._client.aclose()
 
-    async def generate_text(
+    async def generate_text(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         prompt: str,
         *,
         system_instruction: Optional[str] = None,
-        response_mime_type: Optional[str] = None,   # e.g. "application/json"
+        response_mime_type: Optional[str] = None,  # e.g. "application/json"
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         top_k: Optional[int] = None,
@@ -131,7 +139,9 @@ class GeminiClient:
         Uploads a file via the Files API (resumable), then calls generateContent
         referencing the file by file_uri. Optionally deletes the file afterwards.
         """
-        file_uri = await self._upload_file_resumable(file_bytes, display_name, mime_type)
+        file_uri = await self._upload_file_resumable(
+            file_bytes, display_name, mime_type
+        )
         try:
             file_parts = [{"file_data": {"mime_type": mime_type, "file_uri": file_uri}}]
             body = self._build_generate_body(
@@ -202,7 +212,10 @@ class GeminiClient:
             body["generationConfig"] = gen_cfg
 
         if system_instruction:
-            body["systemInstruction"] = {"role": "system", "parts": [{"text": system_instruction}]}
+            body["systemInstruction"] = {
+                "role": "system",
+                "parts": [{"text": system_instruction}],
+            }
 
         return body
 
@@ -210,9 +223,13 @@ class GeminiClient:
         # For generateContent, the API key is passed as a query param.
         params = {"key": self.cfg.api_key}
         headers = {"Content-Type": "application/json"}
-        return await self._request_json("POST", url, headers=headers, params=params, json=body)
+        return await self._request_json(
+            "POST", url, headers=headers, params=params, json=body
+        )
 
-    async def _upload_file_resumable(self, data: bytes, display_name: str, mime_type: str) -> str:
+    async def _upload_file_resumable(
+        self, data: bytes, display_name: str, mime_type: str
+    ) -> str:
         """
         Starts a resumable upload and then uploads+finalizes it.
         Returns the file_uri.
@@ -228,10 +245,14 @@ class GeminiClient:
             "Content-Type": "application/json",
         }
         start_body = {"file": {"display_name": display_name}}
-        r = await self._request("POST", start_url, headers=start_headers, content=json.dumps(start_body))
+        r = await self._request(
+            "POST", start_url, headers=start_headers, content=json.dumps(start_body)
+        )
         upload_url = r.headers.get("x-goog-upload-url")
         if not upload_url:
-            raise GeminiError(r.status_code, {"message": "Missing x-goog-upload-url in response"})
+            raise GeminiError(
+                r.status_code, {"message": "Missing x-goog-upload-url in response"}
+            )
 
         # 2) UPLOAD + FINALIZE
         upload_headers = {
@@ -239,7 +260,9 @@ class GeminiClient:
             "X-Goog-Upload-Command": "upload, finalize",
             "Content-Type": mime_type,
         }
-        r2 = await self._request("POST", upload_url, headers=upload_headers, content=data)
+        r2 = await self._request(
+            "POST", upload_url, headers=upload_headers, content=data
+        )
         payload = r2.json()
         try:
             return payload["file"]["uri"]
@@ -274,12 +297,13 @@ class GeminiClient:
         max_retries: int = 3,
     ) -> httpx.Response:
         attempt = 0
-        
-        
+
         t0 = time.perf_counter()
         while True:
             attempt += 1
-            resp = await self._client.request(method, url, headers=headers, params=params, json=json, content=content)
+            resp = await self._client.request(
+                method, url, headers=headers, params=params, json=json, content=content
+            )
             if resp.status_code < 400:
                 self._last_status_code = resp.status_code
                 self._last_attempts = attempt
@@ -288,7 +312,11 @@ class GeminiClient:
 
             if resp.status_code in (429, 500, 502, 503, 504) and attempt <= max_retries:
                 retry_after = resp.headers.get("retry-after")
-                delay = float(retry_after) if retry_after and retry_after.isdigit() else min(2.0 * attempt, 10.0)
+                delay = (
+                    float(retry_after)
+                    if retry_after and retry_after.isdigit()
+                    else min(2.0 * attempt, 10.0)
+                )
                 await asyncio.sleep(delay)
                 continue
 
@@ -312,7 +340,9 @@ class GeminiClient:
         json: Any = None,
         content: Any = None,
     ) -> Dict[str, Any]:
-        r = await self._request(method, url, headers=headers, params=params, json=json, content=content)
+        r = await self._request(
+            method, url, headers=headers, params=params, json=json, content=content
+        )
         try:
             return r.json()
         except Exception:
@@ -322,8 +352,8 @@ class GeminiClient:
         self,
         text: str,
         *,
-        model: str = "text-embedding-004",   # Google’s current text embedding model
-        task_type: str | None = None,        # optional; e.g. "RETRIEVAL_DOCUMENT"
+        model: str = "text-embedding-004",  # Google’s current text embedding model
+        task_type: str | None = None,  # optional; e.g. "RETRIEVAL_DOCUMENT"
     ) -> list[float]:
         """
         Calls the Gemini embeddings API and returns a single vector (list of floats).
@@ -332,18 +362,16 @@ class GeminiClient:
             return []
 
         url = f"{self.cfg.base_url}/v1beta/models/{model}:embedContent"
-        body = {
-            "content": {
-                "parts": [{"text": text}]
-            }
-        }
+        body = {"content": {"parts": [{"text": text}]}}
         if task_type:
             body["taskType"] = task_type
 
         # embeds use API key in query param too
         params = {"key": self.cfg.api_key}
         headers = {"Content-Type": "application/json"}
-        resp = await self._request_json("POST", url, headers=headers, params=params, json=body)
+        resp = await self._request_json(
+            "POST", url, headers=headers, params=params, json=body
+        )
 
         # Response shape:
         # {"embedding": {"values": [float, float, ...]}}

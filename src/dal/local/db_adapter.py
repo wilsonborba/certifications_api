@@ -1,9 +1,21 @@
-from sqlalchemy import create_engine, inspect, Table, MetaData, select, insert, update, delete, and_
+from contextlib import contextmanager
+
+from sqlalchemy import (
+    MetaData,
+    Table,
+    and_,
+    create_engine,
+    delete,
+    insert,
+    inspect,
+    select,
+    update,
+)
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import NoSuchTableError
-from contextlib import contextmanager
-from src.core.settings import app_settings
+
 from src.core.logs import error
+from src.core.settings import app_settings
 
 
 class DBAdapter:
@@ -18,8 +30,9 @@ class DBAdapter:
         try:
             from pgvector.sqlalchemy import Vector
             from sqlalchemy.dialects.postgresql import base as pg_base
+
             # Teach SQLAlchemy that the postgres type name "vector" maps to pgvector's Vector
-            pg_base.ischema_names['vector'] = Vector
+            pg_base.ischema_names["vector"] = Vector
         except Exception as e:
             # If pgvector isn't installed or something odd happens, we just skip registration;
             # you'll still have the text-similarity fallback.
@@ -54,9 +67,17 @@ class DBAdapter:
         stmt = select(table)
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(stmt).mappings()]
-        
-    def read_where_many(self, table_name: str, where: dict, *, limit: int | None = None, offset: int | None = None,
-                    order_by: list | None = None, schema: str = None):
+
+    def read_where_many(
+        self,
+        table_name: str,
+        where: dict,
+        *,
+        limit: int | None = None,
+        offset: int | None = None,
+        order_by: list | None = None,
+        schema: str = None,
+    ):
         """
         Return multiple rows as list[dict], matching all equality conditions in `where`.
         Optional: order_by = [table.c["col1"].asc(), table.c["col2"].desc(), ...]
@@ -71,8 +92,8 @@ class DBAdapter:
         if offset is not None:
             stmt = stmt.offset(offset)
         with self.connect() as conn:
-            return [dict(r) for r in conn.execute(stmt).mappings().all()]    
-        
+            return [dict(r) for r in conn.execute(stmt).mappings().all()]
+
     def read_where_one(self, table_name: str, where: dict, schema: str = None):
         """
         Return a single row as dict or None, matching all equality conditions in `where`.
@@ -84,8 +105,9 @@ class DBAdapter:
             row = conn.execute(stmt).mappings().first()
             return dict(row) if row is not None else None
 
-
-    def read_by_id(self, table_name: str, id_value, id_column: str = "id", schema: str = None):
+    def read_by_id(
+        self, table_name: str, id_value, id_column: str = "id", schema: str = None
+    ):
         table = self.reflect_table(table_name, schema)
         stmt = select(table).where(table.c[id_column] == id_value)
         with self.connect() as conn:
@@ -100,7 +122,14 @@ class DBAdapter:
             conn.commit()
             return result.inserted_primary_key
 
-    def update_row(self, table_name: str, id_value, data: dict, id_column: str = "id", schema: str = None):
+    def update_row(
+        self,
+        table_name: str,
+        id_value,
+        data: dict,
+        id_column: str = "id",
+        schema: str = None,
+    ):
         table = self.reflect_table(table_name, schema)
         stmt = update(table).where(table.c[id_column] == id_value).values(**data)
         with self.connect() as conn:
@@ -108,9 +137,31 @@ class DBAdapter:
             conn.commit()
             return result.rowcount
 
-    def delete_row(self, table_name: str, id_value, id_column: str = "id", schema: str = None):
+    def update_where(
+        self, table_name: str, where: dict, data: dict, schema: str = None
+    ):
+        table = self.reflect_table(table_name, schema)
+        condition = and_(*[table.c[k] == v for k, v in where.items()])
+        stmt = update(table).where(condition).values(**data)
+        with self.connect() as conn:
+            result = conn.execute(stmt)
+            conn.commit()
+            return result.rowcount
+
+    def delete_row(
+        self, table_name: str, id_value, id_column: str = "id", schema: str = None
+    ):
         table = self.reflect_table(table_name, schema)
         stmt = delete(table).where(table.c[id_column] == id_value)
+        with self.connect() as conn:
+            result = conn.execute(stmt)
+            conn.commit()
+            return result.rowcount
+
+    def delete_where(self, table_name: str, where: dict, schema: str = None):
+        table = self.reflect_table(table_name, schema)
+        condition = and_(*[table.c[k] == v for k, v in where.items()])
+        stmt = delete(table).where(condition)
         with self.connect() as conn:
             result = conn.execute(stmt)
             conn.commit()
@@ -123,7 +174,6 @@ class DBAdapter:
 
     def get_columns(self, table_name: str, schema: str = None):
         return self.get_inspector().get_columns(table_name, schema=schema)
-
 
 
 # adapter = DBAdapter()
