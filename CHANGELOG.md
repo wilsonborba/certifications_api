@@ -78,6 +78,7 @@
 - *(quiz)* Fixed query and context for quiz
 - *(routes)* Added some changes that i forgot
 - *(pdf)* Adjusted the import document
+- *(db)* Adjusted inserted row field
 
 ### ⚙️ Miscellaneous Tasks
 

@@ -120,7 +120,8 @@ class DBAdapter:
         with self.connect() as conn:
             result = conn.execute(stmt)
             conn.commit()
-            return result.inserted_primary_key
+            pk = result.inserted_primary_key  # typically (123,)
+            return pk[0] if pk else None
 
     def update_row(
         self,

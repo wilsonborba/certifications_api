@@ -72,7 +72,8 @@ class AiTokenManager:
                     "is_default": is_default,
                 },
             )
-            return existing_token["id"]
+            return self.get_unique_token(user_uuid_id, token_name)  # dict
+
         else:
             # Insert new token
             new_token_id = self.db_adapter.insert_row(
@@ -84,7 +85,8 @@ class AiTokenManager:
                     "is_default": is_default,
                 },
             )
-            return new_token_id
+
+            return self.db_adapter.read_by_id("accredit_usertokens", new_token_id)
 
     def set_default_token(self, user_uuid_id: str, token_name: str):
         # First, unset any existing default token for the user
