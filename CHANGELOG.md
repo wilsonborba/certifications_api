@@ -68,6 +68,7 @@
 - *(pdf)* Adjuster map to ignore missing question
 - *(tokens)* Created some routes and handlers for communication
 - *(tokens)* Improved default tokens verification
+- *(routes)* Added the route to the main
 
 ### 🐛 Bug Fixes
 
