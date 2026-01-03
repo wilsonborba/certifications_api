@@ -40,7 +40,12 @@ class AiTokenManager:
         return db_token
 
     def save_token(
-        self, user_uuid_id: str, token_name: str, token_value: str, is_default: bool
+        self,
+        user_uuid_id: str,
+        token_name: str,
+        token_value: str,
+        is_default: bool,
+        provider_name: str,
     ):
         existing_token = self.get_unique_token(user_uuid_id, token_name)
 
@@ -70,6 +75,7 @@ class AiTokenManager:
                 {
                     "token_value": token_value,
                     "is_default": is_default,
+                    "provider_name": provider_name,
                 },
             )
             return self.get_unique_token(user_uuid_id, token_name)  # dict
@@ -83,6 +89,7 @@ class AiTokenManager:
                     "token_name": token_name,
                     "token_value": token_value,
                     "is_default": is_default,
+                    "provider_name": provider_name,
                 },
             )
 

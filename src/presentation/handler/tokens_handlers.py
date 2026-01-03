@@ -7,13 +7,18 @@ ai_mananger = AiTokenManager()
 
 
 def create_ai_token_for_user(
-    user_uuid_id: str, token_name: str, token_value: str, is_default: bool
+    user_uuid_id: str,
+    token_name: str,
+    token_value: str,
+    is_default: bool,
+    provider_name: str,
 ):
     saved_user_ai_token = ai_mananger.save_token(
         user_uuid_id=user_uuid_id,
         token_name=token_name,
         token_value=token_value,
         is_default=is_default,
+        provider_name=provider_name,
     )
     return saved_user_ai_token
 

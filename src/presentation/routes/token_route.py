@@ -100,6 +100,7 @@ async def create_user_ai_token(
         token_value = body.get("token_value", None)
         # model_version = body.get("model_version", None)
         is_default = body.get("is_default", None)
+        provider_name = body.get("provider_name", None)
 
         missing_fields, missing_field_names = is_missing_important_fields(body)
         if missing_fields:
@@ -114,6 +115,7 @@ async def create_user_ai_token(
             token_name=token_name,
             token_value=token_value,
             is_default=is_default,
+            provider_name=provider_name,
         )
 
         response.status_code = status.HTTP_201_CREATED

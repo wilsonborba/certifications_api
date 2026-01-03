@@ -70,6 +70,7 @@
 - *(tokens)* Improved default tokens verification
 - *(routes)* Added the route to the main
 - *(tokens)* Route for set default token
+- *(tokens)* Added provider name
 
 ### 🐛 Bug Fixes
 
