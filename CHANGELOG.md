@@ -80,6 +80,7 @@
 - *(routes)* Added some changes that i forgot
 - *(pdf)* Adjusted the import document
 - *(db)* Adjusted inserted row field
+- *(tokens)* Adjusted the set default token
 
 ### ⚙️ Miscellaneous Tasks
 

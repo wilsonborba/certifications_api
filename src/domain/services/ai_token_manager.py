@@ -89,19 +89,28 @@ class AiTokenManager:
             return self.db_adapter.read_by_id("accredit_usertokens", new_token_id)
 
     def set_default_token(self, user_uuid_id: str, token_name: str):
-        # First, unset any existing default token for the user
+        # 1) Unset current default ONLY for this user
         self.db_adapter.update_where(
             "accredit_usertokens",
-            {"is_default": False},
-            {"user_uuid_id": user_uuid_id, "is_default": True},
+            where={
+                "user_uuid_id": user_uuid_id,
+                "is_default": True,
+            },
+            data={"is_default": False},
         )
 
-        # Then, set the specified token as default
-        self.db_adapter.update_where(
+        # 2) Set the chosen token as default
+        updated = self.db_adapter.update_where(
             "accredit_usertokens",
-            {"is_default": True},
-            {"user_uuid_id": user_uuid_id, "token_name": token_name},
+            where={
+                "user_uuid_id": user_uuid_id,
+                "token_name": token_name,
+            },
+            data={"is_default": True},
         )
+
+        if updated == 0:
+            raise ValueError("Token not found for user")
 
     def delete_token(self, user_uuid_id: str, token_name: str):
         self.db_adapter.delete_where(
