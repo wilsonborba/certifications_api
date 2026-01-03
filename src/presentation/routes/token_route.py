@@ -6,11 +6,13 @@ ai_token_router = APIRouter()
 from src.core.logs import error
 from src.presentation.handler.responses import MyResponse
 from src.presentation.handler.tokens_handlers import (
+    ai_factory,
     create_ai_token_for_user,
     delete_token_for_user,
     get_available_ai_providers_list,
     get_user_ai_tokens_list,
     is_missing_important_fields,
+    set_token_as_default_for_user,
 )
 
 
@@ -28,7 +30,7 @@ async def get_available_ai_providers(
 
         response.status_code = status.HTTP_200_OK
         return MyResponse(
-            data=all_providers,
+            data=all_providers,  # pyright: ignore[reportArgumentType]
             message="Available AI providers retrieved successfully.",
         )
 
@@ -152,7 +154,7 @@ async def delete_user_ai_token(
 
         delete_token_for_user(user_uuid_id=user_uuid, token_name=token_name)
 
-        response.status_code = status.HTTP_200_OK
+        response.status_code = status.HTTP_202_ACCEPTED
         return MyResponse(
             data=None,
             message="User AI token deleted successfully.",
@@ -164,4 +166,50 @@ async def delete_user_ai_token(
         return MyResponse(
             data=None,
             message="Internal server error while deleting user AI token.",
+        )
+
+
+@ai_token_router.patch("/tokens/set_default", response_class=JSONResponse)
+async def set_default_user_ai_token(
+    response: Response,
+    request: Request,
+):
+    """
+    Endpoint to set a user AI token as default by its name.
+    """
+
+    body = await request.json()
+
+    token_name = body.get("token_name", None)
+
+    if not token_name:
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return MyResponse(
+            data=None,
+            message="Token name not provided in the request body.",
+        )
+
+    try:
+        user_uuid = request.headers.get("x-uuid", None)
+        if not user_uuid:
+            response.status_code = status.HTTP_400_BAD_REQUEST
+            return MyResponse(
+                data=None,
+                message="User UUID not provided in headers.",
+            )
+
+        set_token_as_default_for_user(user_uuid_id=user_uuid, token_name=token_name)
+
+        response.status_code = status.HTTP_202_ACCEPTED
+        return MyResponse(
+            data=None,
+            message="User AI token set as default successfully.",
+        )
+
+    except Exception as e:
+        error(f"Error setting user AI token as default: {e}")
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return MyResponse(
+            data=None,
+            message="Internal server error while setting user AI token as default.",
         )
