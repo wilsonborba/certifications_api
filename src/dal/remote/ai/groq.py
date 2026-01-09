@@ -68,6 +68,9 @@ class GroqClient(AiClientBase):
         self._last_attempts: int = 0
         self._last_latency_ms: float = 0.0
 
+    def set_api_key(self, api_key: str):
+        self.cfg.api_key = api_key
+
     @property
     def last_status_code(self) -> int | None:
         return self._last_status_code

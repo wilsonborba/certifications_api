@@ -71,6 +71,7 @@
 - *(routes)* Added the route to the main
 - *(tokens)* Route for set default token
 - *(tokens)* Added provider name
+- *(token)* Implemented the selection of the token for the user
 
 ### 🐛 Bug Fixes
 

@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from src.core.logs import debug, error, warning
 from src.core.settings import app_settings
 from src.dal.local.db_adapter import DBAdapter
+from src.dal.remote.ai.ai_factory import AiFactory
 from src.dal.remote.ai.gemini import GeminiClient
 from src.dal.remote.factory import AdapterFactory
 from src.domain.models.available_languages import is_valid_language
@@ -17,6 +18,7 @@ from src.domain.models.topics_model import TopicModel
 from src.domain.models.user_answer_model import UserAnswerModel
 from src.domain.models.user_certification import UserCertificationModel
 from src.domain.services.quiz_base import BaseQuizManager, _normalize_text, _sha256
+from src.presentation.handler.responses import NoDefaultAIClientError
 
 
 class QuizAPIManager(BaseQuizManager):
@@ -24,7 +26,36 @@ class QuizAPIManager(BaseQuizManager):
         super().__init__()
 
         self.adapters_factory = AdapterFactory()
-        self.gemini_client = GeminiClient()
+
+        self.ai_factory = AiFactory()
+
+    def ai_client_instance(self, client_name: str):
+        ai_adapter = self.ai_factory.get_adapter(client_name)
+        return ai_adapter
+
+    def get_default_ai_client(self, user_uuid_id: str):
+        db_user_token = self.db_adapter.read_where_one(
+            "accredit_usertokens",
+            {
+                "is_default": True,
+                "user_uuid_id": user_uuid_id,
+            },
+        )
+
+        if db_user_token:
+            client = self.ai_factory.get_adapter(db_user_token.get("provider_name"))
+            if client:
+                client.set_api_key(db_user_token.get("token_value"))
+                return client
+
+        return None
+
+    def ai_client(self, user_uuid_id):
+        default_client = self.get_default_ai_client(user_uuid_id)
+        if default_client:
+            return default_client
+        else:
+            raise NoDefaultAIClientError("No default AI client configured.")
 
     def get_all_sources(self):
         db_sources = self.db_adapter.read_all("accredit_sourceitem")
@@ -426,6 +457,7 @@ class QuizAPIManager(BaseQuizManager):
         input_identification: str,
         amount_question: int,
         selected_language: str,
+        user_uuid_id: str,
         force_new_generation: bool = False,
         *args,
         **kwargs,
@@ -459,7 +491,7 @@ class QuizAPIManager(BaseQuizManager):
         prompt = adapter.generate_context(
             input_data=input_data, amount_question=amount_question, *args, **kwargs
         )
-        response = await self.gemini_client.generate_text(
+        response = await self.ai_client(user_uuid_id).generate_text(
             prompt=prompt,
             system_instruction=adapter.instructions()
             + "\n"
