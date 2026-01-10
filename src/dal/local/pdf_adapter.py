@@ -21,6 +21,7 @@ from unstructured.partition.pdf import partition_pdf
 
 from src.core.logs import debug, error
 from src.core.settings import app_settings
+from src.dal.local.db_adapter import DBAdapter
 from src.dal.local.redis_adapter import RedisAdapter
 from src.dal.remote.ai.ai_factory import AiFactory
 from src.dal.remote.ai.gemini import GeminiClient, GeminiConfig
@@ -744,7 +745,7 @@ class PdfAdapter(BaseAdapter):
         self.document_id = document_id or str(uuid.uuid4())
         self.file = upload
         self.raw = raw
-
+        self.db_adapter = DBAdapter()
         # lazy PDF bits
         self.scanner: PdfScan | None = None
         self.parser: PdfParser | None = None

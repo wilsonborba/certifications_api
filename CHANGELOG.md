@@ -72,6 +72,7 @@
 - *(tokens)* Route for set default token
 - *(tokens)* Added provider name
 - *(token)* Implemented the selection of the token for the user
+- *(token)* Added groq token to be used
 
 ### 🐛 Bug Fixes
 
