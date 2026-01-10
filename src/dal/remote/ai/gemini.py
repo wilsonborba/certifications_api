@@ -35,8 +35,6 @@ class GeminiConfig:
         timeout: float = 3000,
     ) -> None:
         self.api_key = api_key or app_settings().GEMINI_API_KEY
-        if not self.api_key:
-            raise ValueError("GEMINI_API_KEY is not set in app settings.")
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout

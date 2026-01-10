@@ -36,8 +36,6 @@ class GroqConfig:
         timeout: float = 3000,
     ) -> None:
         self.api_key = api_key
-        if not self.api_key:
-            raise ValueError("GROQ_API_KEY is not set in app settings.")
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
