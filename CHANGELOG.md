@@ -85,6 +85,7 @@
 - *(db)* Adjusted inserted row field
 - *(tokens)* Adjusted the set default token
 - *(tokens)* Adjusted the raise error about key on .env
+- *(tokens)* Adjusted the response mime type
 
 ### ⚙️ Miscellaneous Tasks
 

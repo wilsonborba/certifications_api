@@ -90,7 +90,6 @@ class GroqClient(AiClientBase):
     async def generate_text(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         prompt: str,
-        *,
         system_instruction: Optional[str] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
@@ -101,6 +100,9 @@ class GroqClient(AiClientBase):
         # Or best-effort JSON without schema:
         json_object: bool = False,
         model: Optional[str] = None,
+        response_mime_type: Optional[str] = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         """
         Chat Completions call. Returns raw Groq response (dict).
