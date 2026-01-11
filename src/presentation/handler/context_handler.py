@@ -20,6 +20,7 @@ async def generate_and_save_questions(
     raw_input = quiz_handler.get_input(
         item_name=item_name, input_identification=input_identification
     )
+    
 
     context = await quiz_handler.generate_context(
         item_name=item_name,
@@ -32,9 +33,9 @@ async def generate_and_save_questions(
     )
 
     try:
-        status_code = quiz_handler.ai_client.last_status_code or 200
-        attempts = quiz_handler.ai_client.last_attempts or 1
-        latency_ms = quiz_handler.ai_client.last_latency_ms or 0.0
+        status_code = quiz_handler.ai_client(user_uuid_id).last_status_code or 200
+        attempts = quiz_handler.ai_client(user_uuid_id).last_attempts or 1
+        latency_ms = quiz_handler.ai_client(user_uuid_id).last_latency_ms or 0.0
 
         user_usage_tracking = quiz_handler.save_ai_user_usage(
             user_uuid_id=user_uuid_id,
