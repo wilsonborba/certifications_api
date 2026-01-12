@@ -688,7 +688,7 @@ class QuizAPIManager(BaseQuizManager):
             cand_vec = self._embed_question_text(qtext)
 
             # Insert Question
-            [question_id] = self.db_adapter.insert_row(
+            question_id = self.db_adapter.insert_row(
                 "accredit_question",
                 {
                     "input_id": input_db["id"],
