@@ -124,9 +124,9 @@ async def generate_and_save_questions(
         user_uuid_id=user_uuid_id,
     )
 
-    status_code = quiz_pdf_manager.pdf_adapter.ai_client.last_status_code or 200
-    attempts = quiz_pdf_manager.pdf_adapter.ai_client.last_attempts or 1
-    latency_ms = quiz_pdf_manager.pdf_adapter.ai_client.last_latency_ms or 0.0
+    status_code = quiz_pdf_manager.pdf_adapter.ai_client(user_uuid_id).last_status_code or 200
+    attempts = quiz_pdf_manager.pdf_adapter.ai_client(user_uuid_id).last_attempts or 1
+    latency_ms = quiz_pdf_manager.pdf_adapter.ai_client(user_uuid_id).last_latency_ms or 0.0
 
     user_usage_tracking = quiz_pdf_manager.save_ai_user_usage(
         user_uuid_id=user_uuid_id,

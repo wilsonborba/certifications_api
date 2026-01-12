@@ -77,6 +77,7 @@ All notable changes to this project will be documented in this file.
 - *(tokens)* Added provider name
 - *(token)* Implemented the selection of the token for the user
 - *(token)* Added groq token to be used
+- *(context)* Adjusted the saving last consumption
 
 ### 🐛 Bug Fixes
 
