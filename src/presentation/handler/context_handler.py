@@ -9,6 +9,36 @@ from src.presentation.handler.responses import NotEnoughQuestionsGeneratedError
 quiz_handler = QuizAPIManager()
 
 
+def _strip_json_code_fence(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        stripped = "\n".join(lines)
+    return stripped.strip()
+
+
+def _extract_questions_payload(context: dict) -> dict:
+    if "questions" in context and "candidates" not in context:
+        return context
+
+    raw_text = None
+    if "candidates" in context:
+        raw_text = context["candidates"][0]["content"]["parts"][0]["text"]
+    elif "choices" in context:
+        raw_text = context["choices"][0]["message"]["content"]
+
+    if raw_text is None:
+        raise KeyError("candidates_or_choices")
+
+    raw_json_str = _strip_json_code_fence(raw_text)
+    return json.loads(raw_json_str)
+
+
+
 async def generate_and_save_questions(
     user_uuid_id: str,
     item_name: str,
@@ -50,13 +80,18 @@ async def generate_and_save_questions(
 
         info(f"User usage tracking saved: {user_usage_tracking}")
 
-        if "questions" in context and "candidates" not in context:
-            saved_questions = context["questions"]
+        try:
+            parsed = _extract_questions_payload(context)
+        except KeyError as e:
+            debug(f"{'questions' in context} not found, trying candidates/choices...")
+            raise e
+
+        if "questions" in parsed:
+            saved_questions = parsed["questions"]
 
         else:
-            debug(f"{'questions' in context} not found, trying candidates...")
-            raw_json_str = context["candidates"][0]["content"]["parts"][0]["text"]
-            parsed = json.loads(raw_json_str)
+           
+
             result = quiz_handler.save_questions(
                 item_name=item_name,
                 input_identification=input_identification,

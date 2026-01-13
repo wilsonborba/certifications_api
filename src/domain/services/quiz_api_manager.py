@@ -216,7 +216,7 @@ class QuizAPIManager(BaseQuizManager):
         )
 
         for ua in ua_list:
-            ua["user_certification_id"] = certification_id[0]
+            ua["user_certification_id"] = certification_id
             _ = self.db_adapter.insert_row("accredit_useranswer", ua)
 
         return {

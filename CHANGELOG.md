@@ -79,6 +79,7 @@ All notable changes to this project will be documented in this file.
 - *(token)* Added groq token to be used
 - *(context)* Adjusted the saving last consumption
 - *(context)* Adjusted the saving without being a list the question id
+- *(context)* Adjusted the parsing error for grok
 
 ### 🐛 Bug Fixes
 
