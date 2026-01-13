@@ -77,6 +77,7 @@
 - *(context)* Adjusted the saving without being a list the question id
 - *(context)* Adjusted the parsing error for grok
 - *(cert)* Created route to return the user certifications
+- *(cert)* Removed debug
 
 ### 🐛 Bug Fixes
 
