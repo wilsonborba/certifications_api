@@ -127,7 +127,27 @@ class QuizAPIManager(BaseQuizManager):
             )
 
             # debug(f"Answers from question {question_id}: {answers_from_question}")
+            
+            correct_answer_id = next(
+                (
+                    a.get("id")
+                    for a in answers_from_question
+                    if a.get("is_correct") in (True, 1)
+                ),
+                None,
+            )
 
+            if not answers_from_question:
+                warning(
+                    f"No answers found for question {question_id}; skipping user answer."
+                )
+                continue
+
+            if correct_answer_id is None:
+                warning(
+                    f"No correct answer found for question {question_id}; skipping user answer."
+                )
+                continue
             # both text hashed for comparison
             if answers_from_question and selected_text:
                 for ans in answers_from_question:
@@ -140,7 +160,7 @@ class QuizAPIManager(BaseQuizManager):
                             0  # Placeholder, should be set properly
                         )
                         user_answer.question_id = question_id
-                        user_answer.correct_answer_id = ans.get("id")
+                        user_answer.correct_answer_id = correct_answer_id
                         user_answer.selected_answer_id = ans.get("id")
                         user_answer.is_correct = True
                         user_answer.user_uuid_id = user_uuid_id
@@ -154,14 +174,7 @@ class QuizAPIManager(BaseQuizManager):
                             0  # Placeholder, should be set properly
                         )
                         user_answer.question_id = question_id
-                        user_answer.correct_answer_id = next(
-                            (
-                                a.get("id")
-                                for a in answers_from_question
-                                if a.get("is_correct") in (True, 1)
-                            ),
-                            None,
-                        )
+                        user_answer.correct_answer_id = correct_answer_id
                         user_answer.selected_answer_id = ans.get("id")
                         user_answer.is_correct = False
                         user_answer.user_uuid_id = user_uuid_id
@@ -175,14 +188,7 @@ class QuizAPIManager(BaseQuizManager):
                     0  # Placeholder, should be set properly
                 )
                 user_answer.question_id = question_id
-                user_answer.correct_answer_id = next(
-                    (
-                        a.get("id")
-                        for a in answers_from_question
-                        if a.get("is_correct") in (True, 1)
-                    ),
-                    None,
-                )
+                user_answer.correct_answer_id = correct_answer_id
                 user_answer.selected_answer_id = None
                 user_answer.is_correct = False
                 user_answer.user_uuid_id = user_uuid_id

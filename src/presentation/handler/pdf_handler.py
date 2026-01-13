@@ -9,6 +9,7 @@ from src.dal.local.pdf_adapter import PdfAdapter
 from src.dal.local.redis_adapter import RedisAdapter
 from src.domain.services.quiz_pdf_manager import QuizPDFManager
 from src.presentation.handler.responses import (
+    AIGenerationError,
     DocumentNotFoundError,
     InvalidTotalPagesError,
     MalwareDetectedError,
@@ -20,6 +21,61 @@ CACHE_PREFIX = "topic:"
 CACHE_TTL_SEC = 30 * 60  # 30 minutes
 
 quiz_pdf_manager = QuizPDFManager()
+
+def _strip_json_code_fence(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        stripped = "\n".join(lines)
+    return stripped.strip()
+
+
+def _parse_json_payload(raw_text: str) -> dict:
+    raw_json_str = _strip_json_code_fence(raw_text)
+    if raw_json_str:
+        try:
+            return json.loads(raw_json_str)
+        except json.JSONDecodeError:
+            pass
+
+    start = raw_json_str.find("{")
+    end = raw_json_str.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = raw_json_str[start : end + 1]
+        return json.loads(candidate)
+
+    raise json.JSONDecodeError("Empty or invalid JSON payload.", raw_json_str, 0)
+
+
+def _extract_questions_payload(context: dict | str) -> dict:
+    if isinstance(context, str):
+        return _parse_json_payload(context)
+
+    if "questions" in context and "candidates" not in context and "choices" not in context:
+        return context
+
+    raw_text = None
+    if "candidates" in context:
+        candidates = context.get("candidates") or []
+        if candidates:
+            content = candidates[0].get("content", {})
+            parts = content.get("parts") or []
+            if parts:
+                raw_text = parts[0].get("text")
+    elif "choices" in context:
+        choices = context.get("choices") or []
+        if choices:
+            message = choices[0].get("message", {})
+            raw_text = message.get("content")
+
+    if not raw_text:
+        raise KeyError("candidates_or_choices")
+
+    return _parse_json_payload(raw_text)
 
 
 async def cache_get(
@@ -140,9 +196,14 @@ async def generate_and_save_questions(
     )
 
     info(f"User usage tracking saved: {user_usage_tracking}")
+    
+    try:
+        parsed = _extract_questions_payload(response)
+    except (KeyError, json.JSONDecodeError, TypeError) as exc:
+        error(f"AI response parsing failed: {exc}")
+        debug(f"Raw response: {response}")
+        raise AIGenerationError("Failed to parse AI response for PDF context.")
 
-    raw_json_str = response["candidates"][0]["content"]["parts"][0]["text"]
-    parsed = json.loads(raw_json_str)
     result = await quiz_pdf_manager.save_questions(
         user_uuid_id=user_uuid_id,
         redis_adapter=redis_adapter,

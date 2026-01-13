@@ -99,6 +99,7 @@ All notable changes to this project will be documented in this file.
 
 - *(questions)* Start fixing the question saving error
 - *(questions)* Completed  fixing the question saving error for grok topics
+- *(questions)* Completed  fixing the question saving error for grok PDF
 
 ### ⚙️ Miscellaneous Tasks
 
