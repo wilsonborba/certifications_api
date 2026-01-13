@@ -91,6 +91,7 @@
 - *(tokens)* Adjusted the raise error about key on .env
 - *(tokens)* Adjusted the response mime type
 - *(token)* Get usage per user on ai_client
+- *(cert)* Wrong table name fixed for certification by user
 
 ### 💼 Other
 

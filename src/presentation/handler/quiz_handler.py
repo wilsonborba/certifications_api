@@ -224,7 +224,7 @@ async def fetch_certification(certification_id):
 async def fetch_certification_from_user(user_uuid_id: str) -> List[Dict[str, Any]]:
     results = db_adapter.read_where_many(
         "accredit_usercertification",
-        {"user_uuid": user_uuid_id},
+        {"user_uuid_id": user_uuid_id},
     )
 
     debug(f"Results: {results}")
