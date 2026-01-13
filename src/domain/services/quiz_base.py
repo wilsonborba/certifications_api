@@ -204,66 +204,26 @@ class BaseQuizManager(ABC):
         source_input_identification: str,
         is_for_pdf: bool,
         ):
-        """
-        # app/models.py
-        import uuid
-        from django.db import models
-
-        from accredit.models.source_input import Input
-        from accredit.models.source_item import SourceItem
-
-
-        class AIUsageEvent(models.Model):
-
-            id = models.BigAutoField(primary_key=True)
-
-            # Who
-            user_uuid_id = models.UUIDField(db_index=True)
-
-            # What (human-readable; e.g. "google: gemini-2.5-flash")
-            provider_model_description = models.CharField(max_length=200)
-
-            # Usage
-            total_tokens = models.IntegerField()
-
-            # Timing / status
-            created_at = models.DateTimeField(auto_now_add=True)  # store UTC at the DB/app level
-            latency_ms = models.IntegerField()
-            status_code = models.IntegerField()  # e.g., 200, 429, 500
-
-            attempts = models.IntegerField(default=1)  # number of attempts (1 = first try, 2 = one retry, etc)
-
-            is_for_pdf = models.BooleanField()
-
-            source_item = models.ForeignKey(SourceItem, on_delete=models.CASCADE, null=True)
-            source_input = models.ForeignKey(Input, on_delete=models.CASCADE, null=True)
-
-
-            # Everything else from the provider (usageMetadata, responseId, etc.)
-            raw_usage = models.JSONField()  # postgres jsonb under the hood
-
-            class Meta:
-                indexes = [
-                    models.Index(fields=["user_uuid_id", "created_at"]),
-                    models.Index(fields=["created_at"]),
-                    models.Index(fields=["status_code"]),
-                ]
-
-            def __str__(self) -> str:
-                return f"{self.provider_model_description} user={self.user_id} {self.created_at:%Y-%m-%d %H:%M:%S}Z"
-
-                
-        """
-
         
             
 
-        usage_metadata = raw_context.get("usageMetadata", {})
-        total_tokens = usage_metadata.get("totalTokenCount", 0)
+        usage_metadata = raw_context.get("usageMetadata") or raw_context.get("usage") or {}
+        
+        total_tokens = (
+            usage_metadata.get("totalTokenCount")
+            or usage_metadata.get("total_tokens")
+            or usage_metadata.get("totalTokens")
+            or 0
+        )
 
-        usage_metadata.update({'responseId': raw_context.get("responseId", "")})
+        response_id = raw_context.get("responseId") or raw_context.get("id") or ""
+        usage_metadata.update({"responseId": response_id})
 
-        provider_model_description = raw_context.get("modelVersion", "unknown")
+        provider_model_description = (
+            raw_context.get("modelVersion")
+            or raw_context.get("model")
+            or "unknown"
+        )
 
         source_item_db = None
         input_db = None

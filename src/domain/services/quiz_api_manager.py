@@ -1,4 +1,5 @@
 import json
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -366,12 +367,17 @@ class QuizAPIManager(BaseQuizManager):
             input_identification=input_identification, **adapter_kwargs
         )
 
+        raw_input_data = response_from_adapter.get("input_data", None)
+        normalized_input_data = self._normalize_input_data(raw_input_data)
+
+
+
         inserted_pk = self.db_adapter.insert_row(
             "accredit_input",
             {
                 "source_item_id": source_item_id,
                 "input_identification": input_identification,
-                "input_data": response_from_adapter.get("input_data", None),
+                "input_data":normalized_input_data,
                 "updated_at": response_from_adapter.get(
                     "updated_at", datetime.now(timezone.utc).isoformat()
                 ),
@@ -382,11 +388,21 @@ class QuizAPIManager(BaseQuizManager):
             source_name=source_name,
             item_name=item_name_from_db,
             input_identification=input_identification,
-            input_data=response_from_adapter.get("input_data", None),
+            input_data=normalized_input_data,
             updated_at=response_from_adapter.get(
                 "updated_at", datetime.now(timezone.utc).isoformat()
             ),
         ).to_dict()
+
+    
+    def _normalize_input_data(self, value):
+        if is_dataclass(value):
+            return asdict(value)
+        if isinstance(value, dict):
+            return {k: self._normalize_input_data(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._normalize_input_data(v) for v in value]
+        return value
 
     def search(
         self,

@@ -21,6 +21,23 @@ def _strip_json_code_fence(text: str) -> str:
     return stripped.strip()
 
 
+def _parse_json_payload(raw_text: str) -> dict:
+    raw_json_str = _strip_json_code_fence(raw_text)
+    if raw_json_str:
+        try:
+            return json.loads(raw_json_str)
+        except json.JSONDecodeError:
+            pass
+
+    start = raw_json_str.find("{")
+    end = raw_json_str.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = raw_json_str[start : end + 1]
+        return json.loads(candidate)
+
+    raise json.JSONDecodeError("Empty or invalid JSON payload.", raw_json_str, 0)
+
+
 def _extract_questions_payload(context: dict) -> dict:
     if "questions" in context and "candidates" not in context:
         return context
@@ -34,8 +51,7 @@ def _extract_questions_payload(context: dict) -> dict:
     if raw_text is None:
         raise KeyError("candidates_or_choices")
 
-    raw_json_str = _strip_json_code_fence(raw_text)
-    return json.loads(raw_json_str)
+    return _parse_json_payload(raw_text)
 
 
 
@@ -86,19 +102,16 @@ async def generate_and_save_questions(
             debug(f"{'questions' in context} not found, trying candidates/choices...")
             raise e
 
-        if "questions" in parsed:
-            saved_questions = parsed["questions"]
-
-        else:
            
 
-            result = quiz_handler.save_questions(
+        result = quiz_handler.save_questions(
                 item_name=item_name,
                 input_identification=input_identification,
                 response=parsed,
                 selected_language=selected_language,
             )
-            saved_questions = [q for q in result.saved_questions]
+        
+        saved_questions = [q for q in result.saved_questions]
 
         return saved_questions
 

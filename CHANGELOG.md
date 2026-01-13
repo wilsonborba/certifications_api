@@ -95,6 +95,10 @@ All notable changes to this project will be documented in this file.
 - *(tokens)* Adjusted the response mime type
 - *(token)* Get usage per user on ai_client
 
+### 💼 Other
+
+- *(questions)* Start fixing the question saving error
+
 ### ⚙️ Miscellaneous Tasks
 
 - *(env)* Initial structure of app created
