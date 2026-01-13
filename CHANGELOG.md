@@ -98,6 +98,7 @@ All notable changes to this project will be documented in this file.
 ### 💼 Other
 
 - *(questions)* Start fixing the question saving error
+- *(questions)* Completed  fixing the question saving error for grok topics
 
 ### ⚙️ Miscellaneous Tasks
 

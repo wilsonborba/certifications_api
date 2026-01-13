@@ -665,8 +665,34 @@ class QuizAPIManager(BaseQuizManager):
             justification = q.get("justification")
             pdf_question_id = q.get("pdf_question_id", {})
 
-            if not qtext or not correct or not options:
+            if not qtext or correct is None or not options:
                 error(f"Invalid question data (missing parts): {q}")
+                continue
+
+            correct_indices = set()
+            correct_texts = set()
+            if isinstance(correct, int):
+                if 0 <= correct < len(options):
+                    correct_indices.add(correct)
+            elif isinstance(correct, str):
+                stripped = correct.strip()
+                if stripped.isdigit():
+                    idx = int(stripped)
+                    if 0 <= idx < len(options):
+                        correct_indices.add(idx)
+                elif len(stripped) == 1 and stripped.upper() in "ABCD":
+                    idx = ord(stripped.upper()) - ord("A")
+                    if 0 <= idx < len(options):
+                        correct_indices.add(idx)
+                else:
+                    correct_texts.add(stripped)
+            elif isinstance(correct, list):
+                for item in correct:
+                    if isinstance(item, str):
+                        correct_texts.add(item.strip())
+
+            if not correct_indices and not correct_texts:
+                error(f"Invalid correct answer mapping for question: {q}")
                 continue
 
             debug(f"Normalizing question text for {item_name} / {input_identification}")
@@ -736,7 +762,7 @@ class QuizAPIManager(BaseQuizManager):
                     continue
                 opt_norm = _normalize_text(opt_text)
                 opt_hash = _sha256(opt_norm)
-                is_correct = opt_text == correct
+                is_correct = idx in correct_indices or opt_text in correct_texts
 
                 # NOTE: do NOT overwrite the 'inserted' counter with the DB return value.
                 _ = self.db_adapter.insert_row(
