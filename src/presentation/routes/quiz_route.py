@@ -3,6 +3,7 @@ from fastapi import APIRouter, Body, Query, Request, Response, status
 from src.core.logs import debug, error
 from src.presentation.handler.quiz_handler import (
     fetch_certification,
+    fetch_certification_from_user,
     submit_quiz_revision,
 )
 
@@ -41,6 +42,37 @@ async def quiz_certifications(
         response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
         return MyResponse(
             data=None, message="Internal server error while fetching certifications"
+        )
+
+
+@quiz_router.get(
+    "/quiz/certifications",
+    response_model=MyResponse,
+)
+async def quiz_certifications_list(
+    request: Request,
+    response: Response,
+):
+    debug("Received request for quiz certifications list")
+    user_uuid_id = (
+        request.headers.get("x-uuid") or "00000000-0000-0000-0000-000000000000"
+    )
+
+    try:
+        debug(f"Fetching certifications list for user UUID: {user_uuid_id}")
+
+        certification = await fetch_certification_from_user(user_uuid_id)
+        response.status_code = status.HTTP_200_OK
+        return MyResponse(
+            data={"certifications": certification},
+            message="Certifications list retrieved successfully",
+        )
+    except Exception as e:
+        error(f"Error fetching certifications list: {e}")
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return MyResponse(
+            data=None,
+            message="Internal server error while fetching certifications list",
         )
 
 
