@@ -11,6 +11,7 @@ from src.presentation.handler.tokens_handlers import (
     delete_token_for_user,
     get_available_ai_providers_list,
     get_user_ai_tokens_list,
+    get_user_ai_usage,
     is_missing_important_fields,
     set_token_as_default_for_user,
 )
@@ -40,6 +41,39 @@ async def get_available_ai_providers(
         return MyResponse(
             data=None,
             message="Internal server error while retrieving AI providers.",
+        )
+
+
+@ai_token_router.get("/tokens/usage", response_class=JSONResponse)
+async def get_ai_usage(
+    response: Response,
+    request: Request,
+):
+    """
+    Endpoint to get AI usage information.
+    """
+
+    try:
+        user_uuid_id = request.headers.get("x-uuid", None)
+        if not user_uuid_id:
+            response.status_code = status.HTTP_400_BAD_REQUEST
+            return MyResponse(
+                data=None,
+                message="User UUID not provided in headers.",
+            )
+
+        usage_info = get_user_ai_usage(user_uuid_id=user_uuid_id)
+        response.status_code = status.HTTP_200_OK
+        return MyResponse(
+            data=usage_info,
+            message="AI usage information retrieved successfully.",
+        )
+    except Exception as e:
+        error(f"Error retrieving AI usage information: {e}")
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return MyResponse(
+            data=None,
+            message="Internal server error while retrieving AI usage information.",
         )
 
 

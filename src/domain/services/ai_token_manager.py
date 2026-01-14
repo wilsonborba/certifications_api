@@ -5,6 +5,14 @@ class AiTokenManager:
     def __init__(self):
         self.db_adapter = DBAdapter()
 
+    def get_user_ai_usage(self, user_uuid_id: str):
+        db_usage = self.db_adapter.read_where_one(
+            "accredit_aiusageevent",
+            {"user_uuid_id": user_uuid_id},
+        )
+
+        return db_usage
+
     def get_tokens(self, user_uuid_id):
         db_token = self.db_adapter.read_where_many(
             "accredit_usertokens",

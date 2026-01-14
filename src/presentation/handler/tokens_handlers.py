@@ -73,3 +73,9 @@ def set_token_as_default_for_user(user_uuid_id: str, token_name: str):
     ai_mananger.set_default_token(user_uuid_id=user_uuid_id, token_name=token_name)
 
     return True
+
+
+def get_user_ai_usage(user_uuid_id: str):
+    default_token = ai_mananger.get_user_ai_usage(user_uuid_id=user_uuid_id)
+
+    return default_token

@@ -78,6 +78,7 @@
 - *(context)* Adjusted the parsing error for grok
 - *(cert)* Created route to return the user certifications
 - *(cert)* Removed debug
+- *(ai_usage)* Created route to return the user ai usage
 
 ### 🐛 Bug Fixes
 
