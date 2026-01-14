@@ -1,4 +1,4 @@
-from src.core.logs import error
+from src.core.logs import error, debug
 from src.dal.remote.ai.ai_factory import AiFactory
 from src.domain.services.ai_token_manager import AiTokenManager
 
@@ -77,5 +77,5 @@ def set_token_as_default_for_user(user_uuid_id: str, token_name: str):
 
 def get_user_ai_usage(user_uuid_id: str):
     default_token = ai_mananger.get_user_ai_usage(user_uuid_id=user_uuid_id)
-
+    debug(default_token)
     return default_token
