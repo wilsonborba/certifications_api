@@ -1,4 +1,7 @@
-from src.core.logs import error, debug
+from datetime import datetime
+from typing import Optional
+
+from src.core.logs import debug, error
 from src.dal.remote.ai.ai_factory import AiFactory
 from src.domain.services.ai_token_manager import AiTokenManager
 
@@ -75,7 +78,15 @@ def set_token_as_default_for_user(user_uuid_id: str, token_name: str):
     return True
 
 
-def get_user_ai_usage(user_uuid_id: str):
-    default_token = ai_mananger.get_user_ai_usage(user_uuid_id=user_uuid_id)
-    debug(default_token)
-    return default_token
+def get_user_ai_usage(
+    user_uuid_id: str,
+    provider_model_description: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+):
+    return ai_mananger.get_user_ai_usage(
+        user_uuid_id=user_uuid_id,
+        provider_model_description=provider_model_description,
+        start_date=start_date,
+        end_date=end_date,
+    )

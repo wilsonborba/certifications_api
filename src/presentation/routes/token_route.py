@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Request, Response, status
+from datetime import datetime, timezone
+from typing import Optional
+
+from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
 ai_token_router = APIRouter()
@@ -48,26 +51,40 @@ async def get_available_ai_providers(
 async def get_ai_usage(
     response: Response,
     request: Request,
+    provider_model_description: Optional[str] = Query(
+        default=None,
+        alias="provider_model_description",
+    ),
+    start_date: Optional[datetime] = Query(default=None, alias="start_date"),
+    end_date: Optional[datetime] = Query(default=None, alias="end_date"),
 ):
     """
     Endpoint to get AI usage information.
     """
-
     try:
-        user_uuid_id = request.headers.get("x-uuid", None)
+        user_uuid_id = request.headers.get("x-uuid")
         if not user_uuid_id:
             response.status_code = status.HTTP_400_BAD_REQUEST
-            return MyResponse(
-                data=None,
-                message="User UUID not provided in headers.",
-            )
+            return MyResponse(data=None, message="User UUID not provided in headers.")
 
-        usage_info = get_user_ai_usage(user_uuid_id=user_uuid_id)
+        # Optional: enforce start_date <= end_date if both provided
+        if start_date and end_date and start_date > end_date:
+            response.status_code = status.HTTP_400_BAD_REQUEST
+            return MyResponse(data=None, message="start_date must be <= end_date.")
+
+        usage_info = get_user_ai_usage(
+            user_uuid_id=user_uuid_id,
+            provider_model_description=provider_model_description,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
         response.status_code = status.HTTP_200_OK
         return MyResponse(
             data=usage_info,
             message="AI usage information retrieved successfully.",
         )
+
     except Exception as e:
         error(f"Error retrieving AI usage information: {e}")
         response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR

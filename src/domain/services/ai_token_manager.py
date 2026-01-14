@@ -1,3 +1,6 @@
+from datetime import datetime
+from typing import Any, Dict, Optional
+
 from src.dal.local.db_adapter import DBAdapter
 
 
@@ -5,12 +8,32 @@ class AiTokenManager:
     def __init__(self):
         self.db_adapter = DBAdapter()
 
-    def get_user_ai_usage(self, user_uuid_id: str):
+    def get_user_ai_usage(
+        self,
+        user_uuid_id: str,
+        provider_model_description: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+    ):
+        where: Dict[str, Any] = {"user_uuid_id": user_uuid_id}
+
+        if provider_model_description:
+            # Change field name if your table uses a different column
+            where["provider_model_description"] = provider_model_description
+
+        # Example: if your table has a datetime column like created_at or event_time
+        # Replace "created_at" with the correct column name.
+        if start_date and end_date:
+            where["created_at"] = {"$gte": start_date, "$lte": end_date}
+        elif start_date:
+            where["created_at"] = {"$gte": start_date}
+        elif end_date:
+            where["created_at"] = {"$lte": end_date}
+
         db_usage = self.db_adapter.read_where_many(
             "accredit_aiusageevent",
-            {"user_uuid_id": user_uuid_id},
+            where,
         )
-
         return db_usage
 
     def get_tokens(self, user_uuid_id):
