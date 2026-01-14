@@ -68,6 +68,50 @@ class DBAdapter:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(stmt).mappings()]
 
+    def _build_conditions(self, table: Table, where: dict):
+        """
+        Supports:
+          - equality: {"col": value}
+          - range ops: {"col": {"$gte": x, "$lte": y, "$gt": x, "$lt": y}}
+          - IN: {"col": {"$in": [a,b,c]}}
+          - IS NULL: {"col": {"$isnull": True}}
+        """
+        conditions = []
+
+        for key, value in where.items():
+            if key not in table.c:
+                raise ValueError(f"Unknown column '{key}' for table '{table.name}'")
+
+            col = table.c[key]
+
+            # Operator dict
+            if isinstance(value, dict):
+                for op, op_val in value.items():
+                    if op == "$gte":
+                        conditions.append(col >= op_val)
+                    elif op == "$lte":
+                        conditions.append(col <= op_val)
+                    elif op == "$gt":
+                        conditions.append(col > op_val)
+                    elif op == "$lt":
+                        conditions.append(col < op_val)
+                    elif op == "$in":
+                        if not isinstance(op_val, (list, tuple, set)):
+                            raise ValueError(
+                                f"$in for '{key}' must be a list/tuple/set"
+                            )
+                        conditions.append(col.in_(list(op_val)))
+                    elif op == "$isnull":
+                        conditions.append(col.is_(None) if op_val else col.is_not(None))
+                    else:
+                        raise ValueError(f"Unsupported operator '{op}' for '{key}'")
+
+            # Equality
+            else:
+                conditions.append(col == value)
+
+        return conditions
+
     def read_where_many(
         self,
         table_name: str,
@@ -78,19 +122,18 @@ class DBAdapter:
         order_by: list | None = None,
         schema: str = None,
     ):
-        """
-        Return multiple rows as list[dict], matching all equality conditions in `where`.
-        Optional: order_by = [table.c["col1"].asc(), table.c["col2"].desc(), ...]
-        """
         table = self.reflect_table(table_name, schema)
-        condition = and_(*[table.c[k] == v for k, v in where.items()])
-        stmt = select(table).where(condition)
+
+        conditions = self._build_conditions(table, where)
+        stmt = select(table).where(and_(*conditions))
+
         if order_by:
             stmt = stmt.order_by(*order_by)
         if limit is not None:
             stmt = stmt.limit(limit)
         if offset is not None:
             stmt = stmt.offset(offset)
+
         with self.connect() as conn:
             return [dict(r) for r in conn.execute(stmt).mappings().all()]
 

@@ -81,6 +81,7 @@
 - *(ai_usage)* Created route to return the user ai usage
 - *(ai_usage)* Fixed query for user ai usage
 - *(ai_usage)* Improved route to return the user ai usage
+- *(ai_usage)* Added a query condition improvement for query many on db
 
 ### 🐛 Bug Fixes
 

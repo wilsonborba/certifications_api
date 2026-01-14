@@ -11,30 +11,24 @@ class AiTokenManager:
     def get_user_ai_usage(
         self,
         user_uuid_id: str,
-        provider_model_description: Optional[str] = None,
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None,
+        provider_model_description: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
     ):
-        where: Dict[str, Any] = {"user_uuid_id": user_uuid_id}
+        where = {"user_uuid_id": user_uuid_id}
 
         if provider_model_description:
-            # Change field name if your table uses a different column
             where["provider_model_description"] = provider_model_description
 
-        # Example: if your table has a datetime column like created_at or event_time
-        # Replace "created_at" with the correct column name.
-        if start_date and end_date:
-            where["created_at"] = {"$gte": start_date, "$lte": end_date}
-        elif start_date:
-            where["created_at"] = {"$gte": start_date}
-        elif end_date:
-            where["created_at"] = {"$lte": end_date}
+        # IMPORTANT: use range operators on created_at
+        if start_date or end_date:
+            where["created_at"] = {}
+            if start_date:
+                where["created_at"]["$gte"] = start_date
+            if end_date:
+                where["created_at"]["$lte"] = end_date
 
-        db_usage = self.db_adapter.read_where_many(
-            "accredit_aiusageevent",
-            where,
-        )
-        return db_usage
+        return self.db_adapter.read_where_many("accredit_aiusageevent", where)
 
     def get_tokens(self, user_uuid_id):
         db_token = self.db_adapter.read_where_many(
