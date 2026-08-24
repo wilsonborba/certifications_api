@@ -13,8 +13,9 @@ source .venv/bin/activate
 
 export PYTHONPATH="$(pwd)"
 
-HOST=${HOST:-0.0.0.0}
-PORT=${PORT:-8001}
+export ENVIRONMENT=development
+HOST=0.0.0.0
+PORT=8103
 
 echo "Starting Uvicorn on ${HOST}:${PORT} (reload enabled)…"
 exec uvicorn main:app --reload --host "$HOST" --port "$PORT"

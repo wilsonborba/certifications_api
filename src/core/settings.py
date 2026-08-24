@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     
     FERNET_KEY_SECRET: str  # Secret key for Fernet encryption, loaded from .env
 
-    # Development flag
-    development_mode: bool = True
+    # Runtime mode is selected by the development/production launch script.
+    environment: str = "development"
 
 
     # Reddit API settings
@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     # REDIS
     REDIS_URL: str = "redis://127.0.0.1:6379/0"
     REDIS_NAMESPACE: str = "accredit_api:"
+
+    @property
+    def development_mode(self) -> bool:
+        return self.environment.lower() in {"development", "dev", "local"}
 
     QUESTIONS_PREFIX: str = "questions"
 
