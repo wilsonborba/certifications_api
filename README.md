@@ -1,2 +1,3 @@
-# accredit_api
-the api behind accredit frontend
+# certifications_api
+
+The API behind the Certifications application.
