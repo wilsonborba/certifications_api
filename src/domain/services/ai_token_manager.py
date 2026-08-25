@@ -28,11 +28,11 @@ class AiTokenManager:
             if end_date:
                 where["created_at"]["$lte"] = end_date
 
-        return self.db_adapter.read_where_many("accredit_aiusageevent", where)
+        return self.db_adapter.read_where_many("certifications_aiusageevent", where)
 
     def get_tokens(self, user_uuid_id):
         db_token = self.db_adapter.read_where_many(
-            "accredit_usertokens",
+            "certifications_usertokens",
             {"user_uuid_id": user_uuid_id},
         )
 
@@ -44,7 +44,7 @@ class AiTokenManager:
         token_name: str,
     ):
         db_token = self.db_adapter.read_where_one(
-            "accredit_usertokens",
+            "certifications_usertokens",
             {
                 "user_uuid_id": user_uuid_id,
                 "token_name": token_name,
@@ -55,7 +55,7 @@ class AiTokenManager:
 
     def get_default_token(self, user_uuid_id: str):
         db_token = self.db_adapter.read_where_one(
-            "accredit_usertokens",
+            "certifications_usertokens",
             {
                 "user_uuid_id": user_uuid_id,
                 "is_default": True,
@@ -81,7 +81,7 @@ class AiTokenManager:
             default_token = self.get_default_token(user_uuid_id)
             if default_token and default_token["token_name"] != token_name:
                 self.db_adapter.update_row(
-                    "accredit_usertokens",
+                    "certifications_usertokens",
                     default_token["id"],
                     {
                         "is_default": False,
@@ -95,7 +95,7 @@ class AiTokenManager:
         if existing_token:
             # Update existing token
             self.db_adapter.update_row(
-                "accredit_usertokens",
+                "certifications_usertokens",
                 existing_token["id"],
                 {
                     "token_value": token_value,
@@ -108,7 +108,7 @@ class AiTokenManager:
         else:
             # Insert new token
             new_token_id = self.db_adapter.insert_row(
-                "accredit_usertokens",
+                "certifications_usertokens",
                 {
                     "user_uuid_id": user_uuid_id,
                     "token_name": token_name,
@@ -118,12 +118,12 @@ class AiTokenManager:
                 },
             )
 
-            return self.db_adapter.read_by_id("accredit_usertokens", new_token_id)
+            return self.db_adapter.read_by_id("certifications_usertokens", new_token_id)
 
     def set_default_token(self, user_uuid_id: str, token_name: str):
         # 1) Unset current default ONLY for this user
         self.db_adapter.update_where(
-            "accredit_usertokens",
+            "certifications_usertokens",
             where={
                 "user_uuid_id": user_uuid_id,
                 "is_default": True,
@@ -133,7 +133,7 @@ class AiTokenManager:
 
         # 2) Set the chosen token as default
         updated = self.db_adapter.update_where(
-            "accredit_usertokens",
+            "certifications_usertokens",
             where={
                 "user_uuid_id": user_uuid_id,
                 "token_name": token_name,
@@ -146,6 +146,6 @@ class AiTokenManager:
 
     def delete_token(self, user_uuid_id: str, token_name: str):
         self.db_adapter.delete_where(
-            "accredit_usertokens",
+            "certifications_usertokens",
             {"user_uuid_id": user_uuid_id, "token_name": token_name},
         )

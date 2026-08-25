@@ -123,7 +123,7 @@ async def submit_quiz_revision_for_pdf(
     # 'item_img': 'https://example.com/example.png',
     # 'updated_at': datetime.datetime(2025, 12, 25, 21, 7, 6, 247995, tzinfo=datetime.timezone(datetime.timedelta(seconds=25200)))}]
     itemsource = db_adapter.read_where_one(
-        "accredit_sourceitem",
+        "certifications_sourceitem",
         {"source_name": "pdf", "item_name": "pdf", "has_topic": False},
     )
 
@@ -140,7 +140,7 @@ async def submit_quiz_revision_for_pdf(
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    inserted_input = db_adapter.insert_row("accredit_input", payload_input)
+    inserted_input = db_adapter.insert_row("certifications_input", payload_input)
 
     saved_questions_model = quiz_handler.save_questions(
         response={"questions": questions},
@@ -213,7 +213,7 @@ async def submit_quiz_revision(
 
 async def fetch_certification(certification_id):
     result = db_adapter.read_by_id(
-        "accredit_usercertification", certification_id, id_column="uuid_certification"
+        "certifications_usercertification", certification_id, id_column="uuid_certification"
     )
 
     debug(f"Result: {result}")
@@ -223,7 +223,7 @@ async def fetch_certification(certification_id):
 
 async def fetch_certification_from_user(user_uuid_id: str) -> List[Dict[str, Any]]:
     results = db_adapter.read_where_many(
-        "accredit_usercertification",
+        "certifications_usercertification",
         {"user_uuid_id": user_uuid_id},
     )
 

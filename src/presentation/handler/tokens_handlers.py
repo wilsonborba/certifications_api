@@ -63,7 +63,7 @@ def is_missing_important_fields(token_data: dict):
 
 def delete_token_for_user(user_uuid_id: str, token_name: str):
     ai_mananger.db_adapter.delete_where(
-        "accredit_usertokens",
+        "certifications_usertokens",
         {
             "token_name": token_name,
             "user_uuid_id": user_uuid_id,

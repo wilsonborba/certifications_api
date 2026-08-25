@@ -25,7 +25,7 @@ def get_all_item_data():
                 data_to_insert = preview.to_dict()
                 
                 result = preview_manager.db_adapter.insert_row(
-                "accredit_sourceitem",
+                "certifications_sourceitem",
                 data_to_insert
                 )
 
@@ -58,7 +58,7 @@ def get_specific_item_data(item_name):
         preview = preview_manager.get_item_preview(item_name)
         if preview:
             preview_manager.db_adapter.insert_row(
-            "accredit_sourceitem",
+            "certifications_sourceitem",
             preview.to_dict()
             )
             return preview.to_dict()
