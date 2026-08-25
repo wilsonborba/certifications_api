@@ -8,7 +8,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # Service name
-SERVICE_NAME="accredit-api"
+SERVICE_NAME="certifications-api"
 UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
 # Paths

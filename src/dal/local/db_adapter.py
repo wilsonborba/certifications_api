@@ -26,7 +26,7 @@ class DBAdapter:
 
     def __init__(self, engine: Engine = None):
         settings = app_settings()
-        self.engine = engine or create_engine(settings.accredit_db.uri())
+        self.engine = engine or create_engine(settings.certifications_db.uri())
         try:
             from pgvector.sqlalchemy import Vector
             from sqlalchemy.dialects.postgresql import base as pg_base
