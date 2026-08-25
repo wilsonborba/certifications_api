@@ -764,7 +764,7 @@ class PdfAdapter(BaseAdapter):
 
     def get_default_ai_client(self, user_uuid_id: str):
         db_user_token = self.db_adapter.read_where_one(
-            "accredit_usertokens",
+            "certifications_usertokens",
             {
                 "is_default": True,
                 "user_uuid_id": user_uuid_id,

@@ -143,7 +143,7 @@ class BaseQuizManager(ABC):
         Load existing questions for the given Input with the minimum needed fields.
         """
         rows = self.db_adapter.read_where_many(
-            "accredit_question",
+            "certifications_question",
             {"input_id": input_id},
         )
         # Keep only what we need
@@ -231,7 +231,7 @@ class BaseQuizManager(ABC):
         if not is_for_pdf:
 
             source_item_db = self.db_adapter.read_where_one(
-                "accredit_sourceitem", {"item_name": source_item_name}
+                "certifications_sourceitem", {"item_name": source_item_name}
             )
 
             if not source_item_db:
@@ -239,7 +239,7 @@ class BaseQuizManager(ABC):
                 raise ValueError("Source item must be cached before saving questions.")
             
             input_db = self.db_adapter.read_where_one(
-                "accredit_input",
+                "certifications_input",
                 {"source_item_id": source_item_db["id"], "input_identification": source_input_identification}
             )
             if not input_db:
@@ -250,7 +250,7 @@ class BaseQuizManager(ABC):
         # for example to generate a random UUID: import uuid; str(uuid.uuid4())
 
         return self.db_adapter.insert_row(
-            "accredit_aiusageevent",
+            "certifications_aiusageevent",
             {
                 "user_uuid_id": user_uuid_id or "00000000-0000-0000-0000-000000000000",
                 "provider_model_description": provider_model_description,

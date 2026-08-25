@@ -36,7 +36,7 @@ class QuizAPIManager(BaseQuizManager):
 
     def get_default_ai_client(self, user_uuid_id: str):
         db_user_token = self.db_adapter.read_where_one(
-            "accredit_usertokens",
+            "certifications_usertokens",
             {
                 "is_default": True,
                 "user_uuid_id": user_uuid_id,
@@ -59,7 +59,7 @@ class QuizAPIManager(BaseQuizManager):
             raise NoDefaultAIClientError("No default AI client configured.")
 
     def get_all_sources(self):
-        db_sources = self.db_adapter.read_all("accredit_sourceitem")
+        db_sources = self.db_adapter.read_all("certifications_sourceitem")
 
         list_of_sources = []
 
@@ -72,7 +72,7 @@ class QuizAPIManager(BaseQuizManager):
 
     def get_source(self, source_name):
         db_source = self.db_adapter.read_by_id(
-            "accredit_sourceitem", source_name, id_column="source_name"
+            "certifications_sourceitem", source_name, id_column="source_name"
         )
 
         return db_source
@@ -85,7 +85,7 @@ class QuizAPIManager(BaseQuizManager):
         return preview
 
     def get_all_items(self):
-        db_items = self.db_adapter.read_all("accredit_sourceitem")
+        db_items = self.db_adapter.read_all("certifications_sourceitem")
 
         list_of_items = []
 
@@ -98,7 +98,7 @@ class QuizAPIManager(BaseQuizManager):
 
     def get_item(self, item_name):
         db_item = self.db_adapter.read_by_id(
-            "accredit_sourceitem", item_name, id_column="item_name"
+            "certifications_sourceitem", item_name, id_column="item_name"
         )
 
         return db_item
@@ -119,7 +119,7 @@ class QuizAPIManager(BaseQuizManager):
             selected_text = ans.get("selectedText")
 
             answers_from_question = self.db_adapter.read_where_many(
-                table_name="accredit_answer",
+                table_name="certifications_answer",
                 where={
                     "question_id": question_id,
                     # "is_correct": True
@@ -219,12 +219,12 @@ class QuizAPIManager(BaseQuizManager):
         )
 
         certification_id = self.db_adapter.insert_row(
-            "accredit_usercertification", user_certification.to_dict()
+            "certifications_usercertification", user_certification.to_dict()
         )
 
         for ua in ua_list:
             ua["user_certification_id"] = certification_id
-            _ = self.db_adapter.insert_row("accredit_useranswer", ua)
+            _ = self.db_adapter.insert_row("certifications_useranswer", ua)
 
         return {
             # return uuid_certification_id instead of DB PK
@@ -234,7 +234,7 @@ class QuizAPIManager(BaseQuizManager):
 
     def save_complaint(self, complaint_text: str, question_id: str, user_uuid_id: str):
         _ = self.db_adapter.insert_row(
-            "accredit_questioncomplaint",
+            "certifications_questioncomplaint",
             {
                 "user_uuid_id": user_uuid_id,
                 "complaint_text": complaint_text,
@@ -251,7 +251,7 @@ class QuizAPIManager(BaseQuizManager):
     def save_solicitation_new_topic(self, app_url: str, user_uuid_id: str) -> None:
         try:
             insert_result = self.db_adapter.insert_row(
-                "accredit_solicitationnewitemtopic",
+                "certifications_solicitationnewitemtopic",
                 {
                     "user_uuid_id": user_uuid_id,
                     "app_url": app_url,
@@ -327,7 +327,7 @@ class QuizAPIManager(BaseQuizManager):
 
         # 1) find SourceItem row
         source_item_db = self.db_adapter.read_where_one(
-            "accredit_sourceitem", {"item_name": item_name}
+            "certifications_sourceitem", {"item_name": item_name}
         )
         if not source_item_db:
             error(f"Source item not found in DB for item_name: {item_name}")
@@ -343,9 +343,9 @@ class QuizAPIManager(BaseQuizManager):
         source_name = source_item_db.get("source_name", item_name)
         item_name_from_db = source_item_db.get("item_name", item_name)
 
-        # 2) try cache in accredit_input
+        # 2) try cache in certifications_input
         row = self.db_adapter.read_where_one(
-            "accredit_input",
+            "certifications_input",
             {
                 "source_item_id": source_item_id,
                 "input_identification": input_identification,
@@ -379,7 +379,7 @@ class QuizAPIManager(BaseQuizManager):
 
 
         inserted_pk = self.db_adapter.insert_row(
-            "accredit_input",
+            "certifications_input",
             {
                 "source_item_id": source_item_id,
                 "input_identification": input_identification,
@@ -539,7 +539,7 @@ class QuizAPIManager(BaseQuizManager):
 
         # 1) SourceItem
         source_item_db = self.db_adapter.read_where_one(
-            "accredit_sourceitem", {"item_name": item_name}
+            "certifications_sourceitem", {"item_name": item_name}
         )
         if not source_item_db:
             error(f"Source item not found in DB for item_name: {item_name}")
@@ -549,7 +549,7 @@ class QuizAPIManager(BaseQuizManager):
 
         # 2) Input
         input_db = self.db_adapter.read_where_one(
-            "accredit_input",
+            "certifications_input",
             {
                 "source_item_id": source_item_db["id"],
                 "input_identification": input_identification,
@@ -563,7 +563,7 @@ class QuizAPIManager(BaseQuizManager):
 
         # 3) ALL questions for this input
         questions_db = self.db_adapter.read_where_many(
-            "accredit_question",
+            "certifications_question",
             {"input_id": input_db["id"], "selected_language": selected_language},
             # You can add order_by here if your adapter prefers a stable order
         )
@@ -585,7 +585,7 @@ class QuizAPIManager(BaseQuizManager):
                 print(f"Processing question ID {q['id']}", end="\r")
 
             answers = self.db_adapter.read_where_many(
-                "accredit_answer",
+                "certifications_answer",
                 {"question_id": q["id"]},
                 # optionally order_by by 'position'
             )
@@ -638,14 +638,14 @@ class QuizAPIManager(BaseQuizManager):
             raise ValueError("Invalid selected language.")
 
         source_item_db = self.db_adapter.read_where_one(
-            "accredit_sourceitem", {"item_name": item_name}
+            "certifications_sourceitem", {"item_name": item_name}
         )
         if not source_item_db:
             error(f"Source item not found in DB for item_name: {item_name}")
             raise ValueError("Source item must be cached before saving questions.")
 
         input_db = self.db_adapter.read_where_one(
-            "accredit_input",
+            "certifications_input",
             {
                 "source_item_id": source_item_db["id"],
                 "input_identification": input_identification,
@@ -714,7 +714,7 @@ class QuizAPIManager(BaseQuizManager):
                 "selected_language": selected_language,
             }
 
-            existing = self.db_adapter.read_where_one("accredit_question", pld)
+            existing = self.db_adapter.read_where_one("certifications_question", pld)
 
             if existing:
                 skipped_exact += 1
@@ -737,7 +737,7 @@ class QuizAPIManager(BaseQuizManager):
 
             # Insert Question
             question_id = self.db_adapter.insert_row(
-                "accredit_question",
+                "certifications_question",
                 {
                     "input_id": input_db["id"],
                     "question_text": qtext,
@@ -772,7 +772,7 @@ class QuizAPIManager(BaseQuizManager):
 
                 # NOTE: do NOT overwrite the 'inserted' counter with the DB return value.
                 _ = self.db_adapter.insert_row(
-                    "accredit_answer",
+                    "certifications_answer",
                     {
                         "question_id": question_id,
                         "text": opt_text,
