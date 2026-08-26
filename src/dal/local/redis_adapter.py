@@ -48,6 +48,13 @@ class RedisAdapter:
             await self._client.close()
             self._client = None
 
+    async def ping(self) -> bool:
+        """Validate that the configured Redis logical database is reachable."""
+        try:
+            return bool(await self.raw.ping())
+        except Exception as e:
+            raise RedisAdapterError(str(e)) from e
+
     @property
     def raw(self) -> aioredis.Redis:
         """Acesso ao cliente Redis bruto para comandos especiais."""

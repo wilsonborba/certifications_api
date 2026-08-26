@@ -1,9 +1,13 @@
-from fastapi import FastAPI
-from fastapi.concurrency import asynccontextmanager
-from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from redis.exceptions import RedisError
+
+from src.core.logs import error
 from src.core.settings import app_settings
-from src.dal.local.redis_adapter import RedisAdapter
+from src.dal.local.redis_adapter import RedisAdapter, RedisAdapterError
 from src.presentation.routes.study_route import study_router
 from src.presentation.routes.question_route import question_router
 from src.presentation.routes.study_lifecycle_route import lifecycle_router
@@ -14,14 +18,19 @@ settings = app_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     adapter = RedisAdapter(settings.REDIS_URL, namespace=settings.REDIS_NAMESPACE)
-    await adapter.connect()
+    try:
+        await adapter.connect()
+        await adapter.ping()
+    except RedisAdapterError as exc:
+        await adapter.close()
+        error("Redis startup connectivity check failed")
+        raise RuntimeError("Certifications state store is unavailable") from exc
+
     app.state.redis = adapter
 
-    yield  # <---- aqui a app roda normalmente
+    yield
 
-    # Shutdown
     await adapter.close()
 
 
@@ -43,6 +52,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(RedisAdapterError)
+@app.exception_handler(RedisError)
+async def redis_unavailable(_: Request, exc: Exception) -> JSONResponse:
+    """Keep infrastructure details in server logs and return a stable API error."""
+    error(f"Redis request failure: {type(exc).__name__}")
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Study service is temporarily unavailable. Please try again shortly."},
+    )
 
 app.include_router(study_router, tags=["studies"])
 
