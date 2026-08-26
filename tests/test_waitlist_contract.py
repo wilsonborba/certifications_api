@@ -30,6 +30,8 @@ class _Redis:
         return self.values.get(key)
 
     async def set(self, key: str, value: object, **kwargs) -> bool:
+        if kwargs.get("nx") and key in self.values:
+            return False
         self.values[key] = value
         return True
 
@@ -45,17 +47,10 @@ class _Request:
         self.app = SimpleNamespace(state=SimpleNamespace(redis=_Redis()))
 
 
-class _Fsm:
-    async def upload(self, **kwargs) -> str:
-        return "waitlist-object-key"
-
-
 class WaitlistContractTests(unittest.TestCase):
     def test_accepts_and_deduplicates_by_email_and_plan(self) -> None:
         request = _Request()
         with patch(
-            "src.presentation.routes.waitlist_route._fsm", return_value=_Fsm()
-        ), patch(
             "src.presentation.routes.waitlist_route.asyncio.sleep", new=AsyncMock()
         ):
             first = asyncio.run(
@@ -74,4 +69,3 @@ class WaitlistContractTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as raised:
             asyncio.run(join_waitlist(WaitlistPayload(email="person@example.com"), request))
         self.assertEqual(raised.exception.status_code, 403)
-

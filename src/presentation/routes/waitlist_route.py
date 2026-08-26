@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import re
 import secrets
@@ -14,8 +13,6 @@ from pydantic import BaseModel, Field
 from src.core.logs import error
 from src.core.settings import app_settings
 from src.dal.local.redis_adapter import RedisAdapterError
-from src.dal.remote.fsm_media_adapter import FsmConfigurationError, FsmStorageError
-from src.presentation.routes.study_route import _fsm
 
 waitlist_router = APIRouter(prefix="/waitlist")
 
@@ -65,7 +62,8 @@ async def join_waitlist(payload: WaitlistPayload, request: Request) -> dict:
     """Record one public product-interest request per normalized email/plan.
 
     Only api_for_apps may call this route. It supplies the service credential
-    and the server-side Supabase registration annotation.
+    and the server-side Supabase registration annotation. Waitlist metadata is
+    kept in Redis for this MVP; FSM remains exclusively file storage.
     """
     settings = app_settings()
     provided_key = request.headers.get("x-certifications-service-key", "")
@@ -81,29 +79,19 @@ async def join_waitlist(payload: WaitlistPayload, request: Request) -> dict:
         raise HTTPException(status_code=400, detail="Invalid waitlist context")
 
     digest = hashlib.sha256(f"{payload.plan}:{email}".encode("utf-8")).hexdigest()
-    index_key = request.app.state.redis.k("waitlist", payload.plan, digest)
+    record_key = request.app.state.redis.k("waitlist", payload.plan, digest)
     try:
-        existing = await request.app.state.redis.get(index_key)
-        if existing:
-            return {"data": {"accepted": True}, "message": "Waitlist request accepted"}
-
-        body = json.dumps(
+        await request.app.state.redis.set(
+            record_key,
             {
                 "email": email,
                 "plan": payload.plan,
                 "is_registered": registered == "true",
                 "requested_at": datetime.now(UTC).isoformat(),
             },
-            separators=(",", ":"),
-        ).encode("utf-8")
-        object_key = await _fsm().upload(
-            album="waitlist",
-            filename=f"{payload.plan}-{digest}.json",
-            body=body,
-            content_type="application/json",
+            nx=True,
         )
-        await request.app.state.redis.set(index_key, object_key)
-    except (FsmConfigurationError, FsmStorageError, RedisAdapterError) as exc:
+    except RedisAdapterError as exc:
         error(f"Waitlist recording failed: {exc}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
