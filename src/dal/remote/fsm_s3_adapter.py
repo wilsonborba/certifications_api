@@ -73,3 +73,15 @@ class FsmS3Adapter:
             raise FsmStorageError("FSM delete failed") from exc
         if response.status_code not in {200, 204, 404}:
             raise FsmStorageError("FSM rejected deletion")
+
+    async def get(self, *, key: str) -> bytes:
+        path = f"/{self._bucket}/{quote(key, safe='/')}"
+        headers = self._authorization(method="GET", path=path, payload_hash=hashlib.sha256(b"").hexdigest(), content_type="application/octet-stream")
+        try:
+            async with httpx.AsyncClient(timeout=90.0) as client:
+                response = await client.get(f"{self._endpoint}{path}", headers=headers)
+        except httpx.HTTPError as exc:
+            raise FsmStorageError("FSM download failed") from exc
+        if response.status_code != 200:
+            raise FsmStorageError("FSM object is unavailable")
+        return response.content

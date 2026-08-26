@@ -64,6 +64,8 @@ class StudySource(BaseModel):
     size_bytes: int = Field(ge=0)
     sha256: str = Field(min_length=64, max_length=64)
     object_key: str
+    derived_object_key: str | None = None
+    derived_size_bytes: int = Field(default=0, ge=0)
     status: SourceStatus = SourceStatus.uploaded
     selection: SourceSelection | None = None
     created_at: datetime
@@ -81,4 +83,8 @@ class Study(BaseModel):
 
     @property
     def active_size_bytes(self) -> int:
-        return sum(source.size_bytes for source in self.sources if source.status is not SourceStatus.deleted)
+        return sum(
+            source.size_bytes + source.derived_size_bytes
+            for source in self.sources
+            if source.status is not SourceStatus.deleted
+        )
