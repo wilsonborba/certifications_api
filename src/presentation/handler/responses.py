@@ -40,12 +40,6 @@ class NotEnoughQuestionsGeneratedError(Exception):
     pass
 
 
-class NoDefaultAIClientError(Exception):
-    """Custom exception when no default AI client is set for the user."""
-
-    pass
-
-
 class MyResponse(BaseModel):
     """
     Base response model for API responses.

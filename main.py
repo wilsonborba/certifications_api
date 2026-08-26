@@ -4,9 +4,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.core.settings import app_settings
 from src.dal.local.redis_adapter import RedisAdapter
-from src.presentation.routes.pdf_route import pdf_router
-from src.presentation.routes.quiz_route import quiz_router
-from src.presentation.routes.token_route import ai_token_router
 from src.presentation.routes.study_route import study_router
 from src.presentation.routes.question_route import question_router
 from src.presentation.routes.study_lifecycle_route import lifecycle_router
@@ -45,12 +42,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-app.include_router(pdf_router, tags=["pdf"])
-
-app.include_router(quiz_router, tags=["quiz"])
-
-app.include_router(ai_token_router, tags=["tokens"])
 
 app.include_router(study_router, tags=["studies"])
 

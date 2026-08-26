@@ -17,7 +17,6 @@ dependencies = [
   "SQLAlchemy",
   "psycopg2-binary",
   "colorlog",
-  "cryptography",
   "gunicorn",
   "httpx",
   "pgvector",

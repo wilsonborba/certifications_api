@@ -19,15 +19,9 @@ class Settings(BaseSettings):
     CERTIFICATIONS_DB_NAME: str
     CERTIFICATIONS_DB_SSLMODE: str = "require"  # Default SSL mode for PostgreSQL
     
-    FERNET_KEY_SECRET: str  # Secret key for Fernet encryption, loaded from .env
-
     # Runtime mode is selected by the development/production launch script.
     environment: str = "development"
 
-
-    # Gemini
-
-    GEMINI_API_KEY: str | None = None
 
     # REDIS
     REDIS_URL: str = "redis://127.0.0.1:6379/0"
