@@ -178,6 +178,12 @@ class RedisAdapter:
         except Exception as e:
             raise RedisAdapterError(str(e)) from e
 
+    async def srem(self, key: str, *members: Any) -> int:
+        try:
+            return int(await self.raw.srem(key, *(self._maybe_encode(member) for member in members)))
+        except Exception as e:
+            raise RedisAdapterError(str(e)) from e
+
     # ---------- sorted sets ----------
     async def zadd(self, key: str, *score_member: Tuple[float, Any]) -> int:
         try:

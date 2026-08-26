@@ -80,6 +80,8 @@ class Study(BaseModel):
     sources: list[StudySource] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+    memory_object_key: str | None = None
+    memory_size_bytes: int = Field(default=0, ge=0)
 
     @property
     def active_size_bytes(self) -> int:
@@ -88,3 +90,7 @@ class Study(BaseModel):
             for source in self.sources
             if source.status is not SourceStatus.deleted
         )
+
+    @property
+    def retained_size_bytes(self) -> int:
+        return self.active_size_bytes + self.memory_size_bytes
