@@ -14,7 +14,7 @@ from PIL import Image
 
 from src.core.settings import Settings
 from src.dal.remote.cortex_adapter import CortexAdapter, CortexUnavailableError
-from src.dal.remote.fsm_s3_adapter import FsmS3Adapter
+from src.dal.remote.fsm_media_adapter import FsmMediaAdapter
 from src.domain.models.study import SourceKind, SourceStatus, StudySource
 
 
@@ -39,7 +39,7 @@ class StudyIngestionService:
     chunking avoid wasting a higher tier on repeated preparation work.
     """
 
-    def __init__(self, *, fsm: FsmS3Adapter, cortex: CortexAdapter, settings: Settings) -> None:
+    def __init__(self, *, fsm: FsmMediaAdapter, cortex: CortexAdapter, settings: Settings) -> None:
         self._fsm = fsm
         self._cortex = cortex
         self._settings = settings

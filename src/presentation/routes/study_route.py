@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from src.core.logs import error
 from src.core.settings import app_settings
 from src.dal.local.study_repository import StudyRepository
-from src.dal.remote.fsm_s3_adapter import FsmConfigurationError, FsmS3Adapter, FsmStorageError
+from src.dal.remote.fsm_media_adapter import FsmConfigurationError, FsmMediaAdapter, FsmStorageError
 from src.domain.models.study import SourceKind, SourceSelection, SourceStatus, Study, StudySource, StudyStatus
 from src.domain.services.study_ingestion_service import IngestionError, StudyIngestionService
 from src.dal.remote.cortex_adapter import CortexAdapter
@@ -37,14 +37,12 @@ def _repo(request: Request) -> StudyRepository:
     return StudyRepository(request.app.state.redis)
 
 
-def _fsm() -> FsmS3Adapter:
+def _fsm() -> FsmMediaAdapter:
     settings = app_settings()
-    return FsmS3Adapter(
-        endpoint=settings.FSM_S3_ENDPOINT,
-        access_key=settings.FSM_S3_ACCESS_KEY,
-        secret_key=settings.FSM_S3_SECRET_KEY,
-        region=settings.FSM_S3_REGION,
-        bucket=settings.FSM_S3_BUCKET,
+    return FsmMediaAdapter(
+        endpoint=settings.FSM_MEDIA_ENDPOINT,
+        app=settings.FSM_APP_NAME,
+        app_key=settings.FSM_APP_KEY,
     )
 
 
@@ -112,10 +110,14 @@ async def upload_source(
         raise HTTPException(status_code=422, detail="A PDF file is required")
     source_id = str(uuid4())
     filename = file.filename or f"{source_id}.{kind.value}"
-    object_key = _fsm().object_key(study_id=study.id, source_id=source_id, filename=filename)
     content_type = file.content_type or "application/octet-stream"
     try:
-        await _fsm().put(key=object_key, body=raw, content_type=content_type)
+        object_key = await _fsm().upload(
+            album=FsmMediaAdapter.album(study.id),
+            filename=f"{source_id}-{filename}",
+            body=raw,
+            content_type=content_type,
+        )
     except FsmConfigurationError:
         raise HTTPException(status_code=503, detail="Storage is temporarily unavailable") from None
     except FsmStorageError as exc:
@@ -173,8 +175,12 @@ async def ingest_source(study_id: str, source_id: str, request: Request) -> dict
         settings = app_settings()
         if study.active_size_bytes + len(body) > settings.STUDY_ACTIVE_MAX_BYTES:
             raise IngestionError("Processing would exceed the study storage limit")
-        source.derived_object_key = f"studies/{study.id}/derived/{source.id}/ingestion.json"
-        await _fsm().put(key=source.derived_object_key, body=body, content_type="application/json")
+        source.derived_object_key = await _fsm().upload(
+            album=FsmMediaAdapter.album(study.id),
+            filename=f"{source.id}-ingestion.json",
+            body=body,
+            content_type="application/json",
+        )
         source.derived_size_bytes = len(body)
         source.status = SourceStatus.ready
         source.updated_at = datetime.now(UTC)

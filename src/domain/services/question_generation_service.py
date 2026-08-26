@@ -7,7 +7,7 @@ import tempfile
 from uuid import uuid4
 
 from src.dal.local.study_repository import StudyRepository
-from src.dal.remote.fsm_s3_adapter import FsmS3Adapter, FsmStorageError
+from src.dal.remote.fsm_media_adapter import FsmMediaAdapter, FsmStorageError
 from src.domain.models.generation_policy import GenerationRequest
 from src.domain.models.study import SourceStatus, Study, StudyStatus
 from src.domain.models.study_question import D2Visual, GeneratedQuestionDocument, StudyQuestion
@@ -19,7 +19,7 @@ class QuestionContractError(RuntimeError):
 
 
 class QuestionGenerationService:
-    def __init__(self, *, repository: StudyRepository, fsm: FsmS3Adapter, policy: GenerationPolicyService) -> None:
+    def __init__(self, *, repository: StudyRepository, fsm: FsmMediaAdapter, policy: GenerationPolicyService) -> None:
         self._repository = repository
         self._fsm = fsm
         self._policy = policy
