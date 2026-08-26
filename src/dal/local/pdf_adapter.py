@@ -13,11 +13,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
-import fitz
+import pymupdf as fitz
 import pytesseract
 from fastapi import UploadFile
 from PIL import Image
-from unstructured.partition.pdf import partition_pdf
 
 from src.core.logs import debug, error
 from src.core.settings import app_settings
@@ -201,8 +200,8 @@ class PdfScan:
 
 class PdfParser:
     """
-    Hybrid PDF parser:
-    - Uses 'unstructured' for layout-aware extraction (headings, tables, etc.)
+    PDF parser:
+    - Extracts embedded text directly with PyMuPDF
     - Falls back to page-level OCR when a page has little/no embedded text
     - Produces AI-ready JSON with elements + chunks
     """
@@ -226,17 +225,8 @@ class PdfParser:
         ocr_force=True → OCR every page (useful for heavily scanned docs).
         ocr_lang: e.g., "eng+por" for multilingual.
         """
-        # 1) Try unstructured first (best for structure + tables)
-        elements = partition_pdf(
-            file=self.pdf_stream,
-            # "hi_res" triggers OCR internally in some cases, but we’ll control OCR ourselves
-            strategy="fast",
-            include_page_breaks=True,
-            infer_table_structure=True,
-        )
-
-        # Element dicts (public shape preserved)
-        elements_json = [self._element_to_dict(e) for e in elements]
+        # 1) Extract embedded text locally. OCR below covers scanned/sparse pages.
+        elements_json = self._extract_embedded_text()
         pages_with_text = self._pages_with_text(elements_json)
 
         # 2) OCR pass (forced or sparse pages)
@@ -310,32 +300,23 @@ class PdfParser:
         )
         return doc.to_dict()
 
+    def _extract_embedded_text(self) -> List[Dict[str, Any]]:
+        elements: List[Dict[str, Any]] = []
+        with fitz.open(stream=self.pdf_stream.getvalue(), filetype="pdf") as doc:
+            for page_no, page in enumerate(doc, start=1):
+                text = page.get_text("text").strip()
+                if text:
+                    elements.append(
+                        {
+                            "type": "Paragraph",
+                            "text": text,
+                            "page": page_no,
+                            "attrs": {},
+                        }
+                    )
+        return elements
+
     # ------------- Internals -------------
-
-    def _element_to_dict(self, el) -> Dict[str, Any]:
-        # -> now returns a dict built via PdfElement (keeps the public shape identical)
-        typ = getattr(el, "category", None) or el.__class__.__name__
-        page = getattr(el.metadata, "page_number", None)
-
-        # bbox
-        bbox = None
-        coords = getattr(el, "coordinates", None)
-        if coords and getattr(coords, "points", None):
-            xs = [p[0] for p in coords.points]
-            ys = [p[1] for p in coords.points]
-            bbox = (min(xs), min(ys), max(xs), max(ys))
-
-        attrs = ElementAttrs(
-            bbox=bbox,
-            table_markdown=el.text if "Table" in typ else None,
-        )
-        model = PdfElement(
-            type=typ,
-            text=(el.text or "").strip(),
-            page=page,
-            attrs=attrs,
-        )
-        return model.to_dict()
 
     def _pages_with_text(self, elements: List[Dict[str, Any]]) -> set:
         pages = set()

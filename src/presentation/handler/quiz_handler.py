@@ -197,18 +197,7 @@ async def submit_quiz_revision(
             document_id,
         )
 
-    # Normal quiz revision processing
-
-    result = quiz_handler.process_quiz_revision(
-        answers=answers,
-        time_spent_seconds=time_spent_seconds,
-        certification_title=certification_title,
-        full_name=full_name,
-        language=language,
-        user_uuid_id=user_uuid_id,
-    )
-
-    return result
+    raise ValueError("Only PDF quiz revisions are supported.")
 
 
 async def fetch_certification(certification_id):

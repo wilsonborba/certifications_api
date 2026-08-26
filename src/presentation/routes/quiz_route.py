@@ -121,7 +121,11 @@ async def get_quiz_revision(
         f"Quiz Revision Details - User UUID: {user_uuid_id}, Answers: {answers}, Time Spent: {time_spent_seconds}, Certification Title: {certification_title}, Full Name: {full_name}, Language: {language}, Is for PDF: {is_for_pdf}, Document ID: {document_id}"
     )
 
-    if is_for_pdf and not document_id:
+    if not is_for_pdf:
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return MyResponse(data=None, message="Only PDF quizzes are supported.")
+
+    if not document_id:
         error("Document ID must be provided for PDF quizzes")
         response.status_code = status.HTTP_400_BAD_REQUEST
         return MyResponse(data=None, message="Document ID is required for PDF quizzes")

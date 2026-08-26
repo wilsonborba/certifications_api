@@ -4,14 +4,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.core.settings import app_settings
 from src.dal.local.redis_adapter import RedisAdapter
-from src.presentation.routes.context_route import context_router
-from src.presentation.routes.input_route import input_router
 from src.presentation.routes.pdf_route import pdf_router
 from src.presentation.routes.quiz_route import quiz_router
-from src.presentation.routes.search_route import search_router
-from src.presentation.routes.source_item_route import source_item_router
 from src.presentation.routes.token_route import ai_token_router
-from src.presentation.routes.topics_route import app_topics_router
 
 settings = app_settings()
 
@@ -47,16 +42,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-app.include_router(source_item_router, tags=["source_items"])
-
-app.include_router(app_topics_router, tags=["app_topics"])
-
-app.include_router(search_router, tags=["search"])
-
-app.include_router(input_router, tags=["input_from_topic"])
-
-app.include_router(context_router, tags=["context"])
 
 app.include_router(pdf_router, tags=["pdf"])
 
