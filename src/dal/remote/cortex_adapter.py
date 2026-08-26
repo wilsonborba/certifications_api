@@ -27,7 +27,7 @@ class CortexAdapter:
         self._timeout = timeout_seconds
         self._tenant_id = tenant_id
 
-    async def execute_question_generation(self, *, prompt: str, tier: int) -> CortexResult:
+    async def execute_question_generation(self, *, prompt: str, tier: int, attachments: list[dict[str, str]] | None = None) -> CortexResult:
         payload = {
             "prompt": prompt,
             "tenant_id": self._tenant_id,
@@ -38,6 +38,7 @@ class CortexAdapter:
             "needs_web": False,
             "use_memory": False,
             "auto_retrieval": False,
+            "attachments": attachments or [],
         }
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
