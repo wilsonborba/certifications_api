@@ -48,13 +48,11 @@ class Settings(BaseSettings):
     GENERATION_PREMIUM_GLOBAL_CONCURRENCY: int = 1
     GENERATION_LEASE_SECONDS: int = 15 * 60
 
-    # FSM S3 credentials are private application credentials. They are loaded
-    # only from `.env`; Flutter is never given either value.
-    FSM_S3_ENDPOINT: str = "http://192.168.1.106:8484"
-    FSM_S3_ACCESS_KEY: str | None = None
-    FSM_S3_SECRET_KEY: str | None = None
-    FSM_S3_REGION: str = "us-east-1"
-    FSM_S3_BUCKET: str = "certifications"
+    # FSM's Media API uses a private per-application bearer key. It is loaded
+    # only from `.env`; Flutter is never given the credential.
+    FSM_MEDIA_ENDPOINT: str = "http://192.168.1.106:8484"
+    FSM_APP_NAME: str = "certifications"
+    FSM_APP_KEY: str | None = None
     STUDY_SOURCE_MAX_BYTES: int = 100 * 1024 * 1024
     STUDY_ACTIVE_MAX_BYTES: int = 150 * 1024 * 1024
 

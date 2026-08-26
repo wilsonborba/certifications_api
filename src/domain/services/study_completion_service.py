@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 from src.dal.local.study_repository import StudyRepository
 from src.dal.remote.cortex_adapter import CortexAdapter, CortexUnavailableError
-from src.dal.remote.fsm_s3_adapter import FsmConfigurationError, FsmS3Adapter, FsmStorageError
+from src.dal.remote.fsm_media_adapter import FsmConfigurationError, FsmMediaAdapter, FsmStorageError
 from src.domain.models.study import SourceStatus, Study, StudyStatus
 
 
@@ -17,7 +17,7 @@ class StudyCompletionError(RuntimeError):
 class StudyCompletionService:
     max_memory_bytes = 10 * 1024 * 1024
 
-    def __init__(self, *, repository: StudyRepository, fsm: FsmS3Adapter, cortex: CortexAdapter) -> None:
+    def __init__(self, *, repository: StudyRepository, fsm: FsmMediaAdapter, cortex: CortexAdapter) -> None:
         self._repository = repository
         self._fsm = fsm
         self._cortex = cortex
@@ -62,9 +62,13 @@ class StudyCompletionService:
         body = json.dumps(memory, ensure_ascii=False, separators=(",", ":")).encode()
         if len(body) > self.max_memory_bytes:
             raise StudyCompletionError("Study memory exceeds the completed-study limit")
-        memory_key = f"studies/{study.id}/memory/study-memory.json"
         try:
-            await self._fsm.put(key=memory_key, body=body, content_type="application/json")
+            memory_key = await self._fsm.upload(
+                album=FsmMediaAdapter.album(study.id),
+                filename="study-memory.json",
+                body=body,
+                content_type="application/json",
+            )
         except (FsmConfigurationError, FsmStorageError) as exc:
             raise StudyCompletionError("Study memory could not be stored") from exc
         # The compact package is now durable. Only then is removal safe.

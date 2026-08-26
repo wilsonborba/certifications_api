@@ -6,7 +6,6 @@ from pydantic import BaseModel, Field
 from src.core.settings import app_settings
 from src.dal.local.study_repository import StudyRepository
 from src.dal.remote.cortex_adapter import CortexAdapter
-from src.dal.remote.fsm_s3_adapter import FsmS3Adapter
 from src.domain.models.generation_policy import StudyDifficulty
 from src.domain.models.study_question import D2Visual, StudyQuestion
 from src.domain.services.generation_policy_service import GenerationPolicyService
