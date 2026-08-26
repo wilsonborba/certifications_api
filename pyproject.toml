@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Asodya Certifications API"
 requires-python = ">=3.11"
 dependencies = [
+  "alembic>=1.14,<2",
   "fastapi",
   "python-multipart",
   "pydantic",
