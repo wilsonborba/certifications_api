@@ -22,7 +22,7 @@ class GenerateQuestionsPayload(BaseModel):
 
 def _service(request: Request) -> QuestionGenerationService:
     settings = app_settings()
-    cortex = CortexAdapter(settings.CORTEX_BASE_URL, timeout_seconds=settings.CORTEX_TIMEOUT_SECONDS, tenant_id=settings.CORTEX_TENANT_ID)
+    cortex = CortexAdapter(settings.CORTEX_BASE_URL, tenant_id=settings.CORTEX_TENANT_ID)
     return QuestionGenerationService(
         repository=StudyRepository(request.app.state.redis), fsm=_fsm(),
         policy=GenerationPolicyService(redis=request.app.state.redis, cortex=cortex, settings=settings),

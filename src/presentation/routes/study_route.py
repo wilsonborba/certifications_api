@@ -56,7 +56,6 @@ def _ingestion_service() -> StudyIngestionService:
         fsm=_fsm(),
         cortex=CortexAdapter(
             settings.CORTEX_BASE_URL,
-            timeout_seconds=settings.CORTEX_TIMEOUT_SECONDS,
             tenant_id=settings.CORTEX_TENANT_ID,
         ),
         settings=settings,
