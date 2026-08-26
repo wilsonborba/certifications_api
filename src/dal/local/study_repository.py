@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from src.dal.local.redis_adapter import RedisAdapter
 from src.domain.models.study import Study, StudySource
+from src.domain.models.study_question import StudyQuestion
 
 
 class StudyRepository:
@@ -58,3 +59,10 @@ class StudyRepository:
         study.sources = [item for item in study.sources if item.id != source_id]
         await self.save(study)
         return source
+
+    async def get_question(self, *, study_id: str, question_id: str) -> dict | None:
+        return await self._redis.get(self._redis.k("study_questions", study_id, question_id))
+
+    async def save_question(self, *, study_id: str, question: StudyQuestion) -> None:
+        await self._redis.set(self._redis.k("study_questions", study_id, question.id), question.model_dump(mode="json"))
+        await self._redis.sadd(self._redis.k("study_questions", "study", study_id), question.id)
