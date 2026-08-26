@@ -40,6 +40,7 @@ class GenerationRequest(BaseModel):
     difficulty: StudyDifficulty
     idempotency_key: str = Field(min_length=16, max_length=128)
     prompt: str = Field(min_length=1, max_length=120_000)
+    use_web: bool = False
 
 
 class GenerationStatus(StrEnum):
