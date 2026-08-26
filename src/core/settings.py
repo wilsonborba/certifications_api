@@ -39,6 +39,21 @@ class Settings(BaseSettings):
 
     QUESTIONS_PREFIX: str = "questions"
 
+    # Cortex is a private service dependency.  Its address is deliberately a
+    # non-secret runtime setting; credentials, if Cortex later requires them,
+    # belong in .env rather than in this class.
+    CORTEX_BASE_URL: str = "http://127.0.0.1:8003"
+    CORTEX_TIMEOUT_SECONDS: float = 45.0
+    CORTEX_TENANT_ID: str = "certifications"
+
+    # Product safeguards, not a second Cortex availability manager. Cortex
+    # owns model routing/cooldowns; Certifications only limits its own work.
+    GENERATION_EASY_DAILY_LIMIT: int = 1
+    GENERATION_PREMIUM_DAILY_LIMIT: int = 1
+    GENERATION_T0_GLOBAL_CONCURRENCY: int = 2
+    GENERATION_PREMIUM_GLOBAL_CONCURRENCY: int = 1
+    GENERATION_LEASE_SECONDS: int = 15 * 60
+
     
 
 
