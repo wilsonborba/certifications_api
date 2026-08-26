@@ -81,7 +81,11 @@ class GenerationPolicyService:
                 return GenerationOutcome(status=GenerationStatus.quota_exhausted, error_code="generation_quota_exhausted")
 
             try:
-                result = await self._cortex.execute_question_generation(prompt=request.prompt, tier=tier)
+                result = await self._cortex.execute_question_generation(
+                    prompt=request.prompt,
+                    tier=tier,
+                    use_web=request.use_web,
+                )
             except CortexUnavailableError:
                 # No credit is consumed when Cortex does not accept/complete work.
                 return GenerationOutcome(status=GenerationStatus.unavailable, retryable=True, error_code="generation_unavailable")

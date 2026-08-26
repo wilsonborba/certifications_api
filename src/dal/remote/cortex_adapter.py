@@ -33,7 +33,14 @@ class CortexAdapter:
         self._tenant_id = tenant_id
         self._transport = transport
 
-    async def execute_question_generation(self, *, prompt: str, tier: int, attachments: list[dict[str, str]] | None = None) -> CortexResult:
+    async def execute_question_generation(
+        self,
+        *,
+        prompt: str,
+        tier: int,
+        use_web: bool = False,
+        attachments: list[dict[str, str]] | None = None,
+    ) -> CortexResult:
         payload = {
             "prompt": prompt,
             "tenant_id": self._tenant_id,
@@ -44,7 +51,9 @@ class CortexAdapter:
             # its structured instructions and source context.
             "normalize_prompt": False,
             "thinking": tier >= 3,
-            "needs_web": True,
+            # Web use is an explicit study choice, never an implicit API
+            # default. Cortex still owns model availability and execution.
+            "needs_web": use_web,
             "use_memory": False,
             "auto_retrieval": False,
             "attachments": attachments or [],

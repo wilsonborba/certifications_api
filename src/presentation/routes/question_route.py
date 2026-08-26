@@ -18,6 +18,7 @@ question_router = APIRouter(prefix="/studies/{study_id}/questions")
 class GenerateQuestionsPayload(BaseModel):
     difficulty: StudyDifficulty
     idempotency_key: str = Field(min_length=16, max_length=128)
+    use_web: bool = False
 
 
 def _service(request: Request) -> QuestionGenerationService:
@@ -37,7 +38,13 @@ async def generate_questions(study_id: str, payload: GenerateQuestionsPayload, r
     if study is None:
         raise HTTPException(status_code=404, detail="Study not found")
     try:
-        questions = await _service(request).generate(user_id=owner_id, study=study, difficulty=payload.difficulty, idempotency_key=payload.idempotency_key)
+        questions = await _service(request).generate(
+            user_id=owner_id,
+            study=study,
+            difficulty=payload.difficulty,
+            idempotency_key=payload.idempotency_key,
+            use_web=payload.use_web,
+        )
     except QuestionContractError as exc:
         detail = str(exc)
         if detail in {"generation_unavailable", "generation_already_running", "generation_failed"}:

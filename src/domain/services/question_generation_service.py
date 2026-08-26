@@ -24,7 +24,15 @@ class QuestionGenerationService:
         self._fsm = fsm
         self._policy = policy
 
-    async def generate(self, *, user_id: str, study: Study, difficulty: str, idempotency_key: str) -> list[StudyQuestion]:
+    async def generate(
+        self,
+        *,
+        user_id: str,
+        study: Study,
+        difficulty: str,
+        idempotency_key: str,
+        use_web: bool = False,
+    ) -> list[StudyQuestion]:
         ready_sources = [source for source in study.sources if source.status is SourceStatus.ready and source.derived_object_key]
         if not ready_sources:
             raise QuestionContractError("Selected sources must finish processing before questions can be generated")
@@ -36,7 +44,13 @@ class QuestionGenerationService:
                 raise QuestionContractError("Selected study context is unavailable") from exc
             context_parts.append(artifact.get("text", ""))
         prompt = self._prompt("\n\n".join(context_parts)[:100_000])
-        request = GenerationRequest(study_id=study.id, difficulty=difficulty, idempotency_key=idempotency_key, prompt=prompt)
+        request = GenerationRequest(
+            study_id=study.id,
+            difficulty=difficulty,
+            idempotency_key=idempotency_key,
+            prompt=prompt,
+            use_web=use_web,
+        )
         study.status = StudyStatus.generating
         await self._repository.save(study)
         outcome = await self._policy.generate(user_id=user_id, request=request)
