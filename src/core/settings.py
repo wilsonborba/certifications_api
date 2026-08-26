@@ -24,7 +24,9 @@ class Settings(BaseSettings):
 
 
     # REDIS
-    REDIS_URL: str = "redis://127.0.0.1:6379/0"
+    # Required: each application receives its own Valkey logical database.
+    # There is intentionally no localhost/database-0 fallback.
+    REDIS_URL: str
     REDIS_NAMESPACE: str = "certifications_api:"
 
     @property
