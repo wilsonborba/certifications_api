@@ -15,7 +15,7 @@ def _service(request: Request) -> StudyCompletionService:
     settings = app_settings()
     return StudyCompletionService(
         repository=StudyRepository(request.app.state.redis), fsm=_fsm(),
-        cortex=CortexAdapter(settings.CORTEX_BASE_URL, timeout_seconds=settings.CORTEX_TIMEOUT_SECONDS, tenant_id=settings.CORTEX_TENANT_ID),
+        cortex=CortexAdapter(settings.CORTEX_BASE_URL, tenant_id=settings.CORTEX_TENANT_ID),
     )
 
 

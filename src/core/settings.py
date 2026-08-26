@@ -37,7 +37,6 @@ class Settings(BaseSettings):
     # non-secret runtime setting; credentials, if Cortex later requires them,
     # belong in .env rather than in this class.
     CORTEX_BASE_URL: str = "http://127.0.0.1:8003"
-    CORTEX_TIMEOUT_SECONDS: float = 45.0
     CORTEX_TENANT_ID: str = "certifications"
 
     # Product safeguards, not a second Cortex availability manager. Cortex

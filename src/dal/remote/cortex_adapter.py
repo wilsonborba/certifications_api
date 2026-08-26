@@ -22,10 +22,16 @@ class CortexResult:
 class CortexAdapter:
     """Small, explicit adapter around Cortex's documented ``POST /execute`` API."""
 
-    def __init__(self, base_url: str, *, timeout_seconds: float, tenant_id: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        tenant_id: str,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._timeout = timeout_seconds
         self._tenant_id = tenant_id
+        self._transport = transport
 
     async def execute_question_generation(self, *, prompt: str, tier: int, attachments: list[dict[str, str]] | None = None) -> CortexResult:
         payload = {
@@ -33,15 +39,20 @@ class CortexAdapter:
             "tenant_id": self._tenant_id,
             "tier": tier,
             "task_type": "education_question_generation",
-            "normalize_prompt": True,
+            # The study/question contract is already constructed by this API.
+            # Keep it intact rather than spending a second model call rewriting
+            # its structured instructions and source context.
+            "normalize_prompt": False,
             "thinking": tier >= 3,
-            "needs_web": False,
+            "needs_web": True,
             "use_memory": False,
             "auto_retrieval": False,
             "attachments": attachments or [],
         }
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
+            # Cortex owns execution deadlines and queue behaviour.  Do not
+            # terminate a valid local model run from this client layer.
+            async with httpx.AsyncClient(timeout=None, transport=self._transport) as client:
                 response = await client.post(f"{self._base_url}/execute", json=payload)
         except httpx.HTTPError as exc:
             raise CortexUnavailableError("Cortex connection failed") from exc
