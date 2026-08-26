@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     # API
     API_KEY_NAME: str = "Authorization"
     API_KEY_SECRET: str  # Will be loaded from .env
+    # Server-to-server credential used only by api_for_apps for waitlist calls.
+    CERTIFICATIONS_SERVICE_KEY: str
     CERTIFICATIONS_DB_HOST: str
     CERTIFICATIONS_DB_PORT: int
     CERTIFICATIONS_DB_USER: str
