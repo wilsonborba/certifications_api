@@ -9,6 +9,7 @@ description = "Asodya Certifications API"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi",
+  "python-multipart",
   "pydantic",
   "uvicorn",
   "pydantic-settings",
@@ -18,14 +19,6 @@ dependencies = [
   "colorlog",
   "cryptography",
   "gunicorn",
-  "requests",
-  "beautifulsoup4",
-  "boto3",
-  "trafilatura",
-  "feedparser",
-  "pandas",
-  "pyarrow",
-  "fastparquet",
   "httpx",
   "pgvector",
   "PyMuPDF",

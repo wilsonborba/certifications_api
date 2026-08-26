@@ -25,29 +25,6 @@ class Settings(BaseSettings):
     environment: str = "development"
 
 
-    # Reddit API settings
-
-    REDDIT_CLIENT_ID: str | None = None
-    REDDIT_CLIENT_SECRET: str | None = None  # keep None if using installed app grant
-    REDDIT_DEVICE_ID: str | None = None      # if installed app, set any stable string
-    REDDIT_SCOPE: str = "read"
-    REDDIT_USER_AGENT: str 
-
-    # StackExchange API settings
-    STACKEXCHANGEOVERFLOW_API_KEY: str | None = None  # Optional, but helps with
-
-    # Meetup API settings (does not provided need a pro subscription)
-    # MEETUP_ACCESS_TOKEN: str | None = None  # OAuth2 Bearer token
-
-    # aws 
-    AWS_ACCESS_KEY_ID: str
-    AWS_SECRET_ACCESS_KEY: str
-    AWS_REGION: str = "ap-southeast-1"
-
-    # Product Hunt API settings
-    PRODUCTHUNT_DEVELOPER_TOKEN: str        # Bearer developer token (from Product Hunt app)
-    PRODUCTHUNT_USER_AGENT: str = "quiz-certify/1.0 (+https://asodya.com)"
-
     # Gemini
 
     GEMINI_API_KEY: str | None = None

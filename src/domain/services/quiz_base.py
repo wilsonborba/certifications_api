@@ -2,7 +2,6 @@
 
 from datetime import datetime
 from typing import List
-from abc import ABC, abstractmethod
 import re, unicodedata, hashlib
 from typing import List, Dict, Any, Optional
 from math import sqrt
@@ -51,32 +50,11 @@ def _sha256(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
-class BaseQuizManager(ABC):
+class BaseQuizManager:
 
     def __init__(self):
         self.db_adapter = DBAdapter()
 
-    
-    @abstractmethod
-    def get_topics(self) -> List[str]:
-        raise NotImplementedError("Subclasses must implement this method.")
-    
-    @abstractmethod
-    def get_input(self):
-        raise NotImplementedError("Subclasses must implement this method.")
-    
-    @abstractmethod
-    async def generate_context(self, input_data, amount_question):
-        raise NotImplementedError("Subclasses must implement this method.")
-    
-    @abstractmethod
-    def get_questions(self):
-        raise NotImplementedError("Subclasses must implement this method.")
-    
-    @abstractmethod
-    def save_questions(self)-> QuizResultModel:
-        raise NotImplementedError("Subclasses must implement this method.")
-    
     def _is_too_similar(
     self,
     *,
@@ -276,7 +254,6 @@ class BaseQuizManager(ABC):
 
 
         
-
 
 
 
