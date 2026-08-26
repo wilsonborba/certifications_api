@@ -49,7 +49,7 @@ def _fsm() -> FsmS3Adapter:
 
 
 def _study_response(study: Study) -> dict:
-    return study.model_dump(mode="json") | {"active_size_bytes": study.active_size_bytes}
+    return study.model_dump(mode="json") | {"active_size_bytes": study.active_size_bytes, "retained_size_bytes": study.retained_size_bytes}
 
 
 def _ingestion_service() -> StudyIngestionService:

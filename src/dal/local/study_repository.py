@@ -66,3 +66,10 @@ class StudyRepository:
     async def save_question(self, *, study_id: str, question: StudyQuestion) -> None:
         await self._redis.set(self._redis.k("study_questions", study_id, question.id), question.model_dump(mode="json"))
         await self._redis.sadd(self._redis.k("study_questions", "study", study_id), question.id)
+
+    async def delete(self, *, study: Study) -> None:
+        question_ids = await self._redis.smembers(self._redis.k("study_questions", "study", study.id))
+        keys = [self._study_key(study.id), self._redis.k("study_questions", "study", study.id)]
+        keys.extend(self._redis.k("study_questions", study.id, str(question_id)) for question_id in question_ids)
+        await self._redis.delete(*keys)
+        await self._redis.srem(self._owner_key(study.owner_id), study.id)

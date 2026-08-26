@@ -9,6 +9,7 @@ from src.presentation.routes.quiz_route import quiz_router
 from src.presentation.routes.token_route import ai_token_router
 from src.presentation.routes.study_route import study_router
 from src.presentation.routes.question_route import question_router
+from src.presentation.routes.study_lifecycle_route import lifecycle_router
 
 settings = app_settings()
 
@@ -54,3 +55,5 @@ app.include_router(ai_token_router, tags=["tokens"])
 app.include_router(study_router, tags=["studies"])
 
 app.include_router(question_router, tags=["questions"])
+
+app.include_router(lifecycle_router, tags=["study lifecycle"])
