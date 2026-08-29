@@ -20,8 +20,11 @@ class StudyStatus(StrEnum):
 
 class SourceKind(StrEnum):
     pdf = "pdf"
-    audio = "audio"
+    docx = "docx"
+    csv = "csv"
     text = "text"
+    audio = "audio"
+    video = "video"
 
 
 class SourceStatus(StrEnum):
@@ -45,11 +48,15 @@ class SourceSelection(BaseModel):
         pairs = ((self.page_start, self.page_end), (self.audio_start_ms, self.audio_end_ms), (self.line_start, self.line_end))
         if any(start is not None and end is not None and start > end for start, end in pairs):
             raise ValueError("Selection end must not precede its start")
-        valid = {
+        valid_map = {
             SourceKind.pdf: (self.page_start, self.page_end),
-            SourceKind.audio: (self.audio_start_ms, self.audio_end_ms),
+            SourceKind.docx: (self.page_start, self.page_end),
             SourceKind.text: (self.line_start, self.line_end),
-        }[kind]
+            SourceKind.csv: (self.line_start, self.line_end),
+            SourceKind.audio: (self.audio_start_ms, self.audio_end_ms),
+            SourceKind.video: (self.audio_start_ms, self.audio_end_ms),
+        }
+        valid = valid_map[kind]
         if valid[0] is None or valid[1] is None:
             raise ValueError(f"A complete selection is required for {kind.value}")
 

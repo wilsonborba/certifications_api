@@ -49,12 +49,16 @@ class StudyIngestionService:
             raise IngestionError("A source selection is required before processing")
         raw = await self._fsm.get(key=source.object_key)
         if source.kind is SourceKind.pdf:
-            text, ranges = self._extract_pdf(raw, source.selection.page_start or 0, source.selection.page_end or 0)
+            text, ranges = self._extract_pdf(raw, source.selection.page_start or 1, source.selection.page_end or 1)
+        elif source.kind is SourceKind.docx:
+            text, ranges = self._extract_docx(raw, source.selection.page_start or 1, source.selection.page_end or 1)
+        elif source.kind is SourceKind.csv:
+            text, ranges = self._extract_csv(raw, source.selection.line_start or 1, source.selection.line_end or 1)
         elif source.kind is SourceKind.text:
-            text, ranges = self._extract_text(raw, source.selection.line_start or 0, source.selection.line_end or 0)
+            text, ranges = self._extract_text(raw, source.selection.line_start or 1, source.selection.line_end or 1)
         else:
             text = await self._transcribe_audio(raw, source)
-            ranges = [{"audio_start_ms": source.selection.audio_start_ms, "audio_end_ms": source.selection.audio_end_ms}]
+            ranges = [{"audio_start_ms": source.selection.audio_start_ms or 0, "audio_end_ms": source.selection.audio_end_ms or 0}]
         normalized = self._normalize(text)
         if not normalized:
             raise IngestionError("The selected source did not yield usable text")
@@ -95,6 +99,36 @@ class StudyIngestionService:
         if start < 1 or end < start or end > len(lines):
             raise IngestionError("The selected text lines are invalid")
         return "\n".join(lines[start - 1:end]), [{"line_start": start, "line_end": end}]
+
+    @staticmethod
+    def _extract_docx(raw: bytes, start: int, end: int) -> tuple[str, list[dict[str, int]]]:
+        try:
+            import docx
+            doc = docx.Document(io.BytesIO(raw))
+            paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+            if not paragraphs:
+                raise IngestionError("The Word document has no text content")
+            start = max(1, min(start, len(paragraphs)))
+            end = min(max(start, end), len(paragraphs))
+            selected = paragraphs[start - 1 : end]
+            return "\n\n".join(selected), [{"page_start": start, "page_end": end}]
+        except Exception as exc:
+            raise IngestionError("The Word document could not be read") from exc
+
+    @staticmethod
+    def _extract_csv(raw: bytes, start: int, end: int) -> tuple[str, list[dict[str, int]]]:
+        try:
+            import csv
+            content = raw.decode("utf-8-sig")
+            reader = list(csv.reader(io.StringIO(content)))
+            if not reader:
+                raise IngestionError("The CSV file is empty")
+            start = max(1, min(start, len(reader)))
+            end = min(max(start, end), len(reader))
+            selected_rows = [", ".join(row) for row in reader[start - 1 : end]]
+            return "\n".join(selected_rows), [{"line_start": start, "line_end": end}]
+        except Exception as exc:
+            raise IngestionError("The CSV file could not be read") from exc
 
     async def _transcribe_audio(self, raw: bytes, source: StudySource) -> str:
         # Cortex's documented attachment ingestion invokes its local Whisper

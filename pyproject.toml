@@ -28,6 +28,7 @@ dependencies = [
   "yara-python",
   "redis",
   "msgpack-python",
+  "python-docx",
 ]
 
 [tool.setuptools.packages.find]
