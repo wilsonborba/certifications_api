@@ -50,6 +50,19 @@ class DBAdapter:
         finally:
             conn.close()
 
+    @contextmanager
+    def session_scope(self):
+        from sqlalchemy.orm import Session
+        session = Session(self.engine)
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
     def get_inspector(self):
         return inspect(self.engine)
 

@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import re
 import secrets
-import asyncio
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.core.logs import error
 from src.core.settings import app_settings
-from src.dal.local.redis_adapter import RedisAdapterError
+from src.dal.local.db_adapter import DBAdapter
+from src.dal.local.orm import PlanWaitlist, User
 
 waitlist_router = APIRouter(prefix="/waitlist")
 
@@ -59,11 +61,10 @@ async def _rate_limit(request: Request, email: str) -> None:
 
 @waitlist_router.post("", status_code=status.HTTP_202_ACCEPTED)
 async def join_waitlist(payload: WaitlistPayload, request: Request) -> dict:
-    """Record one public product-interest request per normalized email/plan.
+    """Record one product-interest request per normalized email/plan in PostgreSQL.
 
-    Only api_for_apps may call this route. It supplies the service credential
-    and the server-side Supabase registration annotation. Waitlist metadata is
-    kept in Redis for this MVP; FSM remains exclusively file storage.
+    Only api_for_apps may call this route. It supplies the service credential,
+    optional Supabase X-UUID, and server-side registration annotation.
     """
     settings = app_settings()
     provided_key = request.headers.get("x-certifications-service-key", "")
@@ -78,23 +79,55 @@ async def join_waitlist(payload: WaitlistPayload, request: Request) -> dict:
     if registered not in {"true", "false"}:
         raise HTTPException(status_code=400, detail="Invalid waitlist context")
 
-    digest = hashlib.sha256(f"{payload.plan}:{email}".encode("utf-8")).hexdigest()
-    record_key = request.app.state.redis.k("waitlist", payload.plan, digest)
+    user_uuid = request.headers.get("x-uuid")
+    db = DBAdapter()
+    now = datetime.now(UTC)
+
     try:
-        await request.app.state.redis.set(
-            record_key,
-            {
-                "email": email,
-                "plan": payload.plan,
-                "is_registered": registered == "true",
-                "requested_at": datetime.now(UTC).isoformat(),
-            },
-            nx=True,
-        )
-    except RedisAdapterError as exc:
-        error(f"Waitlist recording failed: {exc}")
+        with db.session_scope() as session:
+            # 1. Lazy provisioning of user if user_uuid is provided from Gateway
+            if user_uuid:
+                user_stmt = (
+                    pg_insert(User)
+                    .values(id=user_uuid, email=email, created_at=now, updated_at=now)
+                    .on_conflict_do_update(
+                        index_elements=["id"],
+                        set_={"email": email, "updated_at": now},
+                    )
+                )
+                session.execute(user_stmt)
+
+            # 2. Upsert waitlist entry for (email, plan)
+            waitlist_stmt = (
+                pg_insert(PlanWaitlist)
+                .values(
+                    user_id=user_uuid if user_uuid else None,
+                    email=email,
+                    plan=payload.plan,
+                    is_registered=(registered == "true"),
+                    status="pending",
+                    ip_address=_request_ip(request),
+                    user_agent=request.headers.get("user-agent"),
+                    requested_at=now,
+                    updated_at=now,
+                )
+                .on_conflict_do_update(
+                    constraint="uq_plan_waitlist_email_plan",
+                    set_={
+                        "user_id": user_uuid if user_uuid else PlanWaitlist.user_id,
+                        "is_registered": (registered == "true"),
+                        "ip_address": _request_ip(request),
+                        "user_agent": request.headers.get("user-agent"),
+                        "updated_at": now,
+                    },
+                )
+            )
+            session.execute(waitlist_stmt)
+    except Exception as exc:
+        error(f"Waitlist PostgreSQL persistence failed: {exc}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Waitlist is temporarily unavailable",
         ) from None
+
     return {"data": {"accepted": True}, "message": "Waitlist request accepted"}
