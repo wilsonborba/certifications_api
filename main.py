@@ -12,6 +12,7 @@ from src.presentation.routes.study_route import study_router
 from src.presentation.routes.question_route import question_router
 from src.presentation.routes.study_lifecycle_route import lifecycle_router
 from src.presentation.routes.waitlist_route import waitlist_router
+from src.presentation.routes.quiz_governance_route import quiz_router
 
 settings = app_settings()
 
@@ -71,3 +72,5 @@ app.include_router(question_router, tags=["questions"])
 app.include_router(lifecycle_router, tags=["study lifecycle"])
 
 app.include_router(waitlist_router, tags=["waitlist"])
+
+app.include_router(quiz_router, tags=["quizzes"])
