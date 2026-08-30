@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, ValidationError
@@ -17,6 +18,24 @@ from src.domain.services.question_generation_service import QuestionContractErro
 from src.presentation.routes.study_route import _owner_id
 
 quiz_router = APIRouter(prefix="/quizzes")
+
+
+def _same_user(a: str | None, b: str | None) -> bool:
+    """Compares two UUID strings by value, not text.
+
+    Postgres's native uuid columns always read back in canonical dashed
+    form regardless of how they were written, while the x-uuid header this
+    app receives (built straight from the session's user_uuid_id, see
+    api_for_apps's apps_route.py) is undashed. A plain `==`/`!=` between
+    those two would treat the same user as a stranger; this compares the
+    actual UUID value instead.
+    """
+    if a is None or b is None:
+        return a == b
+    try:
+        return UUID(a) == UUID(b)
+    except ValueError:
+        return a == b
 
 
 def _sanitize_quiz_data(quiz_data: dict[str, Any]) -> dict[str, Any]:
@@ -153,7 +172,7 @@ async def get_completed_quiz(quiz_id: str, request: Request) -> dict:
         quiz = session.get(CompletedQuiz, quiz_id)
         if not quiz or quiz.status != "active":
             raise HTTPException(status_code=404, detail="Quiz not found")
-        if quiz.visibility == "private" and quiz.owner_id != caller_uuid:
+        if quiz.visibility == "private" and not _same_user(quiz.owner_id, caller_uuid):
             raise HTTPException(status_code=403, detail="Access denied to private quiz")
         return {
             "data": {
@@ -179,7 +198,7 @@ async def update_quiz_visibility(
     db = DBAdapter()
     with db.session_scope() as session:
         quiz = session.get(CompletedQuiz, quiz_id)
-        if not quiz or quiz.owner_id != owner_id:
+        if not quiz or not _same_user(quiz.owner_id, owner_id):
             raise HTTPException(status_code=404, detail="Quiz not found")
         quiz.visibility = payload.visibility
         quiz.updated_at = datetime.now(UTC)
@@ -192,7 +211,7 @@ async def delete_completed_quiz(quiz_id: str, request: Request) -> Response:
     db = DBAdapter()
     with db.session_scope() as session:
         quiz = session.get(CompletedQuiz, quiz_id)
-        if not quiz or quiz.owner_id != owner_id:
+        if not quiz or not _same_user(quiz.owner_id, owner_id):
             raise HTTPException(status_code=404, detail="Quiz not found")
 
         # Deletion Governance Rule: Block deletion of public quizzes with active third-party attempts
@@ -218,7 +237,7 @@ async def create_share_token(
 
     with db.session_scope() as session:
         quiz = session.get(CompletedQuiz, quiz_id)
-        if not quiz or quiz.owner_id != owner_id:
+        if not quiz or not _same_user(quiz.owner_id, owner_id):
             raise HTTPException(status_code=404, detail="Quiz not found")
 
         share = QuizShare(
@@ -291,7 +310,7 @@ async def submit_quiz_attempt(
         # Increment usage & attempts
         share.current_uses += 1
         quiz.total_attempts += 1
-        if caller_uuid != quiz.owner_id:
+        if not _same_user(caller_uuid, quiz.owner_id):
             quiz.third_party_attempts += 1
 
         attempt = QuizAttempt(
@@ -414,7 +433,7 @@ async def get_quiz_leaderboard(quiz_id: str, request: Request) -> dict:
         if not quiz or quiz.status != "active":
             raise HTTPException(status_code=404, detail="Quiz not found")
 
-        if quiz.visibility == "private" and quiz.owner_id != caller_uuid:
+        if quiz.visibility == "private" and not _same_user(quiz.owner_id, caller_uuid):
             raise HTTPException(status_code=403, detail="Leaderboard unavailable for private quiz")
 
         attempts = session.scalars(
