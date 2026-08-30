@@ -64,7 +64,11 @@ async def join_waitlist(payload: WaitlistPayload, request: Request) -> dict:
     """Record one product-interest request per normalized email/plan in PostgreSQL.
 
     Only api_for_apps may call this route. It supplies the service credential,
-    optional Supabase X-UUID, and server-side registration annotation.
+    optional Supabase X-UUID and X-User-Email, and server-side registration
+    annotation. Supports both logged-in and unregistered (anonymous,
+    pre-login) waitlist requests: when the gateway forwards an authenticated
+    session's X-User-Email, that trusted value is used for the users upsert;
+    otherwise the request body's own payload.email is used instead.
     """
     settings = app_settings()
     provided_key = request.headers.get("x-certifications-service-key", "")
@@ -80,19 +84,24 @@ async def join_waitlist(payload: WaitlistPayload, request: Request) -> dict:
         raise HTTPException(status_code=400, detail="Invalid waitlist context")
 
     user_uuid = request.headers.get("x-uuid")
+    trusted_email_header = request.headers.get("x-user-email")
+    user_email = _normalize_email(trusted_email_header) if trusted_email_header else email
     db = DBAdapter()
     now = datetime.now(UTC)
 
     try:
         with db.session_scope() as session:
-            # 1. Lazy provisioning of user if user_uuid is provided from Gateway
+            # 1. Lazy provisioning of user if user_uuid is provided from Gateway.
+            # The users table upsert must use the trusted X-User-Email header
+            # (the authenticated session's email) rather than the request
+            # body's payload.email, which the caller fully controls.
             if user_uuid:
                 user_stmt = (
                     pg_insert(User)
-                    .values(id=user_uuid, email=email, created_at=now, updated_at=now)
+                    .values(id=user_uuid, email=user_email, created_at=now, updated_at=now)
                     .on_conflict_do_update(
                         index_elements=["id"],
-                        set_={"email": email, "updated_at": now},
+                        set_={"email": user_email, "updated_at": now},
                     )
                 )
                 session.execute(user_stmt)
