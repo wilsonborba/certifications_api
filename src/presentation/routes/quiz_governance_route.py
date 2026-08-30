@@ -246,6 +246,8 @@ async def submit_quiz_attempt(
         share = session.scalars(select(QuizShare).where(QuizShare.token == token)).first()
         if not share or not share.is_active or share.expires_at < now:
             raise HTTPException(status_code=410, detail="Shared link has expired or is invalid")
+        if share.max_uses is not None and share.current_uses >= share.max_uses:
+            raise HTTPException(status_code=410, detail="Shared link usage limit reached")
 
         quiz = session.get(CompletedQuiz, share.quiz_id)
         if not quiz or quiz.status != "active":
