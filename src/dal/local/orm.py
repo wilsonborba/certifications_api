@@ -19,6 +19,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -58,8 +59,12 @@ class PlanWaitlist(Base):
     )
     email: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
     plan: Mapped[str] = mapped_column(String(50), nullable=False)
-    is_registered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
+    is_registered: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="pending", server_default="pending"
+    )
     ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
     requested_at: Mapped[datetime] = mapped_column(
@@ -87,11 +92,21 @@ class CompletedQuiz(Base):
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    visibility: Mapped[str] = mapped_column(String(20), nullable=False, default="private")
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
-    total_questions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    total_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    third_party_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    visibility: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="private", server_default="private"
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="active", server_default="active"
+    )
+    total_questions: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    total_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    third_party_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     quiz_data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -117,8 +132,12 @@ class QuizShare(Base):
     token: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     max_uses: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    current_uses: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    current_uses: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -140,9 +159,15 @@ class QuizAttempt(Base):
     )
     user_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     score: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
-    correct_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    wrong_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    time_spent_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    correct_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    wrong_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    time_spent_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     answers_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     completed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
