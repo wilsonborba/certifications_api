@@ -112,13 +112,13 @@ async def list_completed_quizzes(request: Request) -> dict:
 
 @quiz_router.get("/completed/{quiz_id}")
 async def get_completed_quiz(quiz_id: str, request: Request) -> dict:
-    owner_id = _owner_id(request)
     db = DBAdapter()
+    caller_uuid = request.headers.get("x-uuid")
     with db.session_scope() as session:
         quiz = session.get(CompletedQuiz, quiz_id)
         if not quiz or quiz.status != "active":
             raise HTTPException(status_code=404, detail="Quiz not found")
-        if quiz.visibility == "private" and quiz.owner_id != owner_id:
+        if quiz.visibility == "private" and quiz.owner_id != caller_uuid:
             raise HTTPException(status_code=403, detail="Access denied to private quiz")
         return {
             "data": {
