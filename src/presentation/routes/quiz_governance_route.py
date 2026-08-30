@@ -5,16 +5,42 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.core.logs import error
 from src.dal.local.db_adapter import DBAdapter
 from src.dal.local.orm import CompletedQuiz, QuizAttempt, QuizShare, User
+from src.domain.models.study_question import D2Visual
+from src.domain.services.question_generation_service import QuestionContractError, QuestionGenerationService
 from src.presentation.routes.study_route import _owner_id
 
 quiz_router = APIRouter(prefix="/quizzes")
+
+
+def _sanitize_quiz_data(quiz_data: dict[str, Any]) -> dict[str, Any]:
+    """Strips the server-only answer key (correct_index, explanation) from every
+    question before quiz_data ever leaves the API, whether the caller is the
+    owner or a shared-link visitor previewing the quiz before playing it."""
+    questions = quiz_data.get("questions")
+    if not isinstance(questions, list):
+        return quiz_data
+    sanitized = dict(quiz_data)
+    sanitized["questions"] = [
+        {key: value for key, value in question.items() if key not in {"correct_index", "explanation"}}
+        if isinstance(question, dict)
+        else question
+        for question in questions
+    ]
+    return sanitized
+
+
+def _find_question(quiz_data: dict[str, Any], question_id: str) -> dict[str, Any] | None:
+    for question in quiz_data.get("questions", []):
+        if isinstance(question, dict) and question.get("id") == question_id:
+            return question
+    return None
 
 
 class CreateCompletedQuizPayload(BaseModel):
@@ -32,6 +58,15 @@ class UpdateVisibilityPayload(BaseModel):
 class CreateShareTokenPayload(BaseModel):
     expires_in_hours: int = Field(default=24, ge=1, le=8760)
     max_uses: int | None = Field(default=None, ge=1)
+
+
+class SharedAnswerSubmission(BaseModel):
+    question_id: str
+    choice_index: int = Field(ge=0)
+
+
+class GradeSharedQuizPayload(BaseModel):
+    answers: list[SharedAnswerSubmission] = Field(min_length=1, max_length=50)
 
 
 class SubmitAttemptPayload(BaseModel):
@@ -130,7 +165,7 @@ async def get_completed_quiz(quiz_id: str, request: Request) -> dict:
                 "total_questions": quiz.total_questions,
                 "total_attempts": quiz.total_attempts,
                 "third_party_attempts": quiz.third_party_attempts,
-                "quiz_data": quiz.quiz_data,
+                "quiz_data": _sanitize_quiz_data(quiz.quiz_data),
                 "created_at": quiz.created_at.isoformat(),
             }
         }
@@ -228,7 +263,7 @@ async def get_shared_quiz(token: str) -> dict:
                 "title": quiz.title,
                 "description": quiz.description,
                 "total_questions": quiz.total_questions,
-                "quiz_data": quiz.quiz_data,
+                "quiz_data": _sanitize_quiz_data(quiz.quiz_data),
                 "expires_at": share.expires_at.isoformat(),
             }
         }
@@ -281,6 +316,92 @@ async def submit_quiz_attempt(
             },
             "message": "Attempt recorded",
         }
+
+
+@quiz_router.post("/shared/{token}/grade")
+async def grade_shared_quiz(token: str, payload: GradeSharedQuizPayload, request: Request) -> dict:
+    """Grades a shared-link attempt against the answer key kept server-side in
+    quiz_data, without ever exposing it. Does not consume a use of the share
+    link (only the actual /attempt submission below does that)."""
+    db = DBAdapter()
+    now = datetime.now(UTC)
+
+    with db.session_scope() as session:
+        share = session.scalars(select(QuizShare).where(QuizShare.token == token)).first()
+        if not share or not share.is_active or share.expires_at < now:
+            raise HTTPException(status_code=410, detail="Shared link has expired or is invalid")
+        if share.max_uses is not None and share.current_uses >= share.max_uses:
+            raise HTTPException(status_code=410, detail="Shared link usage limit reached")
+
+        quiz = session.get(CompletedQuiz, share.quiz_id)
+        if not quiz or quiz.status != "active":
+            raise HTTPException(status_code=404, detail="Quiz not found")
+
+        results: list[dict] = []
+        correct_count = 0
+        for answer in payload.answers:
+            question = _find_question(quiz.quiz_data, answer.question_id)
+            if question is None:
+                raise HTTPException(status_code=404, detail="Question not found")
+            correct_index = question.get("correct_index")
+            is_correct = correct_index is not None and answer.choice_index == correct_index
+            if is_correct:
+                correct_count += 1
+            results.append(
+                {
+                    "question_id": answer.question_id,
+                    "chosen_index": answer.choice_index,
+                    "correct_index": correct_index,
+                    "is_correct": is_correct,
+                    "explanation": question.get("explanation"),
+                }
+            )
+
+        total = len(payload.answers)
+        wrong_count = total - correct_count
+        score = round((correct_count / total) * 100, 2) if total else 0.0
+        return {
+            "data": {
+                "score": score,
+                "correct_count": correct_count,
+                "wrong_count": wrong_count,
+                "total_questions": total,
+                "results": results,
+            },
+            "message": "Answers graded",
+        }
+
+
+@quiz_router.get("/shared/{token}/questions/{question_id}/visual")
+async def render_shared_question_visual(token: str, question_id: str) -> Response:
+    db = DBAdapter()
+    now = datetime.now(UTC)
+
+    with db.session_scope() as session:
+        share = session.scalars(select(QuizShare).where(QuizShare.token == token)).first()
+        if not share or not share.is_active or share.expires_at < now:
+            raise HTTPException(status_code=410, detail="Shared link has expired or is invalid")
+
+        quiz = session.get(CompletedQuiz, share.quiz_id)
+        if not quiz or quiz.status != "active":
+            raise HTTPException(status_code=404, detail="Quiz not found")
+
+        question = _find_question(quiz.quiz_data, question_id)
+        if question is None:
+            raise HTTPException(status_code=404, detail="Question not found")
+        visual = question.get("visual") or {}
+        if not isinstance(visual, dict) or visual.get("kind") != "d2":
+            raise HTTPException(status_code=404, detail="Diagram not found")
+
+        try:
+            d2_visual = D2Visual.model_validate(visual)
+        except ValidationError:
+            raise HTTPException(status_code=404, detail="Diagram not found") from None
+        try:
+            svg = QuestionGenerationService.render_d2_svg(d2_visual)
+        except QuestionContractError:
+            raise HTTPException(status_code=503, detail="Diagram is temporarily unavailable") from None
+        return Response(content=svg, media_type="image/svg+xml", headers={"Cache-Control": "private, max-age=300"})
 
 
 @quiz_router.get("/completed/{quiz_id}/leaderboard")

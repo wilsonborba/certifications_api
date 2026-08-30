@@ -21,6 +21,15 @@ class GenerateQuestionsPayload(BaseModel):
     use_web: bool = False
 
 
+class AnswerSubmission(BaseModel):
+    question_id: str
+    choice_index: int = Field(ge=0)
+
+
+class SubmitAnswersPayload(BaseModel):
+    answers: list[AnswerSubmission] = Field(min_length=1, max_length=50)
+
+
 def _service(request: Request) -> QuestionGenerationService:
     settings = app_settings()
     cortex = CortexAdapter(settings.CORTEX_BASE_URL, tenant_id=settings.CORTEX_TENANT_ID)
@@ -53,6 +62,49 @@ async def generate_questions(study_id: str, payload: GenerateQuestionsPayload, r
             raise HTTPException(status_code=429, detail="Question generation limit reached") from None
         raise HTTPException(status_code=422, detail="Question generation could not use this study") from None
     return {"data": [question.for_answering() for question in questions], "message": "Questions generated"}
+
+
+@question_router.post("/submit")
+async def submit_answers(study_id: str, payload: SubmitAnswersPayload, request: Request) -> dict:
+    owner_id = _owner_id(request)
+    repository = StudyRepository(request.app.state.redis)
+    study = await repository.get_owned(owner_id=owner_id, study_id=study_id)
+    if study is None:
+        raise HTTPException(status_code=404, detail="Study not found")
+
+    results: list[dict] = []
+    correct_count = 0
+    for answer in payload.answers:
+        raw = await repository.get_question(study_id=study_id, question_id=answer.question_id)
+        if raw is None:
+            raise HTTPException(status_code=404, detail="Question not found")
+        question = StudyQuestion.model_validate(raw)
+        is_correct = answer.choice_index == question.correct_index
+        if is_correct:
+            correct_count += 1
+        results.append(
+            {
+                "question_id": question.id,
+                "chosen_index": answer.choice_index,
+                "correct_index": question.correct_index,
+                "is_correct": is_correct,
+                "explanation": question.explanation,
+            }
+        )
+
+    total = len(payload.answers)
+    wrong_count = total - correct_count
+    score = round((correct_count / total) * 100, 2) if total else 0.0
+    return {
+        "data": {
+            "score": score,
+            "correct_count": correct_count,
+            "wrong_count": wrong_count,
+            "total_questions": total,
+            "results": results,
+        },
+        "message": "Answers graded",
+    }
 
 
 @question_router.get("/{question_id}/visual")
