@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     FSM_APP_KEY: str | None = None
     STUDY_SOURCE_MAX_BYTES: int = 100 * 1024 * 1024
     STUDY_ACTIVE_MAX_BYTES: int = 150 * 1024 * 1024
+    # Aggregate cap across every study a single user owns, on top of the
+    # per-study STUDY_ACTIVE_MAX_BYTES cap above.
+    USER_TOTAL_MAX_BYTES: int = 500 * 1024 * 1024
 
     
 

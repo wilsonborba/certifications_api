@@ -46,8 +46,19 @@ def _fsm() -> FsmMediaAdapter:
     )
 
 
-def _study_response(study: Study) -> dict:
-    return study.model_dump(mode="json") | {"active_size_bytes": study.active_size_bytes, "retained_size_bytes": study.retained_size_bytes}
+async def _account_used_bytes(repository: StudyRepository, owner_id: str) -> int:
+    """Aggregate retained_size_bytes across every study a user owns."""
+    studies = await repository.list_owned(owner_id=owner_id)
+    return sum(study.retained_size_bytes for study in studies)
+
+
+def _study_response(study: Study, *, account_used_bytes: int, account_max_bytes: int) -> dict:
+    return study.model_dump(mode="json") | {
+        "active_size_bytes": study.active_size_bytes,
+        "retained_size_bytes": study.retained_size_bytes,
+        "account_used_bytes": account_used_bytes,
+        "account_max_bytes": account_max_bytes,
+    }
 
 
 def _ingestion_service() -> StudyIngestionService:
@@ -64,22 +75,45 @@ def _ingestion_service() -> StudyIngestionService:
 
 @study_router.post("", status_code=status.HTTP_201_CREATED)
 async def create_study(payload: CreateStudyPayload, request: Request) -> dict:
-    study = await _repo(request).create(owner_id=_owner_id(request), name=payload.name.strip())
-    return {"data": _study_response(study), "message": "Study created"}
+    owner_id = _owner_id(request)
+    repository = _repo(request)
+    study = await repository.create(owner_id=owner_id, name=payload.name.strip())
+    settings = app_settings()
+    account_used_bytes = await _account_used_bytes(repository, owner_id)
+    return {
+        "data": _study_response(study, account_used_bytes=account_used_bytes, account_max_bytes=settings.USER_TOTAL_MAX_BYTES),
+        "message": "Study created",
+    }
 
 
 @study_router.get("")
 async def list_studies(request: Request) -> dict:
-    studies = await _repo(request).list_owned(owner_id=_owner_id(request))
-    return {"data": [_study_response(study) for study in studies], "message": "Studies retrieved"}
+    owner_id = _owner_id(request)
+    studies = await _repo(request).list_owned(owner_id=owner_id)
+    settings = app_settings()
+    account_used_bytes = sum(study.retained_size_bytes for study in studies)
+    return {
+        "data": [
+            _study_response(study, account_used_bytes=account_used_bytes, account_max_bytes=settings.USER_TOTAL_MAX_BYTES)
+            for study in studies
+        ],
+        "message": "Studies retrieved",
+    }
 
 
 @study_router.get("/{study_id}")
 async def get_study(study_id: str, request: Request) -> dict:
-    study = await _repo(request).get_owned(owner_id=_owner_id(request), study_id=study_id)
+    owner_id = _owner_id(request)
+    repository = _repo(request)
+    study = await repository.get_owned(owner_id=owner_id, study_id=study_id)
     if study is None:
         raise HTTPException(status_code=404, detail="Study not found")
-    return {"data": _study_response(study), "message": "Study retrieved"}
+    settings = app_settings()
+    account_used_bytes = await _account_used_bytes(repository, owner_id)
+    return {
+        "data": _study_response(study, account_used_bytes=account_used_bytes, account_max_bytes=settings.USER_TOTAL_MAX_BYTES),
+        "message": "Study retrieved",
+    }
 
 
 @study_router.post("/{study_id}/sources", status_code=status.HTTP_201_CREATED)
@@ -105,6 +139,9 @@ async def upload_source(
         raise HTTPException(status_code=413, detail="Source exceeds the per-file limit")
     if study.active_size_bytes + size > settings.STUDY_ACTIVE_MAX_BYTES:
         raise HTTPException(status_code=413, detail="Study storage limit exceeded")
+    account_used_bytes = await _account_used_bytes(repository, owner_id)
+    if account_used_bytes + size > settings.USER_TOTAL_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Account storage limit exceeded")
     if kind is SourceKind.pdf and file.content_type not in {"application/pdf", "application/x-pdf"}:
         raise HTTPException(status_code=422, detail="A PDF file is required")
     source_id = str(uuid4())
@@ -174,6 +211,9 @@ async def ingest_source(study_id: str, source_id: str, request: Request) -> dict
         settings = app_settings()
         if study.active_size_bytes + len(body) > settings.STUDY_ACTIVE_MAX_BYTES:
             raise IngestionError("Processing would exceed the study storage limit")
+        account_used_bytes = await _account_used_bytes(repository, owner_id)
+        if account_used_bytes + len(body) > settings.USER_TOTAL_MAX_BYTES:
+            raise IngestionError("Processing would exceed the account storage limit")
         source.derived_object_key = await _fsm().upload(
             album=FsmMediaAdapter.album(study.id),
             filename=f"{source.id}-ingestion.json",
