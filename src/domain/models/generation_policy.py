@@ -18,9 +18,13 @@ class TierWeight(BaseModel):
 
 
 DEFAULT_TIER_WEIGHTS: dict[StudyDifficulty, tuple[TierWeight, ...]] = {
+    # Basic/easy is the only difficulty exposed in the UI (#45) and is
+    # promised as fast, local, single-model generation — tier 0 is the only
+    # tier that guarantees that (allow_external=False, max_model_calls=1 in
+    # cortex's tier envelope). No fallback weight to tier 1+: that would let
+    # some chunks silently escape to slow multi-provider external fallback.
     StudyDifficulty.easy: (
-        TierWeight(tier=0, weight=80), TierWeight(tier=1, weight=15),
-        TierWeight(tier=2, weight=4), TierWeight(tier=3, weight=1),
+        TierWeight(tier=0, weight=100),
     ),
     StudyDifficulty.medium: (
         TierWeight(tier=0, weight=45), TierWeight(tier=1, weight=25),
@@ -41,6 +45,7 @@ class GenerationRequest(BaseModel):
     idempotency_key: str = Field(min_length=16, max_length=128)
     prompt: str = Field(min_length=1, max_length=120_000)
     use_web: bool = False
+    consume_credit: bool = True
 
 
 class GenerationStatus(StrEnum):

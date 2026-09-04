@@ -5,9 +5,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
 
-from src.core.logs import error
+from src.core.logs import LogTarget, configure_logging, error
 from src.core.settings import app_settings
 from src.dal.local.redis_adapter import RedisAdapter, RedisAdapterError
+from src.presentation.routes.logs_stream_route import logs_router
 from src.presentation.routes.study_route import study_router
 from src.presentation.routes.question_route import question_router
 from src.presentation.routes.study_lifecycle_route import lifecycle_router
@@ -19,6 +20,7 @@ settings = app_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_logging(target=LogTarget.API, log_file=settings.LOG_FILE)
     adapter = RedisAdapter(settings.REDIS_URL, namespace=settings.REDIS_NAMESPACE)
     try:
         await adapter.connect()
@@ -74,3 +76,5 @@ app.include_router(lifecycle_router, tags=["study lifecycle"])
 app.include_router(waitlist_router, tags=["waitlist"])
 
 app.include_router(quiz_router, tags=["quizzes"])
+
+app.include_router(logs_router)

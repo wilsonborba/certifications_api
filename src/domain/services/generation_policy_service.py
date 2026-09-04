@@ -50,10 +50,30 @@ class GenerationPolicyService:
         day = datetime.now(UTC).date().isoformat()
         credit_kind = "easy" if request.difficulty is StudyDifficulty.easy else "premium"
         credit_key = self._redis.k("generation", "credits", credit_kind, user_id, day)
+        
+        # Check custom user limit from PostgreSQL
+        custom_limit = None
+        try:
+            from src.dal.local.db_adapter import DBAdapter
+            from src.dal.local.orm import UserGenerationLimit
+            from sqlalchemy import select
+            with DBAdapter().session_scope() as session:
+                entry = session.execute(
+                    select(UserGenerationLimit).where(UserGenerationLimit.user_id == user_id)
+                ).scalar_one_or_none()
+                if entry:
+                    custom_limit = entry.daily_limit
+        except Exception:
+            pass
+
         credit_limit = (
-            self._settings.GENERATION_EASY_DAILY_LIMIT
-            if credit_kind == "easy"
-            else self._settings.GENERATION_PREMIUM_DAILY_LIMIT
+            custom_limit
+            if custom_limit is not None
+            else (
+                self._settings.GENERATION_EASY_DAILY_LIMIT
+                if credit_kind == "easy"
+                else self._settings.GENERATION_PREMIUM_DAILY_LIMIT
+            )
         )
         global_limit = (
             self._settings.GENERATION_T0_GLOBAL_CONCURRENCY
@@ -76,9 +96,10 @@ class GenerationPolicyService:
                 await self._redis.release_lock(user_lock)
                 return GenerationOutcome(status=GenerationStatus.unavailable, retryable=True, error_code="generation_unavailable")
 
-            used = int(await self._redis.raw.get(credit_key) or 0)
-            if used >= credit_limit:
-                return GenerationOutcome(status=GenerationStatus.quota_exhausted, error_code="generation_quota_exhausted")
+            if request.consume_credit:
+                used = int(await self._redis.raw.get(credit_key) or 0)
+                if used >= credit_limit:
+                    return GenerationOutcome(status=GenerationStatus.quota_exhausted, error_code="generation_quota_exhausted")
 
             try:
                 result = await self._cortex.execute_question_generation(
@@ -86,16 +107,21 @@ class GenerationPolicyService:
                     tier=tier,
                     use_web=request.use_web,
                 )
-            except CortexUnavailableError:
+            except CortexUnavailableError as exc:
                 # No credit is consumed when Cortex does not accept/complete work.
+                from src.core.logs import warning
+                warning(f"Cortex unavailable during question generation: {exc}")
                 return GenerationOutcome(status=GenerationStatus.unavailable, retryable=True, error_code="generation_unavailable")
 
             if not result.success:
+                from src.core.logs import error
+                error(f"Cortex question generation returned success=False. Error type: {result.error_type}, response: {result.response}")
                 return GenerationOutcome(status=GenerationStatus.failed, retryable=True, request_id=result.request_id, tier_requested=tier, error_code="generation_failed")
 
-            # Credit is recorded only after a successful result.
-            await self._redis.raw.incr(credit_key)
-            await self._redis.raw.expire(credit_key, 60 * 60 * 48)
+            # Credit is recorded only after a successful result when requested.
+            if request.consume_credit:
+                await self._redis.raw.incr(credit_key)
+                await self._redis.raw.expire(credit_key, 60 * 60 * 48)
             return GenerationOutcome(status=GenerationStatus.ready, request_id=result.request_id, tier_requested=tier, response=result.response)
         except RedisAdapterError:
             return GenerationOutcome(status=GenerationStatus.unavailable, retryable=True, error_code="generation_unavailable")

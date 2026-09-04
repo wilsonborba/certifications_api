@@ -45,20 +45,24 @@ class StudyIngestionService:
         self._settings = settings
 
     async def ingest(self, source: StudySource) -> IngestedSource:
-        if source.selection is None:
-            raise IngestionError("A source selection is required before processing")
         raw = await self._fsm.get(key=source.object_key)
+        # When no selection was set the caller wants the whole document.
+        # Derive safe full-document bounds from the raw bytes so the rest of
+        # the pipeline can proceed without a prior /selection call.
+        selection = source.selection
+        if selection is None:
+            selection = self._full_selection(source.kind, raw)
         if source.kind is SourceKind.pdf:
-            text, ranges = self._extract_pdf(raw, source.selection.page_start or 1, source.selection.page_end or 1)
+            text, ranges = self._extract_pdf(raw, selection.page_start or 1, selection.page_end or 1)
         elif source.kind is SourceKind.docx:
-            text, ranges = self._extract_docx(raw, source.selection.page_start or 1, source.selection.page_end or 1)
+            text, ranges = self._extract_docx(raw, selection.page_start or 1, selection.page_end or 1)
         elif source.kind is SourceKind.csv:
-            text, ranges = self._extract_csv(raw, source.selection.line_start or 1, source.selection.line_end or 1)
+            text, ranges = self._extract_csv(raw, selection.line_start or 1, selection.line_end or 1)
         elif source.kind is SourceKind.text:
-            text, ranges = self._extract_text(raw, source.selection.line_start or 1, source.selection.line_end or 1)
+            text, ranges = self._extract_text(raw, selection.line_start or 1, selection.line_end or 1)
         else:
             text = await self._transcribe_audio(raw, source)
-            ranges = [{"audio_start_ms": source.selection.audio_start_ms or 0, "audio_end_ms": source.selection.audio_end_ms or 0}]
+            ranges = [{"audio_start_ms": selection.audio_start_ms or 0, "audio_end_ms": selection.audio_end_ms or 0}]
         normalized = self._normalize(text)
         if not normalized:
             raise IngestionError("The selected source did not yield usable text")
@@ -172,6 +176,35 @@ class StudyIngestionService:
             raise IngestionError("Audio processing is unavailable") from exc
         except subprocess.TimeoutExpired as exc:
             raise IngestionError("Audio processing timed out") from exc
+
+    @staticmethod
+    def _full_selection(kind: SourceKind, raw: bytes) -> "SourceSelection":
+        """Derive a whole-document selection when the caller didn't set one."""
+        from src.domain.models.study import SourceSelection
+        if kind is SourceKind.pdf:
+            try:
+                doc = pymupdf.open(stream=raw, filetype="pdf")
+                pages = doc.page_count
+                doc.close()
+            except Exception:
+                pages = 9999
+            return SourceSelection(page_start=1, page_end=pages)
+        if kind is SourceKind.docx:
+            try:
+                import docx
+                doc = docx.Document(io.BytesIO(raw))
+                paragraphs = len([p for p in doc.paragraphs if p.text.strip()])
+            except Exception:
+                paragraphs = 9999
+            return SourceSelection(page_start=1, page_end=max(1, paragraphs))
+        if kind in (SourceKind.csv, SourceKind.text):
+            try:
+                lines = len(raw.decode("utf-8-sig").splitlines())
+            except UnicodeDecodeError:
+                lines = 9999
+            return SourceSelection(line_start=1, line_end=max(1, lines))
+        # audio / video: use a very large end time (10 hours) so all content is covered
+        return SourceSelection(audio_start_ms=0, audio_end_ms=10 * 3600 * 1000)
 
     @staticmethod
     def _normalize(text: str) -> str:

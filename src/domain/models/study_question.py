@@ -15,9 +15,21 @@ class LatexVisual(BaseModel):
     description: str = Field(min_length=1, max_length=500)
 
 
+class DiagramEdge(BaseModel):
+    """One arrow in a concept/workflow diagram. The model only ever supplies
+    this plain data - the D2 source text itself is built deterministically
+    from it server-side (see `render_d2_svg`), so there is no free-form DSL
+    for the model to get wrong or for us to have to sanitize against
+    injection."""
+
+    from_node: str = Field(min_length=1, max_length=80)
+    to_node: str = Field(min_length=1, max_length=80)
+    label: str = Field(default="", max_length=120)
+
+
 class D2Visual(BaseModel):
     kind: Literal["d2"] = "d2"
-    source: str = Field(min_length=1, max_length=20_000)
+    edges: list[DiagramEdge] = Field(min_length=1, max_length=12)
     description: str = Field(min_length=1, max_length=500)
 
 

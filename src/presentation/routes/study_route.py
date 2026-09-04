@@ -252,3 +252,26 @@ async def remove_source(study_id: str, source_id: str, request: Request) -> None
         error(f"FSM source deletion failed for study {study.id}: {exc}")
         raise HTTPException(status_code=503, detail="Storage is temporarily unavailable") from None
     await repository.remove_source(study=study, source_id=source_id)
+
+
+@study_router.delete("/{study_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_study(study_id: str, request: Request) -> None:
+    owner_id = _owner_id(request)
+    repository = _repo(request)
+    study = await repository.get_owned(owner_id=owner_id, study_id=study_id)
+    if study is None:
+        raise HTTPException(status_code=404, detail="Study not found")
+
+    # Purge all media files stored in FSM for this study
+    fsm = _fsm()
+    for source in study.sources:
+        try:
+            if source.object_key:
+                await fsm.delete(key=source.object_key)
+            if source.derived_object_key:
+                await fsm.delete(key=source.derived_object_key)
+        except Exception as exc:
+            error(f"FSM media purge failed for source {source.id}: {exc}")
+
+    # Delete study and all associated generated questions from Redis
+    await repository.delete(study=study)

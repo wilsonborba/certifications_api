@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
+from src.core.logs import error, info
 from src.core.settings import app_settings
 from src.dal.local.study_repository import StudyRepository
 from src.dal.remote.cortex_adapter import CortexAdapter
@@ -19,11 +20,13 @@ class GenerateQuestionsPayload(BaseModel):
     difficulty: StudyDifficulty
     idempotency_key: str = Field(min_length=16, max_length=128)
     use_web: bool = False
+    # None (or omitted) means "as many as the source material supports".
+    question_count: int | None = Field(default=None, ge=1, le=20)
 
 
 class AnswerSubmission(BaseModel):
     question_id: str
-    choice_index: int = Field(ge=0)
+    choice_index: int = Field(ge=-1)
 
 
 class SubmitAnswersPayload(BaseModel):
@@ -46,6 +49,7 @@ async def generate_questions(study_id: str, payload: GenerateQuestionsPayload, r
     study = await repository.get_owned(owner_id=owner_id, study_id=study_id)
     if study is None:
         raise HTTPException(status_code=404, detail="Study not found")
+    info(f"generate_questions study={study_id} use_web={payload.use_web} question_count={payload.question_count} difficulty={payload.difficulty}")
     try:
         questions = await _service(request).generate(
             user_id=owner_id,
@@ -53,6 +57,7 @@ async def generate_questions(study_id: str, payload: GenerateQuestionsPayload, r
             difficulty=payload.difficulty,
             idempotency_key=payload.idempotency_key,
             use_web=payload.use_web,
+            question_count=payload.question_count,
         )
     except QuestionContractError as exc:
         detail = str(exc)
@@ -60,8 +65,34 @@ async def generate_questions(study_id: str, payload: GenerateQuestionsPayload, r
             raise HTTPException(status_code=503, detail="Question generation is temporarily unavailable") from None
         if detail == "generation_quota_exhausted":
             raise HTTPException(status_code=429, detail="Question generation limit reached") from None
+        # Every other reason ends as a generic 422 for the client, but the
+        # real cause (contract validation failure, no ready sources, etc.)
+        # must not be silently discarded here - that's what made this class
+        # of failure impossible to diagnose from the logs before.
+        error(f"Question generation for study {study_id} returned 422: {detail}")
         raise HTTPException(status_code=422, detail="Question generation could not use this study") from None
     return {"data": [question.for_answering() for question in questions], "message": "Questions generated"}
+
+
+@question_router.get("/progress")
+async def get_generation_progress(study_id: str, request: Request) -> dict:
+    """Polled by the frontend while /generate is in flight to show real
+    "N questions generated so far" progress instead of a static spinner."""
+    owner_id = _owner_id(request)
+    repository = StudyRepository(request.app.state.redis)
+    if await repository.get_owned(owner_id=owner_id, study_id=study_id) is None:
+        raise HTTPException(status_code=404, detail="Study not found")
+    progress = await repository.get_generation_progress(study_id=study_id)
+    return {
+        "data": progress
+        or {
+            "status": "idle",
+            "chunks_done": 0,
+            "chunks_total": 0,
+            "questions_generated": 0,
+            "questions_target": None,
+        },
+    }
 
 
 @question_router.post("/submit")

@@ -17,6 +17,9 @@ class StudyRepository:
     def _study_key(self, study_id: str) -> str:
         return self._redis.k("studies", study_id)
 
+    def _generation_progress_key(self, study_id: str) -> str:
+        return self._redis.k("study_generation_progress", study_id)
+
     def _owner_key(self, owner_id: str) -> str:
         return self._redis.k("studies", "owner", owner_id)
 
@@ -67,9 +70,22 @@ class StudyRepository:
         await self._redis.set(self._redis.k("study_questions", study_id, question.id), question.model_dump(mode="json"))
         await self._redis.sadd(self._redis.k("study_questions", "study", study_id), question.id)
 
+    async def save_generation_progress(self, *, study_id: str, progress: dict) -> None:
+        # Short TTL: this is a live-status side channel for the frontend's
+        # polling, not durable state - it must never outlive a stale/aborted
+        # generation attempt by more than a few minutes.
+        await self._redis.set(self._generation_progress_key(study_id), progress, ex=600)
+
+    async def get_generation_progress(self, *, study_id: str) -> dict | None:
+        return await self._redis.get(self._generation_progress_key(study_id))
+
     async def delete(self, *, study: Study) -> None:
         question_ids = await self._redis.smembers(self._redis.k("study_questions", "study", study.id))
-        keys = [self._study_key(study.id), self._redis.k("study_questions", "study", study.id)]
+        keys = [
+            self._study_key(study.id),
+            self._generation_progress_key(study.id),
+            self._redis.k("study_questions", "study", study.id),
+        ]
         keys.extend(self._redis.k("study_questions", study.id, str(question_id)) for question_id in question_ids)
         await self._redis.delete(*keys)
         await self._redis.srem(self._owner_key(study.owner_id), study.id)

@@ -1,8 +1,10 @@
 # src/core/settings.py
 
-from pydantic_settings import BaseSettings
 from functools import lru_cache
+from pathlib import Path
+
 from dotenv import load_dotenv
+from pydantic_settings import BaseSettings
 
 from src.domain.models.db_config_model import DatabaseConfig
 
@@ -62,7 +64,8 @@ class Settings(BaseSettings):
     # per-study STUDY_ACTIVE_MAX_BYTES cap above.
     USER_TOTAL_MAX_BYTES: int = 500 * 1024 * 1024
 
-    
+    # Log file for rotating file handler and WebSocket log streaming (under dal/logs).
+    LOG_FILE: Path = Path("src/dal/logs/certifications.log")
 
 
     @property
