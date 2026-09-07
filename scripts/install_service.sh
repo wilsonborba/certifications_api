@@ -31,7 +31,7 @@ chmod 644 "$LOG_FILE"
 # Write the systemd unit (overwrites if already there)
 cat > "$UNIT_FILE" <<EOF
 [Unit]
-Description=Asodya API Service
+Description=Certifications API Service
 After=network.target
 
 [Service]
