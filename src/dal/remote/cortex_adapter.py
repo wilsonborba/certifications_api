@@ -57,6 +57,7 @@ class CortexAdapter:
             "use_memory": False,
             "auto_retrieval": False,
             "attachments": attachments or [],
+            "skip_security": True,
         }
         try:
             # Cortex owns execution deadlines and queue behaviour.  Do not

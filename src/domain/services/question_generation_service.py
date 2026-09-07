@@ -243,18 +243,43 @@ single isolated fact with no structure, category, or relationship of any kind to
         try:
             data = json.loads(cleaned)
         except Exception:
-            # Fallback: attempt to find individual question objects with regex if outer JSON is malformed
-            q_matches = re.findall(r"\{\s*\"prompt\"[\s\S]*?\"visual\"[\s\S]*?\}", cleaned)
-            salvaged: list[dict] = []
-            for q_str in q_matches:
-                try:
-                    # Clean trailing commas if any
-                    fixed_str = re.sub(r",\s*([\]}])", r"\1", q_str)
-                    salvaged.append(json.loads(fixed_str))
-                except Exception:
-                    continue
-            if salvaged:
-                data = {"questions": salvaged}
+            # Fallback 1: repair incomplete/truncated questions array
+            # If the model hit a token limit mid-generation, close the open question/array
+            try:
+                # Find the last completed question object closing `}`
+                last_brace = cleaned.rfind("}")
+                if last_brace != -1:
+                    truncated_candidate = cleaned[: last_brace + 1].strip()
+                    # Clean any trailing commas before brackets
+                    truncated_candidate = re.sub(r",\s*$", "", truncated_candidate)
+                    if not truncated_candidate.endswith("]}"):
+                        if truncated_candidate.endswith("]"):
+                            truncated_candidate += "}"
+                        else:
+                            truncated_candidate += "]}"
+                    data = json.loads(truncated_candidate)
+            except Exception:
+                pass
+
+            if not data or not isinstance(data, dict) or not data.get("questions"):
+                # Fallback 2: extract each question object block with regex
+                q_matches = re.finditer(r"\{\s*\"prompt\"\s*:", cleaned)
+                salvaged: list[dict] = []
+                starts = [m.start() for m in q_matches]
+                for i, start_idx in enumerate(starts):
+                    end_idx = starts[i + 1] if i + 1 < len(starts) else len(cleaned)
+                    chunk_q = cleaned[start_idx:end_idx].strip().rstrip(",")
+                    # Find matching or last closing brace in this chunk
+                    last_b = chunk_q.rfind("}")
+                    if last_b != -1:
+                        chunk_q = chunk_q[: last_b + 1]
+                    try:
+                        fixed_str = re.sub(r",\s*([\]}])", r"\1", chunk_q)
+                        salvaged.append(json.loads(fixed_str))
+                    except Exception:
+                        continue
+                if salvaged:
+                    data = {"questions": salvaged}
 
         if not data or not isinstance(data, dict):
             from src.core.logs import error
