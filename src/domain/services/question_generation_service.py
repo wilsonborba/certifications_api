@@ -173,23 +173,12 @@ or cite it yourself, that is handled separately.
 {context}
 
 Generate 3 to 10 educational multiple-choice questions based on the study material above.
-Use a diagram (visual.kind: "d2") for EVERY question involving any of the following, even loosely:
-a process, sequence, or cause-and-effect chain; a classification/categorization scheme (e.g. named
-codes, levels, or categories and what distinguishes them); or the architecture/components of a
-system, framework, or method (e.g. what parts it's made of, or how they connect). Most study
-material has many such opportunities, so do not be shy about including one whenever it genuinely
-applies - academic/technical material in particular is rarely "just a fact" once you look at how its
-pieces relate. Set "edges" to at least 2 real arrows: each entry has "from_node" and "to_node" as
-short node labels and "label" describing that connection (or "" if it doesn't need one) - never
-output "kind": "d2" with an empty or missing "edges" list. Do not write diagram syntax yourself,
-just the nodes and relationships. Only use "visual": {{"kind": "none"}} when the question is a
-single isolated fact with no structure, category, or relationship of any kind to depict.
 {web_instructions}You MUST output ONLY a valid JSON object matching this exact schema:
 
 {{
   "questions": [
     {{
-      "prompt": "What is the key concept or architectural relationship discussed?",
+      "prompt": "What is the key concept or relationship discussed?",
       "choices": [
         "Option A description",
         "Option B description",
@@ -205,12 +194,7 @@ single isolated fact with no structure, category, or relationship of any kind to
         }}
       ],
       "visual": {{
-        "kind": "d2",
-        "edges": [
-          {{"from_node": "A", "to_node": "B", "label": "Data Flow"}},
-          {{"from_node": "B", "to_node": "C", "label": "Processed"}}
-        ],
-        "description": "Concept diagram"
+        "kind": "none"
       }}
     }}
   ]
