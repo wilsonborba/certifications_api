@@ -61,7 +61,7 @@ class StudyIngestionService:
         elif source.kind is SourceKind.text:
             text, ranges = self._extract_text(raw, selection.line_start or 1, selection.line_end or 1)
         else:
-            text = await self._transcribe_audio(raw, source)
+            text = await self._transcribe_audio(raw, selection)
             ranges = [{"audio_start_ms": selection.audio_start_ms or 0, "audio_end_ms": selection.audio_end_ms or 0}]
         normalized = self._normalize(text)
         if not normalized:
@@ -134,15 +134,17 @@ class StudyIngestionService:
         except Exception as exc:
             raise IngestionError("The CSV file could not be read") from exc
 
-    async def _transcribe_audio(self, raw: bytes, source: StudySource) -> str:
+    async def _transcribe_audio(self, raw: bytes, selection: "SourceSelection") -> str:
         # Cortex's documented attachment ingestion invokes its local Whisper
         # capability when enabled. The source remains in FSM; only its text is
         # retained as the compact derivative.
-        clipped = self._clip_audio(raw, source)
+        clipped = self._clip_audio(raw, selection)
         attachment = {"filename": "selected-audio.wav", "mime_type": "audio/wav", "data_base64": base64.b64encode(clipped).decode("ascii")}
+        start_ms = selection.audio_start_ms or 0
+        end_ms = selection.audio_end_ms or 0
         prompt = (
             "Transcribe only the selected audio content. Return plain transcript text "
-            f"for the interval {source.selection.audio_start_ms}-{source.selection.audio_end_ms} milliseconds."
+            f"for the interval {start_ms}-{end_ms} milliseconds."
         )
         try:
             result = await self._cortex.execute_question_generation(prompt=prompt, tier=0, attachments=[attachment])
@@ -153,9 +155,9 @@ class StudyIngestionService:
         return result.response
 
     @staticmethod
-    def _clip_audio(raw: bytes, source: StudySource) -> bytes:
-        start = source.selection.audio_start_ms or 0
-        end = source.selection.audio_end_ms or 0
+    def _clip_audio(raw: bytes, selection: "SourceSelection") -> bytes:
+        start = selection.audio_start_ms or 0
+        end = selection.audio_end_ms or 0
         if end <= start:
             raise IngestionError("The selected audio interval is invalid")
         try:
