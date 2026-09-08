@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "certifications-api"
+version = "0.1.0"
+description = "Asodya Certifications API"
+requires-python = ">=3.11"
+dependencies = [
+  "alembic>=1.14,<2",
+  "fastapi",
+  "python-multipart",
+  "pydantic",
+  "uvicorn",
+  "pydantic-settings",
+  "python-dotenv",
+  "SQLAlchemy",
+  "psycopg2-binary",
+  "colorlog",
+  "gunicorn",
+  "httpx",
+  "pgvector",
+  "PyMuPDF",
+  "pillow",
+  "pytesseract",
+  "clamd",
+  "yara-python",
+  "redis",
+  "msgpack-python",
+  "python-docx",
+]
+
+[tool.setuptools.packages.find]
+include = ["src*"]

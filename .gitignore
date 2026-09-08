@@ -1,3 +1,10 @@
+
+# Local documentation directory (AI Agent Working Rules #9)
+docs/
+
+# Project exploration dir
+exploration/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

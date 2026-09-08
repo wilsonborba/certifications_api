@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+
+
+sudo systemctl enable clamav-freshclam
+sudo systemctl enable clamav-daemon
+
+sudo systemctl start clamav-freshclam
+sudo systemctl start clamav-daemon
