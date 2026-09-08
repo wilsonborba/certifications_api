@@ -20,8 +20,7 @@ class GenerateQuestionsPayload(BaseModel):
     difficulty: StudyDifficulty
     idempotency_key: str = Field(min_length=16, max_length=128)
     use_web: bool = False
-    # None (or omitted) means "as many as the source material supports".
-    question_count: int | None = Field(default=None, ge=1, le=20)
+    question_count: int = Field(ge=1, le=20)
 
 
 class AnswerSubmission(BaseModel):
