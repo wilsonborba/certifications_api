@@ -1,110 +1,186 @@
-## [unreleased]
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.0.0] - 2026-09-08
 
 ### 🚀 Features
 
-- *(route)* First route implementation created
-- *(route)* Route with source item payload loaded
-- *(route)* Added a reddit api route trends
-- *(adapter)* Improve the agnostic trend model answer
-- *(env)* Changed the name of trend to topic
-- *(adapter)* Added chess.com adapter
-- *(adapter)* Added many adapters
-- *(adapter)* Added aws catalog api adapters
-- *(adapter)* Added  dev.to adapter
-- *(adapter)* Added  product hunt adapter
-- *(adapter)* Added  exploit-db adapter
-- *(adapter)* Added about public_and_gov adapter
-- *(adapter)* Added about public_and_gov enem adapter
-- *(adapter)* Added about public_and_gov sat adapter
-- *(ai)* Created a client to create a quiz
-- *(ai)* Blsgov adapter and gemini ai working together
-- *(ai)* Chess.com adapter and gemini ai working together
-- *(ai)* Companies_marketcap adapter and gemini ai working together
-- *(ai)* Countriesnow adapter and gemini ai working together
-- *(ai)* Devto adapter and gemini ai working together
-- *(ai)* Exploitdb adapter and gemini ai working together
-- *(ai)* Hackernews adapter and gemini ai working together
-- *(ai)* Killedbygoogle adapter and gemini ai working together
-- *(ai)* Adapters and gemini ai working together
-- *(ai)* Wikipedia adapter and gemini ai working together
-- *(ai)* Input save at db or get from adapter working
-- *(question)* Generating/querying/saving question db/gemini implemented
-- *(items)* Load items to front end for test
-- *(pdf)* Created a route to accept pdf and return the full topic
-- *(pdf)* Improved the return code and messages from errors
-- *(pdf)* Added redis adapter to cache the topic book extraction
-- *(pdf)* Added route to get specific inputs (pages) based on a temporary memory 30min
-- *(pdf)* Added dataclass to improve the pdf reading
-- *(pdf)* Organized the env lib for the Adapter for PDF
-- *(pdf)* Added a verifier ai injection command hacking
-- *(pdf)* Verifier about ai injection working
-- *(pdf)* Verifier about ai injection working
-- *(pdf)* Generating question from secure pdf created
-- *(id)* Added a pattern for identification of the cards
-- *(ai)* Improved to clean useless char data for input
-- *(ai)* Improved to have amount of question and language of route to generate question
-- *(adapter)* Created a search method
-- *(adapter)* Created a search method for all adapters
-- *(adapter)* Created a questionei adapters for questions
-- *(adapter)* Created a questionei adapter generation context
-- *(analytics)* Created a tracking ai user usage process
-- *(question)* Removed answers from quiz and saved pdf in redis
-- *(route)* Added a route for user request new sources
-- *(app)* Added error if no enough questions
-- *(user)* Patch some info about the user
-- *(proxy)* Improved to return the same code status proxied
-- *(unkown)* I forgot but is good to save
-- *(topics)* Added a new solicitation adjustment
-- *(quiz)* Addded some routes for complaining questions
-- *(quiz)* Added a complain for pdf save in redis
-- *(quiz)* Added initial models for quiz submit
-- *(quiz)* Added initial change for pdf quiz saving
-- *(forgot)* Idk
-- *(pdf)* Start implementation to save from redis to postgres
-- *(pdf)* Saving question and answer into postgres from redis ok
-- *(questions)* Added a field to help compare right answers in pdf quiz
-- *(pdf)* Verifying if pdf answer is right implemented
-- *(pdf)* Added a mapper for right id insert on db
-- *(pdf)* Adjuster map to ignore missing question
-- *(tokens)* Created some routes and handlers for communication
-- *(tokens)* Improved default tokens verification
-- *(routes)* Added the route to the main
-- *(tokens)* Route for set default token
-- *(tokens)* Added provider name
-- *(token)* Implemented the selection of the token for the user
-- *(token)* Added groq token to be used
-- *(context)* Adjusted the saving last consumption
-- *(context)* Adjusted the saving without being a list the question id
-- *(context)* Adjusted the parsing error for grok
-- *(cert)* Created route to return the user certifications
-- *(cert)* Removed debug
-- *(ai_usage)* Created route to return the user ai usage
-- *(ai_usage)* Fixed query for user ai usage
-- *(ai_usage)* Improved route to return the user ai usage
-- *(ai_usage)* Added a query condition improvement for query many on db
+- *(route)* First route implementation created ([`ec75602`](https://github.com/wilsonborba/certifications_api/commit/ec7560239722360c74342e3cc6253a520fc95273))
+- *(route)* Route with source item payload loaded ([`8176015`](https://github.com/wilsonborba/certifications_api/commit/8176015e31883fa50b91c74bc051950aae03d899))
+- *(route)* Added a reddit api route trends ([`6ad0456`](https://github.com/wilsonborba/certifications_api/commit/6ad0456401f3cb2637e5e1ae5558cabcd13dd3d6))
+- *(adapter)* Improve the agnostic trend model answer ([`dadab27`](https://github.com/wilsonborba/certifications_api/commit/dadab27b4df6d33347d2bc35d7a46ff6a088afe8))
+- *(env)* Changed the name of trend to topic ([`d5348a0`](https://github.com/wilsonborba/certifications_api/commit/d5348a092312ce1772a1e9049fb2322817786147))
+- *(adapter)* Added chess.com adapter ([`dfe167c`](https://github.com/wilsonborba/certifications_api/commit/dfe167cbbf7b009fdb17b95d446bda2bc5b7a0ec))
+- *(adapter)* Added many adapters ([`455f048`](https://github.com/wilsonborba/certifications_api/commit/455f0482724a548b8fcba5e8ec2da405cb48019a))
+- *(adapter)* Added aws catalog api adapters ([`77c8b45`](https://github.com/wilsonborba/certifications_api/commit/77c8b45eea6c86df37253dfe42cd007390994760))
+- *(adapter)* Added  dev.to adapter ([`c2702e3`](https://github.com/wilsonborba/certifications_api/commit/c2702e3f3cc01be7ef335c9deb1fbe6ac3795dba))
+- *(adapter)* Added  product hunt adapter ([`2ddbad0`](https://github.com/wilsonborba/certifications_api/commit/2ddbad0cf4438cbd78dde05e42b7e84b76db8eab))
+- *(adapter)* Added  exploit-db adapter ([`da028cc`](https://github.com/wilsonborba/certifications_api/commit/da028cce1fe42296e091d047a8bc531ecc269e8b))
+- *(adapter)* Added about public_and_gov adapter ([`9190bc0`](https://github.com/wilsonborba/certifications_api/commit/9190bc0deb800f3986ec72bc503ca31b0fdc2c79))
+- *(adapter)* Added about public_and_gov enem adapter ([`0b4a83e`](https://github.com/wilsonborba/certifications_api/commit/0b4a83ed30c6733a44d1683a4ad8c845f7493405))
+- *(adapter)* Added about public_and_gov sat adapter ([`b1c92ea`](https://github.com/wilsonborba/certifications_api/commit/b1c92eab50f39c2650f166f87d068ca2172bfaa6))
+- *(ai)* Created a client to create a quiz ([`3fd54f5`](https://github.com/wilsonborba/certifications_api/commit/3fd54f5fcbb9f96be11a41bfcb4d2f641f6efc45))
+- *(ai)* Blsgov adapter and gemini ai working together ([`85cf72e`](https://github.com/wilsonborba/certifications_api/commit/85cf72ece4e886b824d90e76faf844be3fc5682d))
+- *(ai)* Chess.com adapter and gemini ai working together ([`4ebe2ab`](https://github.com/wilsonborba/certifications_api/commit/4ebe2ab23a7c22a59b0198944e6e9c706adc736d))
+- *(ai)* Companies_marketcap adapter and gemini ai working together ([`70432fd`](https://github.com/wilsonborba/certifications_api/commit/70432fdc74b27fb9a145f93082b93ddebe146fc1))
+- *(ai)* Countriesnow adapter and gemini ai working together ([`0024e33`](https://github.com/wilsonborba/certifications_api/commit/0024e3377261cd0ca2fb0018f7492f2afe0b14a8))
+- *(ai)* Devto adapter and gemini ai working together ([`3759058`](https://github.com/wilsonborba/certifications_api/commit/3759058153273ba2c5572fcb583d7f07ba5e4e69))
+- *(ai)* Exploitdb adapter and gemini ai working together ([`f08314f`](https://github.com/wilsonborba/certifications_api/commit/f08314fc409ea89d0ae06ab224e0e1856196deed))
+- *(ai)* Hackernews adapter and gemini ai working together ([`d3a919c`](https://github.com/wilsonborba/certifications_api/commit/d3a919c34dd039d9f29462c6417c2216e3d2b5bb))
+- *(ai)* Killedbygoogle adapter and gemini ai working together ([`e290ef1`](https://github.com/wilsonborba/certifications_api/commit/e290ef1df691ddb9df1cf5de18ffb5f4abea3185))
+- *(ai)* Adapters and gemini ai working together ([`f1b2bd8`](https://github.com/wilsonborba/certifications_api/commit/f1b2bd854e5c584e41509fd6960237a636b76484))
+- *(ai)* Wikipedia adapter and gemini ai working together ([`6109a6c`](https://github.com/wilsonborba/certifications_api/commit/6109a6c70b871aac3720aa1463b9550d61106714))
+- *(ai)* Input save at db or get from adapter working ([`f5f4173`](https://github.com/wilsonborba/certifications_api/commit/f5f41738614d69e49dd78076f5a272d43a3af9e6))
+- *(question)* Generating/querying/saving question db/gemini implemented ([`7b364ea`](https://github.com/wilsonborba/certifications_api/commit/7b364eab682885a02a953d1288712823bb4b7b0e))
+- *(items)* Load items to front end for test ([`95b44c8`](https://github.com/wilsonborba/certifications_api/commit/95b44c82bccad3062722a64e1072217cd92146c6))
+- *(pdf)* Created a route to accept pdf and return the full topic ([`5e6c80b`](https://github.com/wilsonborba/certifications_api/commit/5e6c80ba35875ccfdfb1573901f6cbd39a747225))
+- *(pdf)* Improved the return code and messages from errors ([`2b83431`](https://github.com/wilsonborba/certifications_api/commit/2b8343141ab35f2b1936c321ddac5b77410adfef))
+- *(pdf)* Added redis adapter to cache the topic book extraction ([`750d8ff`](https://github.com/wilsonborba/certifications_api/commit/750d8ff71ebd90b92c6cb743c35a837f11201ca3))
+- *(pdf)* Added route to get specific inputs (pages) based on a temporary memory 30min ([`fae0ecb`](https://github.com/wilsonborba/certifications_api/commit/fae0ecba30a94b27d37750fbc814846d542270d2))
+- *(pdf)* Added dataclass to improve the pdf reading ([`59cd676`](https://github.com/wilsonborba/certifications_api/commit/59cd676e9b0e191bd57955349816e433470dbc4d))
+- *(pdf)* Organized the env lib for the Adapter for PDF ([`82903bd`](https://github.com/wilsonborba/certifications_api/commit/82903bd08cbba4fabb1c08318390ed589b90f99d))
+- *(pdf)* Added a verifier ai injection command hacking ([`7393ec0`](https://github.com/wilsonborba/certifications_api/commit/7393ec0439ccfa49a88931b048e455b8fed9549a))
+- *(pdf)* Verifier about ai injection working ([`308e688`](https://github.com/wilsonborba/certifications_api/commit/308e68873d3f732eeeb6c6c277e30e98033e4110))
+- *(pdf)* Verifier about ai injection working ([`01402bf`](https://github.com/wilsonborba/certifications_api/commit/01402bfdd7f199272578c4719c8091a00748067a))
+- *(pdf)* Generating question from secure pdf created ([`6aaf53c`](https://github.com/wilsonborba/certifications_api/commit/6aaf53c9ef64eb9ccdad4221cb74f2cc9664bc80))
+- *(id)* Added a pattern for identification of the cards ([`c0ee9c4`](https://github.com/wilsonborba/certifications_api/commit/c0ee9c49df0e97ce44539b5adb98d652e9fb32f6))
+- *(ai)* Improved to clean useless char data for input ([`3d1cac7`](https://github.com/wilsonborba/certifications_api/commit/3d1cac71c6aee86fcc2d60169b58efe10e356b0b))
+- *(ai)* Improved to have amount of question and language of route to generate question ([`a27b221`](https://github.com/wilsonborba/certifications_api/commit/a27b2214806f79201251d886372d70c7ab73e3f9))
+- *(adapter)* Created a search method ([`2f3c486`](https://github.com/wilsonborba/certifications_api/commit/2f3c4867be2d9b6109de070fd77897d33b9689c4))
+- *(adapter)* Created a search method for all adapters ([`02b6823`](https://github.com/wilsonborba/certifications_api/commit/02b6823e75ef574a2964e8ade0c0b578e9668660))
+- *(adapter)* Created a questionei adapters for questions ([`f7f1661`](https://github.com/wilsonborba/certifications_api/commit/f7f166153ce5d0f0728b848eb606443362614cab))
+- *(adapter)* Created a questionei adapter generation context ([`cd1b3bc`](https://github.com/wilsonborba/certifications_api/commit/cd1b3bc664a758c887bb6fa6cab29c108e7a726d))
+- *(analytics)* Created a tracking ai user usage process ([`4c938d5`](https://github.com/wilsonborba/certifications_api/commit/4c938d580aa0fc0647b9608c67c8078ce4138e07))
+- *(question)* Removed answers from quiz and saved pdf in redis ([`0eea07b`](https://github.com/wilsonborba/certifications_api/commit/0eea07b210a88f13420d5f9f053e14dadda1db29))
+- *(route)* Added a route for user request new sources ([`bc7efb8`](https://github.com/wilsonborba/certifications_api/commit/bc7efb81b041a993dc5acf9cdde1081ef9accf87))
+- *(app)* Added error if no enough questions ([`13dc427`](https://github.com/wilsonborba/certifications_api/commit/13dc427afdc975634986cb8f31a1fd2d891ea149))
+- *(user)* Patch some info about the user ([`4d2c794`](https://github.com/wilsonborba/certifications_api/commit/4d2c794db763c0485ae93d614b1dbd01216323ed))
+- *(proxy)* Improved to return the same code status proxied ([`192cbc8`](https://github.com/wilsonborba/certifications_api/commit/192cbc86cb20a6fca28bc61787324fda1e55c7ba))
+- *(unkown)* I forgot but is good to save ([`cafd5b9`](https://github.com/wilsonborba/certifications_api/commit/cafd5b939a293959977402839bd9a0d23f7cbc3e))
+- *(topics)* Added a new solicitation adjustment ([`3690762`](https://github.com/wilsonborba/certifications_api/commit/3690762a9a9bae001d7530897ebc2892e8ce5657))
+- *(quiz)* Addded some routes for complaining questions ([`bf85df0`](https://github.com/wilsonborba/certifications_api/commit/bf85df0ff164a6728bd4ce4c7dc0e4723d1a2f66))
+- *(quiz)* Added a complain for pdf save in redis ([`dccdc2c`](https://github.com/wilsonborba/certifications_api/commit/dccdc2c06ae73ba336069238c8f271b7993d7659))
+- *(quiz)* Added initial models for quiz submit ([`b662838`](https://github.com/wilsonborba/certifications_api/commit/b6628381b9e9cf56010e85200858d18e074eb5d3))
+- *(quiz)* Added initial change for pdf quiz saving ([`98287fc`](https://github.com/wilsonborba/certifications_api/commit/98287fc6f321764a2574ed75c55d917fbe20fa61))
+- *(forgot)* Idk ([`a6ac4bd`](https://github.com/wilsonborba/certifications_api/commit/a6ac4bd194ee35d254953691ce289a82b0d888be))
+- *(pdf)* Start implementation to save from redis to postgres ([`eb97b30`](https://github.com/wilsonborba/certifications_api/commit/eb97b309b6af07cdd4cba02be6454c0db385dbe6))
+- *(pdf)* Saving question and answer into postgres from redis ok ([`a981302`](https://github.com/wilsonborba/certifications_api/commit/a981302ed06b772b6662bd304e93c53754b49bf5))
+- *(questions)* Added a field to help compare right answers in pdf quiz ([`cd84e0a`](https://github.com/wilsonborba/certifications_api/commit/cd84e0a22e0130371a93287a65b2bc07bd6b04a5))
+- *(pdf)* Verifying if pdf answer is right implemented ([`fcf0c62`](https://github.com/wilsonborba/certifications_api/commit/fcf0c6271993b5f139e786a332468c2373fb143b))
+- *(pdf)* Added a mapper for right id insert on db ([`27bbcfe`](https://github.com/wilsonborba/certifications_api/commit/27bbcfe7affbebf56c241a6b5b206cb148c5f9eb))
+- *(pdf)* Adjuster map to ignore missing question ([`fd8eeed`](https://github.com/wilsonborba/certifications_api/commit/fd8eeed8bbdc0c1ff6905bad1789303d92f0db6e))
+- *(tokens)* Created some routes and handlers for communication ([`79c7050`](https://github.com/wilsonborba/certifications_api/commit/79c705055530c3f6925c947f7f55edb4ec82bf29))
+- *(tokens)* Improved default tokens verification ([`cb1f1a0`](https://github.com/wilsonborba/certifications_api/commit/cb1f1a07802fad13f717d41d647a0805d42093e5))
+- *(routes)* Added the route to the main ([`52d5c88`](https://github.com/wilsonborba/certifications_api/commit/52d5c88ee185695f364589c5937d83592de78ac5))
+- *(tokens)* Route for set default token ([`18f9ea7`](https://github.com/wilsonborba/certifications_api/commit/18f9ea730d2bcc1972d24c13f6a6285a6fe90969))
+- *(tokens)* Added provider name ([`072fafa`](https://github.com/wilsonborba/certifications_api/commit/072fafa63c644c855a53e6e61bceb36002364c95))
+- *(token)* Implemented the selection of the token for the user ([`cf2196f`](https://github.com/wilsonborba/certifications_api/commit/cf2196fc051117acb578df30f5555193dd12a866))
+- *(token)* Added groq token to be used ([`f911ada`](https://github.com/wilsonborba/certifications_api/commit/f911ada3f203b29151f9780071ed09c9e1735125))
+- *(context)* Adjusted the saving last consumption ([`b703595`](https://github.com/wilsonborba/certifications_api/commit/b703595bc3c3f2fd9f10e295fe6ac59fe3a01fc6))
+- *(context)* Adjusted the saving without being a list the question id ([`30d86fe`](https://github.com/wilsonborba/certifications_api/commit/30d86fe82365ccc8be2d6938c4d8a33e37957b47))
+- *(context)* Adjusted the parsing error for grok ([`870092b`](https://github.com/wilsonborba/certifications_api/commit/870092b3af457b33c5c7519e1f3b4936db738c49))
+- *(cert)* Created route to return the user certifications ([`bea367d`](https://github.com/wilsonborba/certifications_api/commit/bea367def5b2b5c99da504407fb076bd2358c273))
+- *(cert)* Removed debug ([`ee97783`](https://github.com/wilsonborba/certifications_api/commit/ee97783bc5e9cd36f970ed54ed72b680d311fd72))
+- *(ai_usage)* Created route to return the user ai usage ([`192581c`](https://github.com/wilsonborba/certifications_api/commit/192581c865ec275a5614377fb0582c141d0bdb49))
+- *(ai_usage)* Fixed query for user ai usage ([`acc599b`](https://github.com/wilsonborba/certifications_api/commit/acc599b34efca11c47190baaa6f032f92fde9525))
+- *(ai_usage)* Improved route to return the user ai usage ([`7fe2f96`](https://github.com/wilsonborba/certifications_api/commit/7fe2f962f98c84b4db2f60005e27b1cacb8299bf))
+- *(ai_usage)* Added a query condition improvement for query many on db ([`9626fae`](https://github.com/wilsonborba/certifications_api/commit/9626faedccf672492c86d0781bc5f07341f9b1ae))
+- Add Cortex generation policy ([`c89670c`](https://github.com/wilsonborba/certifications_api/commit/c89670c0f6e890d0210865c0c9baa19b7be7b511))
+- Merge Cortex generation policy (#8) ([`822e29f`](https://github.com/wilsonborba/certifications_api/commit/822e29f894801d198c7987d9349312cd88a11739))
+- Add persistent FSM-backed studies ([`a2b0b59`](https://github.com/wilsonborba/certifications_api/commit/a2b0b59707f16ecdd8d536015257245bb53c7a20))
+- Merge FSM-backed studies (#9) ([`4ae4e43`](https://github.com/wilsonborba/certifications_api/commit/4ae4e43d31e638d6ada9f5e1fbea5bc700a3bca1))
+- Add selected-source ingestion pipeline ([`91564fa`](https://github.com/wilsonborba/certifications_api/commit/91564fa8a4c5c539fc14d68350ed1fe939ceb8d9))
+- Merge selected-source ingestion pipeline (#10) ([`e17ed27`](https://github.com/wilsonborba/certifications_api/commit/e17ed27d1f4404ba87eebd1539965a55800cae0e))
+- Add validated question visual contract ([`2de94ca`](https://github.com/wilsonborba/certifications_api/commit/2de94cac15d3e3808a9ea6041bc767eea802b28a))
+- Merge question visual contract (#11) ([`58cd2b5`](https://github.com/wilsonborba/certifications_api/commit/58cd2b5b505e7d4438190d79d70b5141091dd0dd))
+- Add study completion and compaction lifecycle ([`785141f`](https://github.com/wilsonborba/certifications_api/commit/785141f9610f653d3a69a10bdfcce518f0cb35cb))
+- Merge study completion lifecycle (#12) ([`94c0a77`](https://github.com/wilsonborba/certifications_api/commit/94c0a770be57c4f97199655805117ec8148d3409))
+- *(plans)* Record authenticated waitlist requests ([`2c0d087`](https://github.com/wilsonborba/certifications_api/commit/2c0d087169ce2b585781b353bfe1af3b4e79a8c2))
+- *(waitlist)* Add authenticated email enrollment contract ([`585ac28`](https://github.com/wilsonborba/certifications_api/commit/585ac288a52f7bbd879e6823d69a0c4d6b176115))
+- *(db)* Implement postgresql schema & alembic migrations for users, waitlist and completed quizzes (#14) ([`23e9a77`](https://github.com/wilsonborba/certifications_api/commit/23e9a779139f629d726ae78690045027255e1641))
+- *(api)* Refactor /waitlist route to postgresql with gateway identity sync & redis backfill (#15) ([`5ccdce8`](https://github.com/wilsonborba/certifications_api/commit/5ccdce81d3a3593b646b8ebc5602afe2f261678f))
+- *(ingestion)* Expand SourceKind multimodal parsers and granular section processing (#16) ([`05552dc`](https://github.com/wilsonborba/certifications_api/commit/05552dc6e29c4796d66f7867d95fc74c0bbde0c6))
+- *(quizzes)* Implement Public/Private Quiz governance, expirable share links, and public leaderboard (#17) ([`becef54`](https://github.com/wilsonborba/certifications_api/commit/becef5471c616d4c4c775d03fbc7af3e6b323f70))
+- *(quota)* Enforce 500MB aggregate storage cap per user ([`fcd2c76`](https://github.com/wilsonborba/certifications_api/commit/fcd2c76370ef1c594d3e00ac6dc6bfa860d49dc7))
+- *(quizzes)* Add server-side grading endpoints for answer submission ([`5b075db`](https://github.com/wilsonborba/certifications_api/commit/5b075db3276d53b81150e9f1bb09453ffa7eb9c2))
+- *(questions)* Add GET endpoint to retrieve generated questions ([`8564994`](https://github.com/wilsonborba/certifications_api/commit/85649944915cf043e19f750c4377af113678f31f))
+- *(telemetry)* Propagate correlation request_id in error responses (#22) ([`c5828c2`](https://github.com/wilsonborba/certifications_api/commit/c5828c25c0af895c78361f56393c7e2c93ca2992))
 
 ### 🐛 Bug Fixes
 
-- *(pdf)* Fixed some errors to load correctly the quiz
-- *(cards)* Fixed the return from db or ai
-- *(quiz)* Catching the right keys dict questions
-- *(quiz)* Fixed query and context for quiz
-- *(routes)* Added some changes that i forgot
-- *(pdf)* Adjusted the import document
-- *(db)* Adjusted inserted row field
-- *(tokens)* Adjusted the set default token
-- *(tokens)* Adjusted the raise error about key on .env
-- *(tokens)* Adjusted the response mime type
-- *(token)* Get usage per user on ai_client
-- *(cert)* Wrong table name fixed for certification by user
+- *(pdf)* Fixed some errors to load correctly the quiz ([`fc05ab8`](https://github.com/wilsonborba/certifications_api/commit/fc05ab817be0825e5e023e336def9ee3381e1997))
+- *(cards)* Fixed the return from db or ai ([`947e211`](https://github.com/wilsonborba/certifications_api/commit/947e2115a0b89cc5ff856be3b1b7bde8aa2065cd))
+- *(quiz)* Catching the right keys dict questions ([`7caaba5`](https://github.com/wilsonborba/certifications_api/commit/7caaba5a8b8f5e208305a6091832a271806e5c35))
+- *(quiz)* Fixed query and context for quiz ([`f1c98e2`](https://github.com/wilsonborba/certifications_api/commit/f1c98e2b06700302884404f298a53fa9f720df9b))
+- *(routes)* Added some changes that i forgot ([`d69592b`](https://github.com/wilsonborba/certifications_api/commit/d69592b21ab47ec2d95f1a8ab61308d2830dcf9f))
+- *(pdf)* Adjusted the import document ([`049c15f`](https://github.com/wilsonborba/certifications_api/commit/049c15f40f6cf74c7680730972efffa0966aa7d9))
+- *(db)* Adjusted inserted row field ([`769a3e7`](https://github.com/wilsonborba/certifications_api/commit/769a3e78d5ee8b92e2a7ddf767b09ec3a1ae8129))
+- *(tokens)* Adjusted the set default token ([`1372a29`](https://github.com/wilsonborba/certifications_api/commit/1372a290518bea602c4b1af403df6d47949e8e99))
+- *(tokens)* Adjusted the raise error about key on .env ([`d86d53d`](https://github.com/wilsonborba/certifications_api/commit/d86d53db95aaf0ea0233dfabee2f53af22d00b58))
+- *(tokens)* Adjusted the response mime type ([`97e01d9`](https://github.com/wilsonborba/certifications_api/commit/97e01d973b8157f137461eb6a1d210fe6539a880))
+- *(token)* Get usage per user on ai_client ([`272bf43`](https://github.com/wilsonborba/certifications_api/commit/272bf43e93acc9016e628c6c71930f951dbd41ab))
+- *(cert)* Wrong table name fixed for certification by user ([`01f8b42`](https://github.com/wilsonborba/certifications_api/commit/01f8b423321ebd60777522aeff26040b6f1bf1fd))
+- *(cortex)* Use raw prompts without client timeout ([`e9c2cd7`](https://github.com/wilsonborba/certifications_api/commit/e9c2cd7341abf33a78b69d540b484a1be9df5dd1))
+- *(cortex)* Let study requests control web use ([`91f78a3`](https://github.com/wilsonborba/certifications_api/commit/91f78a3a82c5cc86a7055060f43460b23781a685))
+- *(redis)* Require isolated certifications database ([`b4ec2a8`](https://github.com/wilsonborba/certifications_api/commit/b4ec2a866ac1387c76a68b17d1bae350b9aeff2c))
+- *(waitlist)* Keep metadata in Redis instead of FSM ([`8f8de9e`](https://github.com/wilsonborba/certifications_api/commit/8f8de9ec603007c0ba5da3ef251ed7d07946ad1a))
+- *(db)* Add missing server-side defaults for ORM columns ([`f7015fb`](https://github.com/wilsonborba/certifications_api/commit/f7015fb2edf87d09cc7704432de3493e3f554605))
+- *(waitlist)* Trust X-User-Email header and repair Redis backfill ([`a82f726`](https://github.com/wilsonborba/certifications_api/commit/a82f72646e86386abadd2908d0cd0b84412ac637))
+- *(quizzes)* Enforce share link usage limit on attempt submission ([`5dc9c2d`](https://github.com/wilsonborba/certifications_api/commit/5dc9c2d11ad01f5a3a9622712bceab0b23e9748d))
+- *(quizzes)* Allow anonymous read access to public completed quizzes ([`e9ab9a0`](https://github.com/wilsonborba/certifications_api/commit/e9ab9a080e7aa14f7ffc088e293b7b02235b4843))
+- *(quizzes)* Compare owner UUIDs by value, not text ([`5905c9a`](https://github.com/wilsonborba/certifications_api/commit/5905c9a3e166829798f6a71532513c34f3e65267))
+- *(generation)* Improve error diagnostics on question contract failure and add logs stream route ([`79e79f7`](https://github.com/wilsonborba/certifications_api/commit/79e79f71aed70e4465b0f61be0faedce357a963c))
+- *(systemd)* Correct unit description to Certifications API Service ([`afff75e`](https://github.com/wilsonborba/certifications_api/commit/afff75e4fbca198cf7717c4b971f0908f9270424))
+- *(question-generation)* Forward skip_security and add robust truncated JSON recovery ([`98d175d`](https://github.com/wilsonborba/certifications_api/commit/98d175d15333c4a313f5dd8c106d93fe2e4b65c4))
+- *(generation)* Save questions incrementally and constrain prompt target count ([`34e0b81`](https://github.com/wilsonborba/certifications_api/commit/34e0b8190ada3059959d57918c5ff5aa919ec14a))
+- *(ingest)* Handle video and audio sources without explicit selection range ([`287b16e`](https://github.com/wilsonborba/certifications_api/commit/287b16ea88198374459b0b5904a0b60c2b7645a0))
 
-### 💼 Other
+### 💼 Other Changes
 
-- *(questions)* Start fixing the question saving error
-- *(questions)* Completed  fixing the question saving error for grok topics
-- *(questions)* Completed  fixing the question saving error for grok PDF
+- Initial commit ([`b11367b`](https://github.com/wilsonborba/certifications_api/commit/b11367b4a521137e5f0b448dcf31fc1ba3b1e6b7))
+- Added get question id in quiz_handler ([`3262ef3`](https://github.com/wilsonborba/certifications_api/commit/3262ef3a7024aa9ac7ee13c7fe77d720b30dbc6d))
+- *(questions)* Start fixing the question saving error ([`1ea5497`](https://github.com/wilsonborba/certifications_api/commit/1ea5497a6367ce27f92e5b8cb70316e502cc69be))
+- *(questions)* Completed  fixing the question saving error for grok topics ([`35125a9`](https://github.com/wilsonborba/certifications_api/commit/35125a928616966ad26d73affe72de3e9708a300))
+- *(questions)* Completed  fixing the question saving error for grok PDF ([`6b603c2`](https://github.com/wilsonborba/certifications_api/commit/6b603c21f4768f249cb99cb5de5678b5b8583186))
+- Rename Certifications API identity ([`045f774`](https://github.com/wilsonborba/certifications_api/commit/045f774dfa461757caa36e45fac51b23d643a020))
+- Rename Certifications database table references ([`cf88d3e`](https://github.com/wilsonborba/certifications_api/commit/cf88d3ef4770c451aed0c4d27d800261738a38e0))
+- Migrate Certifications API dependencies to pyproject ([`94c153b`](https://github.com/wilsonborba/certifications_api/commit/94c153b4f2662345162fbe68b8e96be314ad5fc7))
+- Keep certifications api document-only ([`abe4d76`](https://github.com/wilsonborba/certifications_api/commit/abe4d76aeea7e99c9c3a3766be0e5b7139e561af))
+- Use FSM media API for studies ([`11fde27`](https://github.com/wilsonborba/certifications_api/commit/11fde2726f29f56eac2072144092b09b3e3c5eac))
+- Certifications Cortex request policy ([`b4a27f9`](https://github.com/wilsonborba/certifications_api/commit/b4a27f9519ac8d4629b0eb2ead77e35368780561))
+- Certifications PostgreSQL migration bootstrap ([`8916bf7`](https://github.com/wilsonborba/certifications_api/commit/8916bf74689f27d507b2098084f19b0b38796438))
+- User-controlled Cortex web research ([`233af0f`](https://github.com/wilsonborba/certifications_api/commit/233af0f4611574d9a22986dee28c40019329fef4))
+- Persist plan waitlist requests ([`7cc64dc`](https://github.com/wilsonborba/certifications_api/commit/7cc64dc1362e6fb057df22298ec11d0e541262b8))
+- Isolate Certifications Redis database ([`b4a0ace`](https://github.com/wilsonborba/certifications_api/commit/b4a0acebb8878cf79a7753ef4b4b89f9a0039bd8))
+- Add authenticated waitlist contract ([`f4173b0`](https://github.com/wilsonborba/certifications_api/commit/f4173b070f02ed32952ca4215471604e36a326c5))
+- Keep waitlist metadata in Redis ([`56bb5b0`](https://github.com/wilsonborba/certifications_api/commit/56bb5b00363d2b62422dd956e8bf816e9cd3d7c7))
+- Merge feature/quota-and-anonymous-access into feature/main
+
+Refs #18, #19 ([`608d07a`](https://github.com/wilsonborba/certifications_api/commit/608d07a7fc6144b9f34f88b650d09df2f15ff1ce))
+- Merge feature/quiz-taking-and-scoring into feature/main ([`f6d29c6`](https://github.com/wilsonborba/certifications_api/commit/f6d29c63174b7c6f640c81f51ba1225cd3e1e1c0))
+- Merge fix/uuid-owner-comparison into feature/main ([`cb9b812`](https://github.com/wilsonborba/certifications_api/commit/cb9b812e6e66c208a67e70f3c75273e0336a047a))
+
+### 🚜 Refactor
+
+- Rename Accredit API identity to Certifications ([`d6f09f0`](https://github.com/wilsonborba/certifications_api/commit/d6f09f02e5ade2057c1b15bd9df01f905fb2d5ff))
+- Rename Certifications database table references ([`e50bc43`](https://github.com/wilsonborba/certifications_api/commit/e50bc43c5b01557b1611e2247be708a717a1b8c3))
+- Remove website source adapters ([`28371bc`](https://github.com/wilsonborba/certifications_api/commit/28371bc42849cc405c9e2a9ef79c2b3baaab532d))
+- Remove user token configuration ([`01533a9`](https://github.com/wilsonborba/certifications_api/commit/01533a95e98ff43aef9683e793d3ca107552d32c))
+- Merge token configuration removal (#7) ([`d33b2c0`](https://github.com/wilsonborba/certifications_api/commit/d33b2c0ca57f6a803e10cd8f1cedac33be6d9e8a))
+- Use FSM media API for studies ([`a09bb87`](https://github.com/wilsonborba/certifications_api/commit/a09bb879291a9379e2eedbdf4bac99611889e12a))
+- *(prompt)* Remove d2 diagram generation requirement ([`2296522`](https://github.com/wilsonborba/certifications_api/commit/229652231873ac6ee6a33c046e5808c695821e95))
 
 ### ⚙️ Miscellaneous Tasks
 
-- *(env)* Initial structure of app created
-- *(env)* Created a exploration dir to have files
+- *(env)* Initial structure of app created ([`3a99ec2`](https://github.com/wilsonborba/certifications_api/commit/3a99ec25b7363745f875eed4dfc2da0556fc4f9c))
+- *(env)* Created a exploration dir to have files ([`1c8d4b6`](https://github.com/wilsonborba/certifications_api/commit/1c8d4b60effb5e702a1321c60950dbab4ed15a24))
+- *(runtime)* Configure accredit api endpoint ([`f8db16a`](https://github.com/wilsonborba/certifications_api/commit/f8db16a03da63b2d1031ee311ef9b873afed3986))
+- *(runtime)* Merge accredit api endpoint configuration ([`ba8ac21`](https://github.com/wilsonborba/certifications_api/commit/ba8ac21e8916e8f3a8e0b3370240d823ac592fe4))
+- Migrate Certifications API dependencies to pyproject ([`3cc8dec`](https://github.com/wilsonborba/certifications_api/commit/3cc8decc400e4681164b2703ad52764e666b277e))
+- *(dal)* Prepare Alembic bootstrap for durable records ([`d822196`](https://github.com/wilsonborba/certifications_api/commit/d8221960f6a3dee07912fc433d987823b61e5099))
+- Remove unused openrouter_models.json ([`5588f8e`](https://github.com/wilsonborba/certifications_api/commit/5588f8ecd7b0e3e2f7d13e6f709b257c310d6e4c))
+<!-- generated by git-cliff -->
