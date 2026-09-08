@@ -45,10 +45,9 @@ class Settings(BaseSettings):
     CORTEX_BASE_URL: str = "http://127.0.0.1:8003"
     CORTEX_TENANT_ID: str = "certifications"
 
-    # Product safeguards, not a second Cortex availability manager. Cortex
-    # owns model routing/cooldowns; Certifications only limits its own work.
-    GENERATION_EASY_DAILY_LIMIT: int = 1
-    GENERATION_PREMIUM_DAILY_LIMIT: int = 1
+    # Concurrency-only safeguards, not a second Cortex availability manager.
+    # Cortex owns model routing/cooldowns; Certifications only limits how many
+    # of its own generations run at once (no daily usage quota).
     GENERATION_T0_GLOBAL_CONCURRENCY: int = 2
     GENERATION_PREMIUM_GLOBAL_CONCURRENCY: int = 1
     GENERATION_LEASE_SECONDS: int = 15 * 60

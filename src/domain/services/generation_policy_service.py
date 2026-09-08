@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
 from random import Random
 
 from src.core.settings import Settings
@@ -12,16 +11,17 @@ from src.domain.models.generation_policy import (
     GenerationOutcome,
     GenerationRequest,
     GenerationStatus,
-    StudyDifficulty,
 )
 
 
 class GenerationPolicyService:
-    """Enforces Certifications product limits before one Cortex invocation.
+    """Serializes Cortex invocations per user and per tier group.
 
     It deliberately does not inspect model availability: Cortex already owns
-    that responsibility. Redis locks make the app-level limits work across API
-    workers and are released after each terminal result.
+    that responsibility. Redis locks make one-generation-at-a-time-per-user
+    and the global concurrency cap work across API workers, and are released
+    after each terminal result. There is no daily/usage quota here anymore;
+    this is concurrency control only.
     """
 
     def __init__(self, *, redis: RedisAdapter, cortex: CortexAdapter, settings: Settings) -> None:
@@ -47,34 +47,6 @@ class GenerationPolicyService:
         group = "t0" if tier == 0 else "premium"
         user_lock = self._redis.k("generation", "user", user_id)
         global_lock = self._redis.k("generation", "global", group)
-        day = datetime.now(UTC).date().isoformat()
-        credit_kind = "easy" if request.difficulty is StudyDifficulty.easy else "premium"
-        credit_key = self._redis.k("generation", "credits", credit_kind, user_id, day)
-        
-        # Check custom user limit from PostgreSQL
-        custom_limit = None
-        try:
-            from src.dal.local.db_adapter import DBAdapter
-            from src.dal.local.orm import UserGenerationLimit
-            from sqlalchemy import select
-            with DBAdapter().session_scope() as session:
-                entry = session.execute(
-                    select(UserGenerationLimit).where(UserGenerationLimit.user_id == user_id)
-                ).scalar_one_or_none()
-                if entry:
-                    custom_limit = entry.daily_limit
-        except Exception:
-            pass
-
-        credit_limit = (
-            custom_limit
-            if custom_limit is not None
-            else (
-                self._settings.GENERATION_EASY_DAILY_LIMIT
-                if credit_kind == "easy"
-                else self._settings.GENERATION_PREMIUM_DAILY_LIMIT
-            )
-        )
         global_limit = (
             self._settings.GENERATION_T0_GLOBAL_CONCURRENCY
             if group == "t0"
@@ -96,11 +68,6 @@ class GenerationPolicyService:
                 await self._redis.release_lock(user_lock)
                 return GenerationOutcome(status=GenerationStatus.unavailable, retryable=True, error_code="generation_unavailable")
 
-            if request.consume_credit:
-                used = int(await self._redis.raw.get(credit_key) or 0)
-                if used >= credit_limit:
-                    return GenerationOutcome(status=GenerationStatus.quota_exhausted, error_code="generation_quota_exhausted")
-
             try:
                 result = await self._cortex.execute_question_generation(
                     prompt=request.prompt,
@@ -118,10 +85,6 @@ class GenerationPolicyService:
                 error(f"Cortex question generation returned success=False. Error type: {result.error_type}, response: {result.response}")
                 return GenerationOutcome(status=GenerationStatus.failed, retryable=True, request_id=result.request_id, tier_requested=tier, error_code="generation_failed")
 
-            # Credit is recorded only after a successful result when requested.
-            if request.consume_credit:
-                await self._redis.raw.incr(credit_key)
-                await self._redis.raw.expire(credit_key, 60 * 60 * 48)
             return GenerationOutcome(status=GenerationStatus.ready, request_id=result.request_id, tier_requested=tier, response=result.response)
         except RedisAdapterError:
             return GenerationOutcome(status=GenerationStatus.unavailable, retryable=True, error_code="generation_unavailable")
