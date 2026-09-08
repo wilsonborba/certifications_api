@@ -60,12 +60,9 @@ class QuestionGenerationService:
         difficulty: str,
         idempotency_key: str,
         use_web: bool = False,
-        question_count: int | None = None,
+        question_count: int = 20,
     ) -> list[StudyQuestion]:
-        # A UI-picked cap, or None for "as many as the material supports"
-        # (still bounded by the hard 20-question ceiling below).
-        target_count = question_count if question_count and question_count > 0 else None
-        max_questions = min(target_count, 20) if target_count else 20
+        target_count = min(question_count, 20)
 
         ready_sources = [source for source in study.sources if source.status is SourceStatus.ready and source.derived_object_key]
         if not ready_sources:
@@ -105,11 +102,10 @@ class QuestionGenerationService:
         await _save_progress(0)
 
         for idx, chunk in enumerate(selected_chunks):
-            if len(final_questions) >= max_questions:
+            if len(final_questions) >= target_count:
                 break
-            needed = (target_count - len(final_questions)) if target_count else None
-            count_str = f"exactly {needed}" if needed and needed > 0 else "3 to 10"
-            chunk_prompt = self._prompt(chunk, use_web=use_web, count_instruction=count_str)
+            needed = target_count - len(final_questions)
+            chunk_prompt = self._prompt(chunk, use_web=use_web, count_instruction=f"exactly {needed}")
             chunk_idempotency_key = f"{idempotency_key}-c{idx}"
             request = GenerationRequest(
                 study_id=study.id,
@@ -132,7 +128,7 @@ class QuestionGenerationService:
                         seen_prompts.add(normalized)
                         final_questions.append(q)
                         await self._repository.save_question(study_id=study.id, question=q)
-                        if len(final_questions) >= max_questions:
+                        if len(final_questions) >= target_count:
                             break
             except QuestionContractError as exc:
                 last_error = str(exc)
