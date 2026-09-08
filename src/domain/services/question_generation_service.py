@@ -105,7 +105,7 @@ class QuestionGenerationService:
         await _save_progress(0)
 
         for idx, chunk in enumerate(selected_chunks):
-            if target_count and len(final_questions) >= target_count:
+            if len(final_questions) >= max_questions:
                 break
             needed = (target_count - len(final_questions)) if target_count else None
             count_str = f"exactly {needed}" if needed and needed > 0 else "3 to 10"
