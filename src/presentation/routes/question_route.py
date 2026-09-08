@@ -74,6 +74,21 @@ async def generate_questions(study_id: str, payload: GenerateQuestionsPayload, r
     return {"data": [question.for_answering() for question in questions], "message": "Questions generated"}
 
 
+@question_router.get("")
+async def get_study_questions(study_id: str, request: Request) -> dict:
+    owner_id = _owner_id(request)
+    repository = StudyRepository(request.app.state.redis)
+    if await repository.get_owned(owner_id=owner_id, study_id=study_id) is None:
+        raise HTTPException(status_code=404, detail="Study not found")
+    question_ids = await request.app.state.redis.smembers(request.app.state.redis.k("study_questions", "study", study_id))
+    questions: list[StudyQuestion] = []
+    for qid in question_ids:
+        raw = await repository.get_question(study_id=study_id, question_id=str(qid))
+        if raw is not None:
+            questions.append(StudyQuestion.model_validate(raw))
+    return {"data": [q.for_answering() for q in questions], "message": "Questions retrieved"}
+
+
 @question_router.get("/progress")
 async def get_generation_progress(study_id: str, request: Request) -> dict:
     """Polled by the frontend while /generate is in flight to show real

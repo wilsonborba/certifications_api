@@ -86,7 +86,8 @@ class QuestionGenerationService:
         study.status = StudyStatus.generating
         await self._repository.save(study)
 
-        collected_questions: list[StudyQuestion] = []
+        final_questions: list[StudyQuestion] = []
+        seen_prompts: set[str] = set()
         last_error: str | None = None
 
         async def _save_progress(chunks_done: int, *, status: str = "generating") -> None:
@@ -96,7 +97,7 @@ class QuestionGenerationService:
                     "status": status,
                     "chunks_done": chunks_done,
                     "chunks_total": len(selected_chunks),
-                    "questions_generated": len(collected_questions),
+                    "questions_generated": len(final_questions),
                     "questions_target": target_count,
                 },
             )
@@ -104,9 +105,11 @@ class QuestionGenerationService:
         await _save_progress(0)
 
         for idx, chunk in enumerate(selected_chunks):
-            if target_count and len(collected_questions) >= target_count:
+            if target_count and len(final_questions) >= target_count:
                 break
-            chunk_prompt = self._prompt(chunk, use_web=use_web)
+            needed = (target_count - len(final_questions)) if target_count else None
+            count_str = f"exactly {needed}" if needed and needed > 0 else "3 to 10"
+            chunk_prompt = self._prompt(chunk, use_web=use_web, count_instruction=count_str)
             chunk_idempotency_key = f"{idempotency_key}-c{idx}"
             request = GenerationRequest(
                 study_id=study.id,
@@ -124,7 +127,14 @@ class QuestionGenerationService:
             try:
                 web_references = self._extract_web_references(outcome.response)
                 document = self._parse(outcome.response, tier=outcome.tier_requested or 0, web_references=web_references)
-                collected_questions.extend(document.questions)
+                for q in document.questions:
+                    normalized = q.prompt.strip().lower()
+                    if normalized not in seen_prompts:
+                        seen_prompts.add(normalized)
+                        final_questions.append(q)
+                        await self._repository.save_question(study_id=study.id, question=q)
+                        if len(final_questions) >= max_questions:
+                            break
             except QuestionContractError as exc:
                 last_error = str(exc)
             await _save_progress(idx + 1)
@@ -132,27 +142,15 @@ class QuestionGenerationService:
         study.status = StudyStatus.ready
         await self._repository.save(study)
 
-        if not collected_questions:
+        if not final_questions:
             await _save_progress(len(selected_chunks), status="error")
             raise QuestionContractError(last_error or "Question generation is unavailable")
-
-        # Deduplicate and cap at the requested count (or 20 when unbounded)
-        seen_prompts: set[str] = set()
-        final_questions: list[StudyQuestion] = []
-        for q in collected_questions:
-            normalized = q.prompt.strip().lower()
-            if normalized not in seen_prompts:
-                seen_prompts.add(normalized)
-                final_questions.append(q)
-                await self._repository.save_question(study_id=study.id, question=q)
-                if len(final_questions) >= max_questions:
-                    break
 
         await _save_progress(len(selected_chunks), status="ready")
         return final_questions
 
     @staticmethod
-    def _prompt(context: str, *, use_web: bool = False) -> str:
+    def _prompt(context: str, *, use_web: bool = False, count_instruction: str = "3 to 10") -> str:
         # Deliberately does NOT ask the model to self-report which URL it
         # used: an LLM asked to name its own source is prone to inventing or
         # misattributing one. Cortex already appends a deterministic
@@ -172,24 +170,13 @@ or cite it yourself, that is handled separately.
         return f"""Study material:
 {context}
 
-Generate 3 to 10 educational multiple-choice questions based on the study material above.
-Use a diagram (visual.kind: "d2") for EVERY question involving any of the following, even loosely:
-a process, sequence, or cause-and-effect chain; a classification/categorization scheme (e.g. named
-codes, levels, or categories and what distinguishes them); or the architecture/components of a
-system, framework, or method (e.g. what parts it's made of, or how they connect). Most study
-material has many such opportunities, so do not be shy about including one whenever it genuinely
-applies - academic/technical material in particular is rarely "just a fact" once you look at how its
-pieces relate. Set "edges" to at least 2 real arrows: each entry has "from_node" and "to_node" as
-short node labels and "label" describing that connection (or "" if it doesn't need one) - never
-output "kind": "d2" with an empty or missing "edges" list. Do not write diagram syntax yourself,
-just the nodes and relationships. Only use "visual": {{"kind": "none"}} when the question is a
-single isolated fact with no structure, category, or relationship of any kind to depict.
+Generate {count_instruction} educational multiple-choice questions based on the study material above.
 {web_instructions}You MUST output ONLY a valid JSON object matching this exact schema:
 
 {{
   "questions": [
     {{
-      "prompt": "What is the key concept or architectural relationship discussed?",
+      "prompt": "What is the key concept or relationship discussed?",
       "choices": [
         "Option A description",
         "Option B description",
@@ -205,12 +192,7 @@ single isolated fact with no structure, category, or relationship of any kind to
         }}
       ],
       "visual": {{
-        "kind": "d2",
-        "edges": [
-          {{"from_node": "A", "to_node": "B", "label": "Data Flow"}},
-          {{"from_node": "B", "to_node": "C", "label": "Processed"}}
-        ],
-        "description": "Concept diagram"
+        "kind": "none"
       }}
     }}
   ]
@@ -243,18 +225,43 @@ single isolated fact with no structure, category, or relationship of any kind to
         try:
             data = json.loads(cleaned)
         except Exception:
-            # Fallback: attempt to find individual question objects with regex if outer JSON is malformed
-            q_matches = re.findall(r"\{\s*\"prompt\"[\s\S]*?\"visual\"[\s\S]*?\}", cleaned)
-            salvaged: list[dict] = []
-            for q_str in q_matches:
-                try:
-                    # Clean trailing commas if any
-                    fixed_str = re.sub(r",\s*([\]}])", r"\1", q_str)
-                    salvaged.append(json.loads(fixed_str))
-                except Exception:
-                    continue
-            if salvaged:
-                data = {"questions": salvaged}
+            # Fallback 1: repair incomplete/truncated questions array
+            # If the model hit a token limit mid-generation, close the open question/array
+            try:
+                # Find the last completed question object closing `}`
+                last_brace = cleaned.rfind("}")
+                if last_brace != -1:
+                    truncated_candidate = cleaned[: last_brace + 1].strip()
+                    # Clean any trailing commas before brackets
+                    truncated_candidate = re.sub(r",\s*$", "", truncated_candidate)
+                    if not truncated_candidate.endswith("]}"):
+                        if truncated_candidate.endswith("]"):
+                            truncated_candidate += "}"
+                        else:
+                            truncated_candidate += "]}"
+                    data = json.loads(truncated_candidate)
+            except Exception:
+                pass
+
+            if not data or not isinstance(data, dict) or not data.get("questions"):
+                # Fallback 2: extract each question object block with regex
+                q_matches = re.finditer(r"\{\s*\"prompt\"\s*:", cleaned)
+                salvaged: list[dict] = []
+                starts = [m.start() for m in q_matches]
+                for i, start_idx in enumerate(starts):
+                    end_idx = starts[i + 1] if i + 1 < len(starts) else len(cleaned)
+                    chunk_q = cleaned[start_idx:end_idx].strip().rstrip(",")
+                    # Find matching or last closing brace in this chunk
+                    last_b = chunk_q.rfind("}")
+                    if last_b != -1:
+                        chunk_q = chunk_q[: last_b + 1]
+                    try:
+                        fixed_str = re.sub(r",\s*([\]}])", r"\1", chunk_q)
+                        salvaged.append(json.loads(fixed_str))
+                    except Exception:
+                        continue
+                if salvaged:
+                    data = {"questions": salvaged}
 
         if not data or not isinstance(data, dict):
             from src.core.logs import error
