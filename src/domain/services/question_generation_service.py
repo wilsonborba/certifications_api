@@ -86,7 +86,8 @@ class QuestionGenerationService:
         study.status = StudyStatus.generating
         await self._repository.save(study)
 
-        collected_questions: list[StudyQuestion] = []
+        final_questions: list[StudyQuestion] = []
+        seen_prompts: set[str] = set()
         last_error: str | None = None
 
         async def _save_progress(chunks_done: int, *, status: str = "generating") -> None:
@@ -96,7 +97,7 @@ class QuestionGenerationService:
                     "status": status,
                     "chunks_done": chunks_done,
                     "chunks_total": len(selected_chunks),
-                    "questions_generated": len(collected_questions),
+                    "questions_generated": len(final_questions),
                     "questions_target": target_count,
                 },
             )
@@ -104,9 +105,11 @@ class QuestionGenerationService:
         await _save_progress(0)
 
         for idx, chunk in enumerate(selected_chunks):
-            if target_count and len(collected_questions) >= target_count:
+            if target_count and len(final_questions) >= target_count:
                 break
-            chunk_prompt = self._prompt(chunk, use_web=use_web)
+            needed = (target_count - len(final_questions)) if target_count else None
+            count_str = f"exactly {needed}" if needed and needed > 0 else "3 to 10"
+            chunk_prompt = self._prompt(chunk, use_web=use_web, count_instruction=count_str)
             chunk_idempotency_key = f"{idempotency_key}-c{idx}"
             request = GenerationRequest(
                 study_id=study.id,
@@ -124,7 +127,14 @@ class QuestionGenerationService:
             try:
                 web_references = self._extract_web_references(outcome.response)
                 document = self._parse(outcome.response, tier=outcome.tier_requested or 0, web_references=web_references)
-                collected_questions.extend(document.questions)
+                for q in document.questions:
+                    normalized = q.prompt.strip().lower()
+                    if normalized not in seen_prompts:
+                        seen_prompts.add(normalized)
+                        final_questions.append(q)
+                        await self._repository.save_question(study_id=study.id, question=q)
+                        if len(final_questions) >= max_questions:
+                            break
             except QuestionContractError as exc:
                 last_error = str(exc)
             await _save_progress(idx + 1)
@@ -132,27 +142,15 @@ class QuestionGenerationService:
         study.status = StudyStatus.ready
         await self._repository.save(study)
 
-        if not collected_questions:
+        if not final_questions:
             await _save_progress(len(selected_chunks), status="error")
             raise QuestionContractError(last_error or "Question generation is unavailable")
-
-        # Deduplicate and cap at the requested count (or 20 when unbounded)
-        seen_prompts: set[str] = set()
-        final_questions: list[StudyQuestion] = []
-        for q in collected_questions:
-            normalized = q.prompt.strip().lower()
-            if normalized not in seen_prompts:
-                seen_prompts.add(normalized)
-                final_questions.append(q)
-                await self._repository.save_question(study_id=study.id, question=q)
-                if len(final_questions) >= max_questions:
-                    break
 
         await _save_progress(len(selected_chunks), status="ready")
         return final_questions
 
     @staticmethod
-    def _prompt(context: str, *, use_web: bool = False) -> str:
+    def _prompt(context: str, *, use_web: bool = False, count_instruction: str = "3 to 10") -> str:
         # Deliberately does NOT ask the model to self-report which URL it
         # used: an LLM asked to name its own source is prone to inventing or
         # misattributing one. Cortex already appends a deterministic
@@ -172,7 +170,7 @@ or cite it yourself, that is handled separately.
         return f"""Study material:
 {context}
 
-Generate 3 to 10 educational multiple-choice questions based on the study material above.
+Generate {count_instruction} educational multiple-choice questions based on the study material above.
 {web_instructions}You MUST output ONLY a valid JSON object matching this exact schema:
 
 {{
