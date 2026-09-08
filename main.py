@@ -48,6 +48,11 @@ app = FastAPI(
 )
 
 
+import uuid
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from fastapi.exceptions import RequestValidationError
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -57,14 +62,74 @@ app.add_middleware(
 )
 
 
+class RequestIdMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+
+app.add_middleware(RequestIdMiddleware)
+
+
+def _extract_request_id(request: Request | None) -> str | None:
+    if request is None:
+        return None
+    req_state = getattr(request, "state", None)
+    if req_state:
+        req_id = getattr(req_state, "request_id", None)
+        if req_id:
+            return req_id
+    headers = getattr(request, "headers", None)
+    if headers:
+        return headers.get("x-request-id")
+    return None
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    request_id = _extract_request_id(request)
+    content = {"detail": exc.detail}
+    if request_id:
+        content["request_id"] = request_id
+    headers = {"X-Request-ID": request_id} if request_id else {}
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=content,
+        headers=headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    request_id = _extract_request_id(request)
+    content = {"detail": exc.errors()}
+    if request_id:
+        content["request_id"] = request_id
+    headers = {"X-Request-ID": request_id} if request_id else {}
+    return JSONResponse(
+        status_code=422,
+        content=content,
+        headers=headers,
+    )
+
+
 @app.exception_handler(RedisAdapterError)
 @app.exception_handler(RedisError)
-async def redis_unavailable(_: Request, exc: Exception) -> JSONResponse:
+async def redis_unavailable(request: Request, exc: Exception) -> JSONResponse:
     """Keep infrastructure details in server logs and return a stable API error."""
-    error(f"Redis request failure: {type(exc).__name__}")
+    request_id = _extract_request_id(request)
+    error(f"Redis request failure [request_id={request_id}]: {type(exc).__name__}")
+    content = {"detail": "Study service is temporarily unavailable. Please try again shortly."}
+    if request_id:
+        content["request_id"] = request_id
+    headers = {"X-Request-ID": request_id} if request_id else {}
     return JSONResponse(
         status_code=503,
-        content={"detail": "Study service is temporarily unavailable. Please try again shortly."},
+        content=content,
+        headers=headers,
     )
 
 app.include_router(study_router, tags=["studies"])
