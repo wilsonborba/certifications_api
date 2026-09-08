@@ -63,8 +63,6 @@ async def generate_questions(study_id: str, payload: GenerateQuestionsPayload, r
         detail = str(exc)
         if detail in {"generation_unavailable", "generation_already_running", "generation_failed"}:
             raise HTTPException(status_code=503, detail="Question generation is temporarily unavailable") from None
-        if detail == "generation_quota_exhausted":
-            raise HTTPException(status_code=429, detail="Question generation limit reached") from None
         # Every other reason ends as a generic 422 for the client, but the
         # real cause (contract validation failure, no ready sources, etc.)
         # must not be silently discarded here - that's what made this class

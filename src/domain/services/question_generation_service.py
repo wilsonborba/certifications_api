@@ -117,7 +117,6 @@ class QuestionGenerationService:
                 idempotency_key=chunk_idempotency_key,
                 prompt=chunk_prompt,
                 use_web=use_web,
-                consume_credit=idx == 0,
             )
             outcome = await self._policy.generate(user_id=user_id, request=request)
             if outcome.status.value != "ready" or not outcome.response:

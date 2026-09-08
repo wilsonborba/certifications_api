@@ -45,13 +45,11 @@ class GenerationRequest(BaseModel):
     idempotency_key: str = Field(min_length=16, max_length=128)
     prompt: str = Field(min_length=1, max_length=120_000)
     use_web: bool = False
-    consume_credit: bool = True
 
 
 class GenerationStatus(StrEnum):
     ready = "ready"
     unavailable = "unavailable"
-    quota_exhausted = "quota_exhausted"
     already_running = "already_running"
     failed = "failed"
 
@@ -63,6 +61,6 @@ class GenerationOutcome(BaseModel):
     tier_requested: int | None = None
     response: str | None = None
     error_code: Literal[
-        "generation_unavailable", "generation_quota_exhausted",
+        "generation_unavailable",
         "generation_already_running", "generation_failed",
     ] | None = None
