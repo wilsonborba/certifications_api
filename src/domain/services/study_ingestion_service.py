@@ -61,7 +61,7 @@ class StudyIngestionService:
         elif source.kind is SourceKind.text:
             text, ranges = self._extract_text(raw, selection.line_start or 1, selection.line_end or 1)
         else:
-            text = await self._transcribe_audio(raw, selection)
+            text = await self._transcribe_audio(raw, selection, user_id=source.owner_id)
             ranges = [{"audio_start_ms": selection.audio_start_ms or 0, "audio_end_ms": selection.audio_end_ms or 0}]
         normalized = self._normalize(text)
         if not normalized:
@@ -134,7 +134,7 @@ class StudyIngestionService:
         except Exception as exc:
             raise IngestionError("The CSV file could not be read") from exc
 
-    async def _transcribe_audio(self, raw: bytes, selection: "SourceSelection") -> str:
+    async def _transcribe_audio(self, raw: bytes, selection: "SourceSelection", *, user_id: str) -> str:
         # Cortex's documented attachment ingestion invokes its local Whisper
         # capability when enabled. The source remains in FSM; only its text is
         # retained as the compact derivative.
@@ -147,7 +147,7 @@ class StudyIngestionService:
             f"for the interval {start_ms}-{end_ms} milliseconds."
         )
         try:
-            result = await self._cortex.execute_question_generation(prompt=prompt, tier=0, attachments=[attachment])
+            result = await self._cortex.execute_question_generation(prompt=prompt, tier=0, user_id=user_id, attachments=[attachment])
         except CortexUnavailableError as exc:
             raise IngestionError("Audio transcription is temporarily unavailable") from exc
         if not result.success or not result.response.strip():

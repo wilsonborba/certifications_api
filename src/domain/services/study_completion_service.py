@@ -36,6 +36,7 @@ class StudyCompletionService:
         try:
             result = await self._cortex.execute_question_generation(
                 tier=0,
+                user_id=study.owner_id,
                 prompt="Summarize this study context for a future learner. Preserve key concepts and source-linked facts; do not invent information.\n\n" + context,
             )
         except CortexUnavailableError as exc:
