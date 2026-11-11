@@ -71,6 +71,7 @@ class GenerationPolicyService:
             try:
                 result = await self._cortex.execute_question_generation(
                     prompt=request.prompt,
+                    user_id=user_id,
                     tier=tier,
                     use_web=request.use_web,
                 )
