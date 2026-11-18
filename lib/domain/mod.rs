@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod authoring;
+pub mod catalog;
 pub mod cleanup;
 pub mod estimates;
 pub mod generations;
