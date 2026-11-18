@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod authoring;
 pub mod cleanup;
 pub mod estimates;
 pub mod generations;

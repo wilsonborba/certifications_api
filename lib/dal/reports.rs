@@ -15,6 +15,12 @@ pub struct ReportPickerItem {
     pub is_restricted: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct RenderedVisual {
+    pub bytes: Vec<u8>,
+    pub mime_type: String,
+}
+
 pub trait ReportsClient: Send + Sync {
     fn list_readable_reports<'a>(
         &'a self,
@@ -28,6 +34,13 @@ pub trait ReportsClient: Send + Sync {
         project: &'a str,
         report: &'a str,
     ) -> BoxFuture<'a, Result<ReportPickerItem>>;
+
+    fn render_question_visual<'a>(
+        &'a self,
+        user_id: &'a str,
+        prompt: &'a str,
+        visual_spec: &'a Value,
+    ) -> BoxFuture<'a, Result<RenderedVisual>>;
 }
 
 pub struct DisabledReports;
@@ -46,6 +59,14 @@ impl ReportsClient for DisabledReports {
         _project: &'a str,
         _report: &'a str,
     ) -> BoxFuture<'a, Result<ReportPickerItem>> {
+        Box::pin(async { Err(Error::unavailable()) })
+    }
+    fn render_question_visual<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _prompt: &'a str,
+        _visual_spec: &'a Value,
+    ) -> BoxFuture<'a, Result<RenderedVisual>> {
         Box::pin(async { Err(Error::unavailable()) })
     }
 }
@@ -188,6 +209,43 @@ impl ReportsClient for HttpReports {
                 title,
                 is_restricted: visibility != "public",
             })
+        })
+    }
+
+    fn render_question_visual<'a>(
+        &'a self,
+        user_id: &'a str,
+        prompt: &'a str,
+        visual_spec: &'a Value,
+    ) -> BoxFuture<'a, Result<RenderedVisual>> {
+        Box::pin(async move {
+            let resp = self
+                .http
+                .post(format!("{}/jobs/temporary-render", self.base_url))
+                .header("x-uuid", user_id)
+                .json(&serde_json::json!({
+                    "kind": "question_visual",
+                    "prompt": prompt,
+                    "spec": visual_spec,
+                }))
+                .send()
+                .await
+                .map_err(|_| Error::unavailable())?;
+            if !resp.status().is_success() {
+                return Err(Error::unavailable());
+            }
+            let mime_type = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("image/png")
+                .to_string();
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|_| Error::unavailable())?
+                .to_vec();
+            Ok(RenderedVisual { bytes, mime_type })
         })
     }
 }

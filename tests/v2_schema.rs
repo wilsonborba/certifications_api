@@ -52,6 +52,8 @@ async fn migrations_apply_cleanly_rerun_safely_and_have_no_json_or_array_columns
                 !l.starts_with("ALTER TABLE studies ADD COLUMN ")
                     && !l.starts_with("ALTER TABLE sources ADD COLUMN ")
                     && !l.starts_with("ALTER TABLE generation_jobs ADD COLUMN ")
+                    && !l.starts_with("ALTER TABLE questions ADD COLUMN ")
+                    && !l.starts_with("ALTER TABLE quizzes ADD COLUMN ")
             })
             .collect::<Vec<_>>()
             .join("\n");
