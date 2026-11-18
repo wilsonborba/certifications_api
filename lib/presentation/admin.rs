@@ -1,6 +1,6 @@
 use crate::{
     core::Result,
-    domain::{App, authoring, cleanup},
+    domain::{App, authoring, certificates, cleanup},
     presentation::auth::AdminUser,
 };
 use axum::{
@@ -23,6 +23,16 @@ struct OriginOverrideBody {
     apply_to_questions: bool,
 }
 
+#[derive(Deserialize)]
+struct HolderUpdateBody {
+    display_name: String,
+}
+
+#[derive(Deserialize)]
+struct RevokeBody {
+    reason: String,
+}
+
 pub fn routes() -> Router<App> {
     Router::new()
         .route("/admin/cleanup", get(list_cleanup))
@@ -31,6 +41,11 @@ pub fn routes() -> Router<App> {
         .route(
             "/admin/quizzes/{quiz_id}/origin",
             patch(override_quiz_origin),
+        )
+        .route("/admin/holders/{holder_id}", patch(update_holder))
+        .route(
+            "/admin/certificates/{certificate_code}/revocation",
+            post(revoke_certificate),
         )
 }
 
@@ -82,4 +97,35 @@ async fn override_quiz_origin(
     )
     .await?;
     Ok(Json(json!({ "quiz_id": quiz_id, "origin": body.origin })))
+}
+
+async fn update_holder(
+    State(app): State<App>,
+    AdminUser(admin): AdminUser,
+    Path(holder_id): Path<String>,
+    Json(body): Json<HolderUpdateBody>,
+) -> Result<Json<Value>> {
+    let caller = admin
+        .as_ref()
+        .ok_or_else(|| crate::core::Error::forbidden("admin_required: Admin access required"))?;
+    let updated =
+        certificates::admin_update_holder(&app.store, caller, &holder_id, &body.display_name)
+            .await?;
+    Ok(Json(json!(updated)))
+}
+
+async fn revoke_certificate(
+    State(app): State<App>,
+    AdminUser(admin): AdminUser,
+    Path(certificate_code): Path<String>,
+    Json(body): Json<RevokeBody>,
+) -> Result<Json<Value>> {
+    let caller = admin
+        .as_ref()
+        .ok_or_else(|| crate::core::Error::forbidden("admin_required: Admin access required"))?;
+    certificates::admin_revoke_certificate(&app.store, caller, &certificate_code, &body.reason)
+        .await?;
+    Ok(Json(
+        json!({ "verification_code": certificate_code, "status": "revoked" }),
+    ))
 }
