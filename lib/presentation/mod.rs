@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod auth;
+pub mod generations;
 pub mod logs;
 pub mod studies;
 
@@ -15,6 +16,7 @@ pub fn router(app: App) -> Router {
         )
         .route("/ready", get(ready))
         .merge(studies::routes())
+        .merge(generations::routes())
         .merge(admin::routes())
         .layer(axum::middleware::from_fn(auth::admin_guard))
         .layer(axum::middleware::map_response(

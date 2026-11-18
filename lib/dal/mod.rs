@@ -1,3 +1,4 @@
+pub mod cortex;
 pub mod documents;
 pub mod fsm;
 pub mod scanner;
@@ -7,9 +8,10 @@ use crate::core::{Error, Result, Settings};
 use sqlx::{AnyPool, ConnectOptions, any::AnyPoolOptions};
 use std::sync::Arc;
 
-pub const SQLITE_MIGRATIONS: [&str; 2] = [
+pub const SQLITE_MIGRATIONS: [&str; 3] = [
     include_str!("../../migrations/001_v2_schema.sql"),
     include_str!("../../tests/sqlite/002_v2_studies_sources.sql"),
+    include_str!("../../tests/sqlite/003_v2_generation_events.sql"),
 ];
 
 #[derive(Clone)]
@@ -18,6 +20,7 @@ pub struct Store {
     pub docs: documents::Documents,
     pub fsm: Arc<dyn fsm::FsmClient>,
     pub scanner: Arc<dyn scanner::VirusScanner>,
+    pub cortex: Arc<dyn cortex::CortexClient>,
 }
 
 impl Store {
@@ -37,8 +40,9 @@ impl Store {
         Ok(Self {
             db,
             docs: documents::Documents::remote(settings, http.clone()),
-            fsm: fsm::HttpFsm::client(&settings.fsm_url, &settings.fsm_key, http),
+            fsm: fsm::HttpFsm::client(&settings.fsm_url, &settings.fsm_key, http.clone()),
             scanner: Arc::new(scanner::ClamScanner::new("clamscan")),
+            cortex: cortex::HttpCortex::client(&settings.cortex_url, http),
         })
     }
 
@@ -61,6 +65,7 @@ impl Store {
             docs: documents::Documents::Memory(documents::Documents::memory()),
             fsm: fsm::MemoryFsm::new(),
             scanner: Arc::new(CleanFixtureScanner),
+            cortex: Arc::new(cortex::DisabledCortex),
         }
     }
 

@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod cleanup;
+pub mod generations;
 pub mod guardrail;
 pub mod quotas;
 pub mod security;
