@@ -1,6 +1,9 @@
 use certifications_api::{
     core::{Settings, logs},
-    dal::Store,
+    dal::{
+        Store,
+        scanner::{SignatureHealth, SignatureState},
+    },
     domain::App,
     presentation,
 };
@@ -33,10 +36,12 @@ fn fixture_settings() -> Settings {
 async fn service_starts_on_test_port_and_answers_health_ready_and_log_stream() {
     let store = Store::fixture().await;
     let settings = fixture_settings();
+    let signatures = SignatureState::new(SignatureHealth::Missing);
     let app = presentation::router(App {
         store,
         settings,
         quotas: Default::default(),
+        signatures: signatures.clone(),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -64,7 +69,17 @@ async fn service_starts_on_test_port_and_answers_health_ready_and_log_stream() {
     assert_eq!(ready.status(), 200);
     assert_eq!(
         ready.json::<serde_json::Value>().await.unwrap(),
-        serde_json::json!({"status": "ready"})
+        serde_json::json!({"status": "ready", "signatures": "missing"})
+    );
+    signatures.set(SignatureHealth::Fresh);
+    let ready_fresh = client
+        .get(format!("http://{addr}/ready"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        ready_fresh.json::<serde_json::Value>().await.unwrap(),
+        serde_json::json!({"status": "ready", "signatures": "fresh"})
     );
 
     let stream_resp = client

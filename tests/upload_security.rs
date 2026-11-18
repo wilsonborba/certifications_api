@@ -1,6 +1,9 @@
 use axum::http::StatusCode;
 use certifications_api::{
-    dal::scanner::{BoxFuture, ClamScanner, ScanVerdict, VirusScanner},
+    dal::scanner::{
+        BoxFuture, ClamScanner, ScanVerdict, SignatureHealth, SignatureState, VirusScanner,
+        inspect_signature_dir, spawn_freshclam_supervisor,
+    },
     domain::security::{
         FileKind, TextChunk, filter_extracted_chunks, scan_and_validate, validate_file_bytes,
     },
@@ -158,5 +161,41 @@ fn unsafe_extracted_chunks_are_excluded_with_truthful_notice() {
             text: "<script>alert(1)</script>".into(),
         }])
         .is_err()
+    );
+}
+
+#[tokio::test]
+async fn freshclam_supervisor_updates_signature_state_and_aborts_on_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(inspect_signature_dir(dir.path()), SignatureHealth::Missing);
+
+    let sig_file = dir.path().join("daily.cvd");
+    std::fs::write(&sig_file, b"ClamAV-VDB").unwrap();
+    assert_eq!(inspect_signature_dir(dir.path()), SignatureHealth::Fresh);
+
+    let state = SignatureState::default();
+    let handle = spawn_freshclam_supervisor(
+        "nonexistent-freshclam-binary".into(),
+        dir.path().to_path_buf(),
+        state.clone(),
+        std::time::Duration::from_secs(3600),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(state.get(), SignatureHealth::Fresh);
+    handle.abort();
+}
+
+#[tokio::test]
+#[ignore = "Requires clamscan binary and signatures installed on the host"]
+async fn real_clamscan_blocks_eicar_and_allows_clean_text() {
+    let scanner = ClamScanner::new("clamscan");
+    let eicar = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
+    assert!(matches!(
+        scanner.scan_bytes(eicar).await,
+        ScanVerdict::Infected(_)
+    ));
+    assert_eq!(
+        scanner.scan_bytes(b"Safe study text").await,
+        ScanVerdict::Clean
     );
 }

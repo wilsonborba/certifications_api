@@ -92,6 +92,7 @@ async fn quota_enforces_limits_and_releases_failed_uploads() {
         store: store.clone(),
         settings: test_settings(),
         quotas: refreshed,
+        signatures: Default::default(),
     });
 
     let (st, study) = call(
@@ -168,6 +169,7 @@ async fn selections_survive_refresh_and_prepared_studies_reuse_fsm_without_uploa
         store: store.clone(),
         settings: test_settings(),
         quotas: QuotaCache::default(),
+        signatures: Default::default(),
     });
 
     // Prepared study from Annotations arrives filled and reuses stored FSM refs without putting bytes.

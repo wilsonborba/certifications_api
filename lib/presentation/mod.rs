@@ -31,5 +31,9 @@ pub fn router(app: App) -> Router {
 
 async fn ready(State(app): State<App>) -> Result<Json<serde_json::Value>> {
     app.store.ready().await?;
-    Ok(Json(serde_json::json!({ "status": "ready" })))
+    let signatures = app.signatures.get();
+    Ok(Json(serde_json::json!({
+        "status": "ready",
+        "signatures": signatures,
+    })))
 }
