@@ -102,6 +102,7 @@ pub struct Settings {
     pub fsm_url: String,
     pub fsm_key: String,
     pub cortex_url: String,
+    pub reports_url: String,
     pub gateway_url: String,
     pub certifications_service_key: String,
 }
@@ -141,6 +142,7 @@ impl Settings {
             fsm_url: env("FSM_URL", ""),
             fsm_key: env("FSM_KEY", ""),
             cortex_url: env("CORTEX_URL", ""),
+            reports_url: env("REPORTS_URL", ""),
             gateway_url: env("GATEWAY_URL", ""),
             certifications_service_key: env("CERTIFICATIONS_SERVICE_KEY", ""),
         }

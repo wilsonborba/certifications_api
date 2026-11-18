@@ -1,6 +1,7 @@
 pub mod cortex;
 pub mod documents;
 pub mod fsm;
+pub mod reports;
 pub mod scanner;
 pub mod schemas;
 
@@ -21,6 +22,7 @@ pub struct Store {
     pub fsm: Arc<dyn fsm::FsmClient>,
     pub scanner: Arc<dyn scanner::VirusScanner>,
     pub cortex: Arc<dyn cortex::CortexClient>,
+    pub reports: Arc<dyn reports::ReportsClient>,
 }
 
 impl Store {
@@ -42,7 +44,8 @@ impl Store {
             docs: documents::Documents::remote(settings, http.clone()),
             fsm: fsm::HttpFsm::client(&settings.fsm_url, &settings.fsm_key, http.clone()),
             scanner: Arc::new(scanner::ClamScanner::new("clamscan")),
-            cortex: cortex::HttpCortex::client(&settings.cortex_url, http),
+            cortex: cortex::HttpCortex::client(&settings.cortex_url, http.clone()),
+            reports: reports::HttpReports::client(&settings.reports_url, http),
         })
     }
 
@@ -66,6 +69,7 @@ impl Store {
             fsm: fsm::MemoryFsm::new(),
             scanner: Arc::new(CleanFixtureScanner),
             cortex: Arc::new(cortex::DisabledCortex),
+            reports: Arc::new(reports::DisabledReports),
         }
     }
 

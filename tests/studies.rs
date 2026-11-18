@@ -32,6 +32,7 @@ fn test_settings() -> Settings {
         fsm_url: String::new(),
         fsm_key: String::new(),
         cortex_url: String::new(),
+        reports_url: String::new(),
         gateway_url: String::new(),
         certifications_service_key: String::new(),
     }
@@ -244,4 +245,129 @@ async fn selections_survive_refresh_and_prepared_studies_reuse_fsm_without_uploa
         .unwrap();
     let (st, _) = call(&app, "GET", &format!("/studies/{sid}"), Some("u1"), None).await;
     assert_eq!(st, StatusCode::GONE);
+}
+
+#[tokio::test]
+async fn reports_picker_and_report_source_enforce_permissions_and_unconfigured_503() {
+    use certifications_api::{
+        core::{Error as CoreError, Result as CoreResult},
+        dal::reports::{BoxFuture, ReportPickerItem, ReportsClient},
+    };
+
+    struct MockReports;
+    impl ReportsClient for MockReports {
+        fn list_readable_reports<'a>(
+            &'a self,
+            user_id: &'a str,
+            _project: Option<&'a str>,
+        ) -> BoxFuture<'a, CoreResult<Vec<ReportPickerItem>>> {
+            Box::pin(async move {
+                if user_id == "u1" {
+                    Ok(vec![ReportPickerItem {
+                        project: "proj1".into(),
+                        report: "rep1".into(),
+                        title: "Q4 Metrics".into(),
+                        is_restricted: true,
+                    }])
+                } else {
+                    Ok(vec![])
+                }
+            })
+        }
+        fn check_report_access<'a>(
+            &'a self,
+            user_id: &'a str,
+            project: &'a str,
+            report: &'a str,
+        ) -> BoxFuture<'a, CoreResult<ReportPickerItem>> {
+            Box::pin(async move {
+                if user_id == "u1" && project == "proj1" && report == "rep1" {
+                    Ok(ReportPickerItem {
+                        project: "proj1".into(),
+                        report: "rep1".into(),
+                        title: "Q4 Metrics".into(),
+                        is_restricted: true,
+                    })
+                } else {
+                    Err(CoreError::forbidden(
+                        "report_access_denied: Caller lacks read permission for this report",
+                    ))
+                }
+            })
+        }
+    }
+
+    // Unconfigured Reports returns 503 instead of a stubbed empty list.
+    let disabled_store = Store::fixture().await;
+    let disabled_app = presentation::router(App {
+        store: disabled_store,
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+    let (st, _) = call(&disabled_app, "GET", "/reports/picker", Some("u1"), None).await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+
+    // Configured Reports returns readable reports and enforces read permission on source attach.
+    let mut store = Store::fixture().await;
+    store.reports = Arc::new(MockReports);
+    let app = presentation::router(App {
+        store,
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+
+    let (st, picker) = call(&app, "GET", "/reports/picker", Some("u1"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(picker["items"].as_array().unwrap().len(), 1);
+    assert_eq!(picker["items"][0]["report"], "rep1");
+
+    let (_, s1) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u1"),
+        Some(json!({"title": "U1 Study"})),
+    )
+    .await;
+    let sid1 = s1["id"].as_str().unwrap();
+    let (st, src) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid1}/sources"),
+        Some("u1"),
+        Some(json!({
+            "kind": "report",
+            "filename": "Q4 Metrics",
+            "external_ref": "proj1/rep1",
+            "is_restricted": false
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(src["is_restricted"], true);
+
+    let (_, s2) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u2"),
+        Some(json!({"title": "U2 Study"})),
+    )
+    .await;
+    let sid2 = s2["id"].as_str().unwrap();
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid2}/sources"),
+        Some("u2"),
+        Some(json!({
+            "kind": "report",
+            "filename": "Q4 Metrics",
+            "external_ref": "proj1/rep1"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
 }
