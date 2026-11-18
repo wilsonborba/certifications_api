@@ -1,4 +1,5 @@
 pub mod documents;
+pub mod scanner;
 pub mod schemas;
 
 use crate::core::{Error, Result, Settings};
