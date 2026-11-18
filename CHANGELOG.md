@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🚀 Features
 
+- *(catalog)* Add public discovery search/filters, answer-safe pre-attempt detail, aggregate statistics, deterministic tag suggestions (max 5), and restricted-report publication refusal (#41)
 - *(authoring)* Add question review, manual creation, two-step CSV import, author visual rendering to FSM, backend origin enforcement, and admin origin override (#40)
 - *(estimates)* Add generation step timing, non-content estimation statistics, calibration tracking, and honest `GET /studies/{id}/estimate` endpoint (#39)
 - *(studies)* Wire Reports picker and report-source permission checks to real Reports viewer routes (#35)
