@@ -251,6 +251,20 @@ async fn get_analysis(
     Ok(Json(json!(a)))
 }
 
-async fn reports_picker(SessionUser(_caller): SessionUser) -> Json<Value> {
-    Json(json!({ "items": [] }))
+#[derive(Deserialize)]
+pub struct PickerQuery {
+    pub project: Option<String>,
+}
+
+async fn reports_picker(
+    State(app): State<App>,
+    SessionUser(caller): SessionUser,
+    Query(q): Query<PickerQuery>,
+) -> Result<Json<Value>> {
+    let items = app
+        .store
+        .reports
+        .list_readable_reports(&caller.user_id, q.project.as_deref())
+        .await?;
+    Ok(Json(json!({ "items": items })))
 }

@@ -266,6 +266,7 @@ mod tests {
             fsm_url: String::new(),
             fsm_key: String::new(),
             cortex_url: String::new(),
+            reports_url: String::new(),
             gateway_url: String::new(),
             certifications_service_key: "svc-secret-key".into(),
         }

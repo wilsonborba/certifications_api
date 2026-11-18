@@ -583,9 +583,27 @@ pub async fn add_source_reference(
             "invalid_source_kind: Kind must be fsm_ref, link, or report",
         ));
     }
+    let mut is_restricted = input.is_restricted;
+    if input.kind == "report" {
+        let (project, report) = input
+            .external_ref
+            .trim()
+            .split_once('/')
+            .filter(|(p, r)| !p.is_empty() && !r.is_empty())
+            .ok_or_else(|| {
+                Error::unprocessable(
+                    "invalid_report_ref: Report external_ref must be <project>/<report>",
+                )
+            })?;
+        let checked = store
+            .reports
+            .check_report_access(&caller.user_id, project, report)
+            .await?;
+        is_restricted = checked.is_restricted;
+    }
     let source_id = new_id();
     let ts = now();
-    let restricted = i32::from(input.is_restricted);
+    let restricted = i32::from(is_restricted);
     sqlx::query(
         "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, created_at, updated_at)
          VALUES($1, $2, $3, $4, $5, $6, '', $7, $8, 'ready', 'all', '', $9, $10, $11, $11)",
@@ -615,7 +633,7 @@ pub async fn add_source_reference(
         status: "ready".into(),
         selection_kind: "all".into(),
         selection_spec: String::new(),
-        is_restricted: input.is_restricted,
+        is_restricted,
         external_ref: input.external_ref.trim().to_string(),
         created_at: ts,
         updated_at: ts,
