@@ -510,8 +510,8 @@ pub async fn process_job(
         _ => {
             let qid = new_id();
             sqlx::query(
-                "INSERT INTO quizzes(id, owner_id, study_id, visibility, active_version_id, created_at, updated_at)
-                 VALUES($1, $2, $3, 'private', '', $4, $4)",
+                "INSERT INTO quizzes(id, owner_id, study_id, visibility, origin, active_version_id, created_at, updated_at)
+                 VALUES($1, $2, $3, 'private', 'generated_with_cortex', '', $4, $4)",
             )
             .bind(&qid)
             .bind(&caller.user_id)
@@ -564,7 +564,7 @@ pub async fn process_job(
         let qv_id = new_id();
         if let Err(err) = async {
             let mut tx = store.db.begin().await?;
-            sqlx::query("INSERT INTO questions(id, owner_id, created_at) VALUES($1, $2, $3)")
+            sqlx::query("INSERT INTO questions(id, owner_id, origin, created_at) VALUES($1, $2, 'generated_with_cortex', $3)")
                 .bind(&question_id)
                 .bind(&caller.user_id)
                 .bind(ts)

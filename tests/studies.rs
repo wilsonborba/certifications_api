@@ -295,6 +295,14 @@ async fn reports_picker_and_report_source_enforce_permissions_and_unconfigured_5
                 }
             })
         }
+        fn render_question_visual<'a>(
+            &'a self,
+            _user_id: &'a str,
+            _prompt: &'a str,
+            _visual_spec: &'a Value,
+        ) -> BoxFuture<'a, CoreResult<certifications_api::dal::reports::RenderedVisual>> {
+            Box::pin(async { Err(CoreError::unavailable()) })
+        }
     }
 
     // Unconfigured Reports returns 503 instead of a stubbed empty list.
