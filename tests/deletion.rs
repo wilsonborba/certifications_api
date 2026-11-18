@@ -76,6 +76,7 @@ async fn fsm_outage_keeps_cleanup_intent_across_restart_and_admin_or_daily_retry
         store: store.clone(),
         settings: test_settings(),
         quotas: QuotaCache::default(),
+        signatures: Default::default(),
     });
 
     let (_, study) = call(
@@ -153,6 +154,7 @@ async fn fsm_outage_keeps_cleanup_intent_across_restart_and_admin_or_daily_retry
         store: store.clone(),
         settings: test_settings(),
         quotas: QuotaCache::default(),
+        signatures: Default::default(),
     });
     // Normal user cannot access admin cleanup route.
     let (st, _) = call(
@@ -233,6 +235,7 @@ async fn shared_blobs_are_never_forced_and_published_quizzes_require_admin_to_de
         store: store.clone(),
         settings: test_settings(),
         quotas: QuotaCache::default(),
+        signatures: Default::default(),
     });
     let (st, _) = call(&app, "DELETE", "/quizzes/q-pub", Some("u1"), None, None).await;
     assert_eq!(st, StatusCode::FORBIDDEN);

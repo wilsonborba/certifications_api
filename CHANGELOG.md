@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🚀 Features
 
+- *(security)* Supervise bounded freshclam updates, expose signature health in `/ready`, and add real clamscan integration test (#36)
 - *(deletion)* Remove deleted studies, sources, and quizzes immediately with deferred FSM cleanup and admin retry (#37)
 - *(studies)* Add studies, multi-source FSM uploads, prepared study reuse, selection persistence, and DB-backed quota meter (#35)
 - *(security)* Add bounded clamscan/freshclam adapters, DOCX/XLSX container inspection, and unsafe text chunk filtering (#36)

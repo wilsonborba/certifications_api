@@ -14,17 +14,29 @@ async fn main() -> anyhow::Result<()> {
     let store = Store::connect(&settings).await?;
     let quotas = certifications_api::domain::quotas::QuotaCache::default();
     let _ = quotas.refresh_from_db(&store).await;
+    let sig_dir = std::path::PathBuf::from("/var/lib/clamav");
+    let signatures = certifications_api::dal::scanner::SignatureState::default();
+    signatures.refresh_from_dir(&sig_dir);
+    let freshclam_task = certifications_api::dal::scanner::spawn_freshclam_supervisor(
+        "freshclam".into(),
+        sig_dir,
+        signatures.clone(),
+        certifications_api::dal::scanner::FRESHCLAM_INTERVAL,
+    );
     let addr: SocketAddr = format!("{}:{}", settings.host, settings.port).parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(module = "main", "Listening on {}", addr);
-    axum::serve(
+    let res = axum::serve(
         listener,
         presentation::router(App {
             store,
             settings,
             quotas,
+            signatures,
         }),
     )
-    .await?;
+    .await;
+    freshclam_task.abort();
+    res?;
     Ok(())
 }
