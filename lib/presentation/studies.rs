@@ -69,6 +69,7 @@ pub fn routes() -> Router<App> {
             post(run_analysis).get(get_analysis),
         )
         .route("/reports/picker", get(reports_picker))
+        .route("/quizzes/{quiz_id}", axum::routing::delete(remove_quiz))
 }
 
 async fn list(
@@ -130,9 +131,11 @@ async fn remove(
     State(app): State<App>,
     SessionUser(caller): SessionUser,
     Path(study_id): Path<String>,
-) -> Result<StatusCode> {
+) -> Result<Json<Value>> {
     studies::delete_study(&app.store, &caller, &study_id).await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(json!({
+        "message": crate::domain::cleanup::REMOVED_MESSAGE
+    })))
 }
 
 async fn add_source(
@@ -212,9 +215,22 @@ async fn remove_source(
     State(app): State<App>,
     SessionUser(caller): SessionUser,
     Path((study_id, source_id)): Path<(String, String)>,
-) -> Result<StatusCode> {
+) -> Result<Json<Value>> {
     studies::delete_source(&app.store, &caller, &study_id, &source_id).await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(json!({
+        "message": crate::domain::cleanup::REMOVED_MESSAGE
+    })))
+}
+
+async fn remove_quiz(
+    State(app): State<App>,
+    SessionUser(caller): SessionUser,
+    Path(quiz_id): Path<String>,
+) -> Result<Json<Value>> {
+    crate::domain::cleanup::delete_quiz(&app.store, Some(&caller), &quiz_id, false).await?;
+    Ok(Json(json!({
+        "message": crate::domain::cleanup::REMOVED_MESSAGE
+    })))
 }
 
 async fn run_analysis(
