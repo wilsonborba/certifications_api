@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [unreleased]
 
+### 🚀 Features
+
+- *(core)* Start Rust service foundation with settings, redacted stdout/SSE logs, `/health`, `/ready`, and `/logs/stream` (#31)
+
 ### 🐛 Bug Fixes
 
 - Remove daily generation quota system entirely ([`39bc644`](https://github.com/wilsonborba/certifications_api/commit/39bc644501b82fe854dfa2680153c2bfdcc0670b))
