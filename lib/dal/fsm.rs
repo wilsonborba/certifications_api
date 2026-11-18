@@ -6,7 +6,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -22,6 +22,7 @@ pub trait FsmClient: Send + Sync {
 pub struct MemoryFsm {
     blobs: Mutex<HashMap<String, Vec<u8>>>,
     pub put_calls: AtomicUsize,
+    pub fail_delete: AtomicBool,
 }
 
 impl MemoryFsm {
@@ -30,6 +31,9 @@ impl MemoryFsm {
     }
     pub fn put_count(&self) -> usize {
         self.put_calls.load(Ordering::SeqCst)
+    }
+    pub fn has_blob(&self, ref_key: &str) -> bool {
+        self.blobs.lock().unwrap().contains_key(ref_key)
     }
     pub fn seed(&self, ref_key: &str, bytes: &[u8]) {
         self.blobs
@@ -62,6 +66,9 @@ impl FsmClient for MemoryFsm {
     }
     fn delete_ref<'a>(&'a self, ref_key: &'a str) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            if self.fail_delete.load(Ordering::SeqCst) {
+                return Err(Error::unavailable());
+            }
             self.blobs.lock().unwrap().remove(ref_key);
             Ok(())
         })

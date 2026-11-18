@@ -3,6 +3,7 @@ use crate::{
     dal::{Store, fsm::sha256_hex, new_id},
     domain::{
         auth::{CallerIdentity, require_owner},
+        cleanup,
         quotas::{self, QuotaCache, QuotaMeter},
         security,
     },
@@ -425,8 +426,16 @@ pub async fn update_study(
 
 pub async fn delete_study(store: &Store, caller: &CallerIdentity, study_id: &str) -> Result<()> {
     let _ = load_owned_study(store, caller, study_id).await?;
+    let sources = load_sources(store, study_id).await?;
     let ts = now();
     let mut tx = store.db.begin().await?;
+    sqlx::query(
+        "UPDATE generation_jobs SET status = 'cancelled', error_code = 'study_deleted', finished_at = $1 WHERE study_id = $2 AND status IN ('queued', 'running')",
+    )
+    .bind(ts)
+    .bind(study_id)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query(
         "UPDATE source_ledger SET state = 'released', updated_at = $1 WHERE study_id = $2 AND state IN ('reserved', 'committed')",
     )
@@ -439,6 +448,12 @@ pub async fn delete_study(store: &Store, caller: &CallerIdentity, study_id: &str
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+
+    for src in sources {
+        if src.source_kind == "upload" && !src.fsm_ref.is_empty() {
+            cleanup::delete_fsm_or_queue(store, &src.fsm_ref).await?;
+        }
+    }
     Ok(())
 }
 
@@ -682,20 +697,34 @@ pub async fn delete_source(
 ) -> Result<()> {
     let src = get_source(store, caller, study_id, source_id).await?;
     let ts = now();
-    sqlx::query("UPDATE sources SET status = 'deleted', updated_at = $1 WHERE id = $2")
-        .bind(ts)
+    let mut tx = store.db.begin().await?;
+    sqlx::query(
+        "UPDATE generation_jobs SET status = 'cancelled', error_code = 'source_deleted', finished_at = $1
+         WHERE id IN (SELECT job_id FROM generation_job_sources WHERE source_id = $2) AND status IN ('queued', 'running')",
+    )
+    .bind(ts)
+    .bind(source_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM generation_job_sources WHERE source_id = $1")
         .bind(source_id)
-        .execute(&store.db)
+        .execute(&mut *tx)
         .await?;
     sqlx::query(
         "UPDATE source_ledger SET state = 'released', updated_at = $1 WHERE source_id = $2 AND state IN ('reserved', 'committed')",
     )
     .bind(ts)
     .bind(source_id)
-    .execute(&store.db)
+    .execute(&mut *tx)
     .await?;
+    sqlx::query("DELETE FROM sources WHERE id = $1")
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
     if src.source_kind == "upload" && !src.fsm_ref.is_empty() {
-        let _ = store.fsm.delete_ref(&src.fsm_ref).await;
+        cleanup::delete_fsm_or_queue(store, &src.fsm_ref).await?;
     }
     Ok(())
 }
