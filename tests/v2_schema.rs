@@ -253,3 +253,19 @@ async fn published_schema_is_immutable_and_guardrail_rejects_invalid_before_writ
     assert_eq!(tref, "q-ok-2");
     assert_eq!(st, "pending");
 }
+
+#[tokio::test]
+async fn no_local_plans_waitlist_or_ticket_tables_remain() {
+    let store = Store::fixture().await;
+    let forbidden = ["plan_waitlist", "waitlist", "plans", "support_tickets"];
+    for tbl in forbidden {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = $1",
+        )
+        .bind(tbl)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "forbidden local table {tbl} exists");
+    }
+}
