@@ -5,7 +5,12 @@ use crate::{
         cortex::{CortexJobOutcome, GeneratedQuestion, GenerationRequest},
         new_id,
     },
-    domain::{auth::CallerIdentity, auth::require_owner, guardrail},
+    domain::{
+        auth::CallerIdentity,
+        auth::require_owner,
+        estimates::{self, StepMeasurement},
+        guardrail,
+    },
 };
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -296,7 +301,25 @@ pub async fn process_job(
         return Ok(job);
     }
 
+    let estimated_before = estimates::estimate_for_study(
+        store,
+        caller,
+        &job.study_id,
+        &job.language,
+        job.requested_count,
+    )
+    .await
+    .ok()
+    .and_then(|e| e.estimated_processing_ms);
+
+    let job_queued_at: i64 =
+        sqlx::query_scalar("SELECT queued_at FROM generation_jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_one(&store.db)
+            .await?;
+
     let started = now();
+    let wait_ms = (started - job_queued_at).max(0) * 1000;
     sqlx::query("UPDATE generation_jobs SET status = 'running', started_at = $1 WHERE id = $2")
         .bind(started)
         .bind(job_id)
@@ -304,6 +327,8 @@ pub async fn process_job(
         .await?;
     emit_event(store, job_id, "running", "Calling Cortex T0 Easy").await?;
 
+    let prep_inst = std::time::Instant::now();
+    let prep_started_at = now();
     let source_ids: Vec<String> = sqlx::query_scalar(
         "SELECT source_id FROM generation_job_sources WHERE job_id = $1 ORDER BY source_id",
     )
@@ -341,10 +366,40 @@ pub async fn process_job(
         source_ids,
         existing_prompts: existing_prompts.clone(),
     };
+    let prep_ms = prep_inst.elapsed().as_millis() as i64;
+    estimates::record_step(
+        store,
+        job_id,
+        &StepMeasurement {
+            step_name: "prepare_sources".into(),
+            status: "completed".into(),
+            wait_ms,
+            process_ms: prep_ms,
+            started_at: prep_started_at,
+            finished_at: now(),
+        },
+    )
+    .await?;
 
+    let cortex_inst = std::time::Instant::now();
+    let cortex_started_at = now();
     let mut generated = match store.cortex.generate_questions(&req).await {
         Ok(q) => q,
         Err(err) => {
+            let cortex_ms = cortex_inst.elapsed().as_millis() as i64;
+            let _ = estimates::record_step(
+                store,
+                job_id,
+                &StepMeasurement {
+                    step_name: "cortex_generate".into(),
+                    status: "failed".into(),
+                    wait_ms: 0,
+                    process_ms: cortex_ms,
+                    started_at: cortex_started_at,
+                    finished_at: now(),
+                },
+            )
+            .await;
             sqlx::query(
                 "UPDATE generation_jobs SET status = 'failed', error_code = 'cortex_failed', finished_at = $1 WHERE id = $2",
             )
@@ -370,6 +425,20 @@ pub async fn process_job(
             .correct_language(&caller.user_id, &job.language, &generated)
             .await?;
         if has_wrong_script(&job.language, &generated) {
+            let cortex_ms = cortex_inst.elapsed().as_millis() as i64;
+            let _ = estimates::record_step(
+                store,
+                job_id,
+                &StepMeasurement {
+                    step_name: "cortex_generate".into(),
+                    status: "failed".into(),
+                    wait_ms: 0,
+                    process_ms: cortex_ms,
+                    started_at: cortex_started_at,
+                    finished_at: now(),
+                },
+            )
+            .await;
             sqlx::query(
                 "UPDATE generation_jobs SET status = 'failed', error_code = 'wrong_language_script', finished_at = $1 WHERE id = $2",
             )
@@ -382,6 +451,23 @@ pub async fn process_job(
             ));
         }
     }
+    let cortex_ms = cortex_inst.elapsed().as_millis() as i64;
+    estimates::record_step(
+        store,
+        job_id,
+        &StepMeasurement {
+            step_name: "cortex_generate".into(),
+            status: "completed".into(),
+            wait_ms: 0,
+            process_ms: cortex_ms,
+            started_at: cortex_started_at,
+            finished_at: now(),
+        },
+    )
+    .await?;
+
+    let save_inst = std::time::Instant::now();
+    let save_started_at = now();
 
     // Re-check cancellation before committing results (safe boundary).
     let current_status: String =
@@ -556,6 +642,47 @@ pub async fn process_job(
         job_id,
         "completed",
         &format!("Saved {saved_count} questions to private quiz {quiz_id}"),
+    )
+    .await?;
+
+    let save_ms = save_inst.elapsed().as_millis() as i64;
+    estimates::record_step(
+        store,
+        job_id,
+        &StepMeasurement {
+            step_name: "save_quiz".into(),
+            status: "completed".into(),
+            wait_ms: 0,
+            process_ms: save_ms,
+            started_at: save_started_at,
+            finished_at: done,
+        },
+    )
+    .await?;
+
+    let counts_row = sqlx::query(
+        "SELECT COUNT(*) AS cnt, COALESCE(SUM(s.size_bytes), 0) AS bytes
+         FROM sources s
+         JOIN generation_job_sources gjs ON gjs.source_id = s.id
+         WHERE gjs.job_id = $1",
+    )
+    .bind(job_id)
+    .fetch_one(&store.db)
+    .await?;
+    let source_count: i64 = counts_row.get("cnt");
+    let total_bytes: i64 = counts_row.get("bytes");
+    let total_process_ms = prep_ms + cortex_ms + save_ms;
+    estimates::record_estimation_sample(
+        store,
+        &caller.user_id,
+        "generation",
+        &job.language,
+        source_count,
+        total_bytes,
+        saved_count.max(job.requested_count),
+        wait_ms,
+        total_process_ms,
+        estimated_before,
     )
     .await?;
 

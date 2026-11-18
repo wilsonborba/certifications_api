@@ -124,6 +124,11 @@ impl CortexClient for MockCortex {
     ) -> BoxFuture<'a, CoreResult<CortexJobOutcome>> {
         Box::pin(async { Ok(CortexJobOutcome::NotFound) })
     }
+    fn fetch_timing_averages<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, CoreResult<Vec<certifications_api::dal::cortex::TimingAverage>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
 }
 
 fn test_settings() -> Settings {

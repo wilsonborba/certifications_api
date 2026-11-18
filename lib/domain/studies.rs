@@ -443,6 +443,18 @@ pub async fn delete_study(store: &Store, caller: &CallerIdentity, study_id: &str
     .bind(study_id)
     .execute(&mut *tx)
     .await?;
+    sqlx::query(
+        "DELETE FROM generation_job_sources WHERE source_id IN (SELECT id FROM sources WHERE study_id = $1)",
+    )
+    .bind(study_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM question_citations WHERE source_id IN (SELECT id FROM sources WHERE study_id = $1)",
+    )
+    .bind(study_id)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("DELETE FROM studies WHERE id = $1")
         .bind(study_id)
         .execute(&mut *tx)

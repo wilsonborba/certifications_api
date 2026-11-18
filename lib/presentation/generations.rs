@@ -3,6 +3,7 @@ use crate::{
     domain::{
         App,
         auth::reject_caller_authority_fields,
+        estimates,
         generations::{self, StartGenerationInput},
     },
     presentation::auth::SessionUser,
@@ -27,13 +28,32 @@ pub struct EventsQuery {
     pub after: Option<i64>,
 }
 
+#[derive(Deserialize)]
+pub struct EstimateQuery {
+    pub language: Option<String>,
+    pub count: Option<i64>,
+}
+
 pub fn routes() -> Router<App> {
     Router::new()
+        .route("/studies/{study_id}/estimate", get(estimate))
         .route("/studies/{study_id}/generations", post(start))
         .route("/generations/{job_id}", get(detail))
         .route("/generations/{job_id}/events", get(events))
         .route("/generations/{job_id}/stop", post(stop))
         .route("/generations/{job_id}/resume", post(resume))
+}
+
+async fn estimate(
+    State(app): State<App>,
+    SessionUser(caller): SessionUser,
+    Path(study_id): Path<String>,
+    Query(q): Query<EstimateQuery>,
+) -> Result<Json<Value>> {
+    let lang = q.language.unwrap_or_else(|| "en".to_string());
+    let count = q.count.unwrap_or(5).clamp(1, 20);
+    let est = estimates::estimate_for_study(&app.store, &caller, &study_id, &lang, count).await?;
+    Ok(Json(json!(est)))
 }
 
 async fn start(
