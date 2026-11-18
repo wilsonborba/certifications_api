@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod logs;
 
 use crate::{core::Result, domain::App};
@@ -11,6 +12,7 @@ pub fn router(app: App) -> Router {
             get(|| async { Json(serde_json::json!({ "status": "ok" })) }),
         )
         .route("/ready", get(ready))
+        .layer(axum::middleware::from_fn(auth::admin_guard))
         .layer(axum::middleware::map_response(
             |mut response: axum::response::Response| async move {
                 response

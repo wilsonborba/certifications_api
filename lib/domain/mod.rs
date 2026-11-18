@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod guardrail;
 
 use crate::{core::Settings, dal::Store};
