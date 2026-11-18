@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🚀 Features
 
+- *(attempts)* Add version-locked attempts, key-safe taking API, idempotent answer saves and grading, three-group review statistics, and deduplicated activity records (#42)
 - *(catalog)* Add public discovery search/filters, answer-safe pre-attempt detail, aggregate statistics, deterministic tag suggestions (max 5), and restricted-report publication refusal (#41)
 - *(authoring)* Add question review, manual creation, two-step CSV import, author visual rendering to FSM, backend origin enforcement, and admin origin override (#40)
 - *(estimates)* Add generation step timing, non-content estimation statistics, calibration tracking, and honest `GET /studies/{id}/estimate` endpoint (#39)
