@@ -216,9 +216,14 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     let (st, _) = call(
         &app,
         "POST",
-        &format!("/studies/{sid}/sources/report"),
+        &format!("/studies/{sid}/sources"),
         Some("author-1"),
-        Some(json!({ "project": "clinical", "report": "restricted-metrics" })),
+        Some(json!({
+            "kind": "report",
+            "filename": "Safety Report",
+            "mime_type": "application/json",
+            "external_ref": "clinical/restricted-metrics"
+        })),
     )
     .await;
     assert_eq!(st, StatusCode::CREATED);
