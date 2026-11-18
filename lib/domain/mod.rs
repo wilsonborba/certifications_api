@@ -1,3 +1,5 @@
+pub mod guardrail;
+
 use crate::{core::Settings, dal::Store};
 
 #[derive(Clone)]

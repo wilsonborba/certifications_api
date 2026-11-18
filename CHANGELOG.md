@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🚀 Features
 
+- *(storage)* Add normalized v2 PostgreSQL schema, versioned schema registry, and CouchDB document guardrail (#32)
 - *(core)* Start Rust service foundation with settings, redacted stdout/SSE logs, `/health`, `/ready`, and `/logs/stream` (#31)
 
 ### 🐛 Bug Fixes

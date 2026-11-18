@@ -1,9 +1,16 @@
+pub mod documents;
+pub mod schemas;
+
 use crate::core::{Error, Result, Settings};
 use sqlx::{AnyPool, ConnectOptions, any::AnyPoolOptions};
+use std::sync::Arc;
+
+pub const SQLITE_MIGRATIONS: [&str; 1] = [include_str!("../../migrations/001_v2_schema.sql")];
 
 #[derive(Clone)]
 pub struct Store {
     pub db: AnyPool,
+    pub docs: documents::Documents,
 }
 
 impl Store {
@@ -16,7 +23,14 @@ impl Store {
             .max_connections(5)
             .connect(&settings.database_url)
             .await?;
-        Ok(Self { db })
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|_| Error::unavailable())?;
+        Ok(Self {
+            db,
+            docs: documents::Documents::remote(settings, http),
+        })
     }
 
     pub async fn fixture() -> Self {
@@ -30,7 +44,13 @@ impl Store {
             .execute(&db)
             .await
             .unwrap();
-        Self { db }
+        for migration in SQLITE_MIGRATIONS {
+            sqlx::raw_sql(migration).execute(&db).await.unwrap();
+        }
+        Self {
+            db,
+            docs: documents::Documents::Memory(documents::Documents::memory()),
+        }
     }
 
     pub async fn ready(&self) -> Result<()> {
@@ -44,5 +64,16 @@ impl Store {
             .to_url_lossy()
             .scheme()
             .starts_with("postgres")
+    }
+}
+
+pub fn new_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+pub fn memory_docs(docs: &documents::Documents) -> Option<Arc<documents::MemoryDocs>> {
+    match docs {
+        documents::Documents::Memory(m) => Some(m.clone()),
+        documents::Documents::Remote(_) => None,
     }
 }
