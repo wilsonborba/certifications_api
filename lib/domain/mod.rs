@@ -2,6 +2,7 @@ pub mod attempts;
 pub mod auth;
 pub mod authoring;
 pub mod catalog;
+pub mod certificates;
 pub mod cleanup;
 pub mod estimates;
 pub mod generations;
