@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🚀 Features
 
+- *(estimates)* Add generation step timing, non-content estimation statistics, calibration tracking, and honest `GET /studies/{id}/estimate` endpoint (#39)
 - *(studies)* Wire Reports picker and report-source permission checks to real Reports viewer routes (#35)
 - *(generation)* Add durable per-user generation queue, Cortex T0 Easy adapter, language script correction, citation verification, and SSE events (#38)
 - *(security)* Supervise bounded freshclam updates, expose signature health in `/ready`, and add real clamscan integration test (#36)

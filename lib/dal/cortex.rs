@@ -32,6 +32,14 @@ pub struct GenerationRequest {
     pub existing_prompts: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TimingAverage {
+    pub kind: String,
+    pub expected_ms: i64,
+    #[serde(default)]
+    pub sample_count: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CortexJobOutcome {
     Pending,
@@ -55,6 +63,7 @@ pub trait CortexClient: Send + Sync {
         &'a self,
         cortex_job_id: &'a str,
     ) -> BoxFuture<'a, Result<CortexJobOutcome>>;
+    fn fetch_timing_averages<'a>(&'a self) -> BoxFuture<'a, Result<Vec<TimingAverage>>>;
 }
 
 pub struct DisabledCortex;
@@ -82,6 +91,9 @@ impl CortexClient for DisabledCortex {
         _cortex_job_id: &'a str,
     ) -> BoxFuture<'a, Result<CortexJobOutcome>> {
         Box::pin(async { Ok(CortexJobOutcome::NotFound) })
+    }
+    fn fetch_timing_averages<'a>(&'a self) -> BoxFuture<'a, Result<Vec<TimingAverage>>> {
+        Box::pin(async { Ok(Vec::new()) })
     }
 }
 
@@ -188,6 +200,20 @@ impl CortexClient for HttpCortex {
                 Some("queued" | "running") => Ok(CortexJobOutcome::Pending),
                 _ => Ok(CortexJobOutcome::NotFound),
             }
+        })
+    }
+    fn fetch_timing_averages<'a>(&'a self) -> BoxFuture<'a, Result<Vec<TimingAverage>>> {
+        Box::pin(async move {
+            let resp = self
+                .http
+                .get(format!("{}/telemetry/timing", self.base_url))
+                .send()
+                .await
+                .map_err(|_| Error::unavailable())?;
+            if !resp.status().is_success() {
+                return Ok(Vec::new());
+            }
+            Ok(resp.json::<Vec<TimingAverage>>().await.unwrap_or_default())
         })
     }
 }
