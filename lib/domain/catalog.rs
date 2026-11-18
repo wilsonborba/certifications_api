@@ -240,12 +240,13 @@ pub async fn publish_study_quiz(
     title: Option<String>,
     tags: Option<Vec<String>>,
 ) -> Result<PublicQuizDetail> {
-    let row = sqlx::query("SELECT owner_id, quiz_id FROM studies WHERE id = $1")
+    let row = sqlx::query("SELECT owner_id, title, quiz_id FROM studies WHERE id = $1")
         .bind(study_id)
         .fetch_optional(&store.db)
         .await?
         .ok_or_else(Error::missing)?;
     let owner_id: String = row.get("owner_id");
+    let study_title: String = row.get("title");
     require_owner(caller, &owner_id)?;
 
     let quiz_id: String = row
@@ -277,29 +278,37 @@ pub async fn publish_study_quiz(
 
     // Manager correction: check every source; refuse publication if any source is a restricted report.
     let source_rows = sqlx::query(
-        "SELECT source_kind, reports_project, reports_report FROM sources WHERE study_id = $1",
+        "SELECT source_kind, external_ref, is_restricted FROM sources WHERE study_id = $1",
     )
     .bind(study_id)
     .fetch_all(&store.db)
     .await?;
     for sr in source_rows {
         let kind: String = sr.get("source_kind");
-        if kind == "reports" {
-            let project: String = sr.get("reports_project");
-            let report: String = sr.get("reports_report");
+        let is_restricted_col: i64 = sr.get("is_restricted");
+        if kind == "report" {
+            let ext: String = sr.get("external_ref");
+            let (project, report) = ext.trim().split_once('/').ok_or_else(|| {
+                Error::unprocessable(
+                    "restricted_report_source: Cannot verify report permission; restricted report sources cannot be published",
+                )
+            })?;
             let access = store
                 .reports
-                .check_report_access(&caller.user_id, &project, &report)
+                .check_report_access(&caller.user_id, project, report)
                 .await
                 .map_err(|_| {
                     Error::unprocessable(
                         "restricted_report_source: Cannot verify report permission; restricted report sources cannot be published",
                     )
                 })?;
-            if access.is_restricted {
-                return Err(Error::unprocessable(
-                    "restricted_report_source: A quiz with a restricted report source cannot be published; permit or replace the source first",
-                ));
+            if access.is_restricted || is_restricted_col != 0 {
+                // If Reports now permits it, allow publication; if Reports still restricts it, refuse.
+                if access.is_restricted {
+                    return Err(Error::unprocessable(
+                        "restricted_report_source: A quiz with a restricted report source cannot be published; permit or replace the source first",
+                    ));
+                }
             }
         }
     }
@@ -324,16 +333,15 @@ pub async fn publish_study_quiz(
 
     let ts = now();
     let mut tx = store.db.begin().await?;
-    if let Some(new_title) = title
+    let effective_title = title
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
-    {
-        sqlx::query("UPDATE quiz_versions SET title = $1 WHERE id = $2")
-            .bind(new_title)
-            .bind(&active_vid)
-            .execute(&mut *tx)
-            .await?;
-    }
+        .unwrap_or(study_title);
+    sqlx::query("UPDATE quiz_versions SET title = $1 WHERE id = $2")
+        .bind(effective_title)
+        .bind(&active_vid)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM quiz_tags WHERE quiz_id = $1")
         .bind(&quiz_id)
         .execute(&mut *tx)
@@ -489,7 +497,7 @@ pub async fn get_public_quiz(store: &Store, quiz_id: &str) -> Result<PublicQuizD
             });
         }
         let cit_rows = sqlx::query(
-            "SELECT s.id, s.source_kind, s.reports_project, s.reports_report, qc.page_or_offset
+            "SELECT s.id, s.source_kind, s.external_ref, qc.page_or_offset
              FROM question_citations qc
              JOIN sources s ON s.id = qc.source_id
              WHERE qc.question_version_id = $1",
@@ -500,15 +508,22 @@ pub async fn get_public_quiz(store: &Store, quiz_id: &str) -> Result<PublicQuizD
         for cr in cit_rows {
             let sid: String = cr.get("id");
             let kind: String = cr.get("source_kind");
-            let proj: String = cr.get("reports_project");
-            let rep: String = cr.get("reports_report");
+            let ext: String = cr.get("external_ref");
             let page: String = cr.get("page_or_offset");
+            let (proj, rep) = if kind == "report" {
+                match ext.split_once('/') {
+                    Some((p, r)) => (Some(p.to_string()), Some(r.to_string())),
+                    None => (None, None),
+                }
+            } else {
+                (None, None)
+            };
             let entry = material_map
                 .entry(sid)
                 .or_insert_with(|| PublicSourceMaterial {
                     source_kind: kind.clone(),
-                    reports_project: if kind == "reports" { Some(proj) } else { None },
-                    reports_report: if kind == "reports" { Some(rep) } else { None },
+                    reports_project: proj,
+                    reports_report: rep,
                     citation_refs: Vec::new(),
                 });
             if !page.is_empty() && !entry.citation_refs.contains(&page) {
