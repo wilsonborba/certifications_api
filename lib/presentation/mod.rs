@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod attempts;
 pub mod auth;
 pub mod authoring;
 pub mod catalog;
@@ -21,6 +22,7 @@ pub fn router(app: App) -> Router {
         .merge(generations::routes())
         .merge(authoring::routes())
         .merge(catalog::routes())
+        .merge(attempts::routes())
         .merge(admin::routes())
         .layer(axum::middleware::from_fn(auth::admin_guard))
         .layer(axum::middleware::map_response(

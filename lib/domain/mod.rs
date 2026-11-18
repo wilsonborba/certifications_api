@@ -1,3 +1,4 @@
+pub mod attempts;
 pub mod auth;
 pub mod authoring;
 pub mod catalog;
