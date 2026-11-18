@@ -1,4 +1,5 @@
 pub mod documents;
+pub mod fsm;
 pub mod scanner;
 pub mod schemas;
 
@@ -6,12 +7,17 @@ use crate::core::{Error, Result, Settings};
 use sqlx::{AnyPool, ConnectOptions, any::AnyPoolOptions};
 use std::sync::Arc;
 
-pub const SQLITE_MIGRATIONS: [&str; 1] = [include_str!("../../migrations/001_v2_schema.sql")];
+pub const SQLITE_MIGRATIONS: [&str; 2] = [
+    include_str!("../../migrations/001_v2_schema.sql"),
+    include_str!("../../tests/sqlite/002_v2_studies_sources.sql"),
+];
 
 #[derive(Clone)]
 pub struct Store {
     pub db: AnyPool,
     pub docs: documents::Documents,
+    pub fsm: Arc<dyn fsm::FsmClient>,
+    pub scanner: Arc<dyn scanner::VirusScanner>,
 }
 
 impl Store {
@@ -30,7 +36,9 @@ impl Store {
             .map_err(|_| Error::unavailable())?;
         Ok(Self {
             db,
-            docs: documents::Documents::remote(settings, http),
+            docs: documents::Documents::remote(settings, http.clone()),
+            fsm: fsm::HttpFsm::client(&settings.fsm_url, &settings.fsm_key, http),
+            scanner: Arc::new(scanner::ClamScanner::new("clamscan")),
         })
     }
 
@@ -51,6 +59,8 @@ impl Store {
         Self {
             db,
             docs: documents::Documents::Memory(documents::Documents::memory()),
+            fsm: fsm::MemoryFsm::new(),
+            scanner: Arc::new(CleanFixtureScanner),
         }
     }
 
@@ -65,6 +75,20 @@ impl Store {
             .to_url_lossy()
             .scheme()
             .starts_with("postgres")
+    }
+}
+
+struct CleanFixtureScanner;
+
+impl scanner::VirusScanner for CleanFixtureScanner {
+    fn scan_bytes<'a>(&'a self, bytes: &'a [u8]) -> scanner::BoxFuture<'a, scanner::ScanVerdict> {
+        Box::pin(async move {
+            if bytes.windows(5).any(|w| w == b"EICAR") {
+                scanner::ScanVerdict::Infected("Eicar-Test-Signature".into())
+            } else {
+                scanner::ScanVerdict::Clean
+            }
+        })
     }
 }
 

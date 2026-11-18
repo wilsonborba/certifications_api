@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🚀 Features
 
+- *(studies)* Add studies, multi-source FSM uploads, prepared study reuse, selection persistence, and DB-backed quota meter (#35)
 - *(security)* Add bounded clamscan/freshclam adapters, DOCX/XLSX container inspection, and unsafe text chunk filtering (#36)
 - *(auth)* Add gateway identity extractors, ownership checks, admin guard, and caller authority rejection (#33)
 - *(storage)* Add normalized v2 PostgreSQL schema, versioned schema registry, and CouchDB document guardrail (#32)

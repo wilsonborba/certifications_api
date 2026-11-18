@@ -33,7 +33,11 @@ fn fixture_settings() -> Settings {
 async fn service_starts_on_test_port_and_answers_health_ready_and_log_stream() {
     let store = Store::fixture().await;
     let settings = fixture_settings();
-    let app = presentation::router(App { store, settings });
+    let app = presentation::router(App {
+        store,
+        settings,
+        quotas: Default::default(),
+    });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {

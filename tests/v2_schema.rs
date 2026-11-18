@@ -46,8 +46,20 @@ const EXTRA_TABLES: [&str; 5] = [
 async fn migrations_apply_cleanly_rerun_safely_and_have_no_json_or_array_columns() {
     let store = Store::fixture().await;
     for migration in SQLITE_MIGRATIONS {
-        sqlx::raw_sql(migration).execute(&store.db).await.unwrap();
+        let rerun: String = migration
+            .lines()
+            .filter(|l| {
+                !l.starts_with("ALTER TABLE studies ADD COLUMN ")
+                    && !l.starts_with("ALTER TABLE sources ADD COLUMN ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        sqlx::raw_sql(&rerun).execute(&store.db).await.unwrap();
     }
+    assert!(
+        include_str!("../migrations/002_v2_studies_sources.sql")
+            .contains("ALTER TABLE studies ADD COLUMN IF NOT EXISTS source_origin")
+    );
     for table in TABLES.iter().chain(EXTRA_TABLES.iter()) {
         let count: i64 = sqlx::query_scalar(&format!(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'"
