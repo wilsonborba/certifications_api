@@ -47,7 +47,12 @@ impl Store {
             db,
             docs: documents::Documents::remote(settings, http.clone()),
             fsm: fsm::HttpFsm::client(&settings.fsm_url, &settings.fsm_key, http.clone()),
-            scanner: Arc::new(scanner::ClamScanner::new("clamscan")),
+            scanner: Arc::new(scanner::ClamScanner::with_runtime(
+                &settings.clamav.clamscan_bin,
+                Some(std::path::PathBuf::from(&settings.clamav.signatures_dir)),
+                Some(std::path::PathBuf::from(&settings.clamav.lib_dir)),
+                Some(std::path::PathBuf::from(&settings.clamav.certs_dir)),
+            )),
             cortex: cortex::HttpCortex::client(&settings.cortex_url, http.clone()),
             reports: reports::HttpReports::client(&settings.reports_url, http),
         })

@@ -42,8 +42,14 @@ pub fn router(app: App) -> Router {
 async fn ready(State(app): State<App>) -> Result<Json<serde_json::Value>> {
     app.store.ready().await?;
     let signatures = app.signatures.get();
+    let scanner_binary = if std::path::Path::new(&app.settings.clamav.clamscan_bin).is_file() {
+        "present"
+    } else {
+        "missing"
+    };
     Ok(Json(serde_json::json!({
         "status": "ready",
         "signatures": signatures,
+        "scanner_binary": scanner_binary,
     })))
 }

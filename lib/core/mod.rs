@@ -87,6 +87,46 @@ fn env(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+fn default_clamav_data_dir() -> String {
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
+        && !xdg.trim().is_empty()
+    {
+        return format!("{}/certifications_api/clamav", xdg.trim_end_matches('/'));
+    }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.trim().is_empty()
+    {
+        return format!("{}/.local/share/certifications_api/clamav", home.trim_end_matches('/'));
+    }
+    "var/clamav".to_string()
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ClamAvSettings {
+    pub data_dir: String,
+    pub clamscan_bin: String,
+    pub freshclam_bin: String,
+    pub freshclam_conf: String,
+    pub signatures_dir: String,
+    pub lib_dir: String,
+    pub certs_dir: String,
+}
+
+impl ClamAvSettings {
+    pub fn from_env() -> Self {
+        let d = env("CLAMAV_DATA_DIR", &default_clamav_data_dir());
+        Self {
+            clamscan_bin: env("CLAMSCAN_BIN", &format!("{d}/usr/local/bin/clamscan")),
+            freshclam_bin: env("FRESHCLAM_BIN", &format!("{d}/usr/local/bin/freshclam")),
+            freshclam_conf: env("FRESHCLAM_CONF", &format!("{d}/etc/freshclam.conf")),
+            signatures_dir: env("CLAMAV_SIGNATURES_DIR", &format!("{d}/signatures")),
+            lib_dir: env("CLAMAV_LIB_DIR", &format!("{d}/usr/local/lib")),
+            certs_dir: env("CLAMAV_CERTS_DIR", &format!("{d}/usr/local/etc/certs")),
+            data_dir: d,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub host: String,
@@ -105,6 +145,7 @@ pub struct Settings {
     pub reports_url: String,
     pub gateway_url: String,
     pub certifications_service_key: String,
+    pub clamav: ClamAvSettings,
 }
 
 impl Settings {
@@ -145,6 +186,7 @@ impl Settings {
             reports_url: env("REPORTS_URL", ""),
             gateway_url: env("GATEWAY_URL", ""),
             certifications_service_key: env("CERTIFICATIONS_SERVICE_KEY", ""),
+            clamav: ClamAvSettings::from_env(),
         }
     }
 }

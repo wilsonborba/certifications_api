@@ -176,7 +176,10 @@ async fn freshclam_supervisor_updates_signature_state_and_aborts_on_shutdown() {
     let state = SignatureState::default();
     let handle = spawn_freshclam_supervisor(
         "nonexistent-freshclam-binary".into(),
+        None,
         dir.path().to_path_buf(),
+        None,
+        None,
         state.clone(),
         std::time::Duration::from_secs(3600),
     );
@@ -186,9 +189,15 @@ async fn freshclam_supervisor_updates_signature_state_and_aborts_on_shutdown() {
 }
 
 #[tokio::test]
-#[ignore = "Requires clamscan binary and signatures installed on the host"]
+#[ignore = "Requires app-owned ClamAV runtime installed via scripts/install_clamav.sh"]
 async fn real_clamscan_blocks_eicar_and_allows_clean_text() {
-    let scanner = ClamScanner::new("clamscan");
+    let settings = certifications_api::core::Settings::from_env();
+    let scanner = ClamScanner::with_runtime(
+        &settings.clamav.clamscan_bin,
+        Some(std::path::PathBuf::from(&settings.clamav.signatures_dir)),
+        Some(std::path::PathBuf::from(&settings.clamav.lib_dir)),
+        Some(std::path::PathBuf::from(&settings.clamav.certs_dir)),
+    );
     let eicar = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
     assert!(matches!(
         scanner.scan_bytes(eicar).await,
