@@ -269,7 +269,7 @@ mod tests {
             reports_url: String::new(),
             gateway_url: String::new(),
             certifications_service_key: "svc-secret-key".into(),
-        clamav: Default::default(),
+            clamav: Default::default(),
         }
     }
 

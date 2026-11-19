@@ -96,7 +96,10 @@ fn default_clamav_data_dir() -> String {
     if let Ok(home) = std::env::var("HOME")
         && !home.trim().is_empty()
     {
-        return format!("{}/.local/share/certifications_api/clamav", home.trim_end_matches('/'));
+        return format!(
+            "{}/.local/share/certifications_api/clamav",
+            home.trim_end_matches('/')
+        );
     }
     "var/clamav".to_string()
 }
