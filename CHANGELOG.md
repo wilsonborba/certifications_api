@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [unreleased]
 
+### 🚀 Features
+
+- *(shared)* Drop legacy local plans/waitlist/tickets storage in favor of central `api_for_apps` plans and waitlist (#28, #34)
+- *(admin)* Add admin settings, schema version CRUD/publish/retire, and aggregate statistics routes (#45)
+- *(certificates)* Add once-confirmed holder identity, idempotent certificate issuance with FSM PDF/image, public verification with activity summary, and admin holder/revocation routes (#44)
+- *(attempts)* Add version-locked attempts, key-safe taking API, idempotent answer saves and grading, three-group review statistics, and deduplicated activity records (#42)
+- *(catalog)* Add public discovery search/filters, answer-safe pre-attempt detail, aggregate statistics, deterministic tag suggestions (max 5), and restricted-report publication refusal (#41)
+- *(authoring)* Add question review, manual creation, two-step CSV import, author visual rendering to FSM, backend origin enforcement, and admin origin override (#40)
+- *(estimates)* Add generation step timing, non-content estimation statistics, calibration tracking, and honest `GET /studies/{id}/estimate` endpoint (#39)
+- *(studies)* Wire Reports picker and report-source permission checks to real Reports viewer routes (#35)
+- *(generation)* Add durable per-user generation queue, Cortex T0 Easy adapter, language script correction, citation verification, and SSE events (#38)
+- *(security)* Supervise bounded freshclam updates, expose signature health in `/ready`, and add real clamscan integration test (#36)
+- *(deletion)* Remove deleted studies, sources, and quizzes immediately with deferred FSM cleanup and admin retry (#37)
+- *(studies)* Add studies, multi-source FSM uploads, prepared study reuse, selection persistence, and DB-backed quota meter (#35)
+- *(security)* Add bounded clamscan/freshclam adapters, DOCX/XLSX container inspection, and unsafe text chunk filtering (#36)
+- *(auth)* Add gateway identity extractors, ownership checks, admin guard, and caller authority rejection (#33)
+- *(storage)* Add normalized v2 PostgreSQL schema, versioned schema registry, and CouchDB document guardrail (#32)
+- *(core)* Start Rust service foundation with settings, redacted stdout/SSE logs, `/health`, `/ready`, and `/logs/stream` (#31)
+
 ### 🐛 Bug Fixes
 
 - Remove daily generation quota system entirely ([`39bc644`](https://github.com/wilsonborba/certifications_api/commit/39bc644501b82fe854dfa2680153c2bfdcc0670b))
