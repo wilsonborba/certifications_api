@@ -2,7 +2,7 @@
 use serde::Serialize;
 use std::{
     future::Future,
-    path::Path,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, RwLock},
     time::{Duration, SystemTime},
@@ -95,6 +95,9 @@ pub trait VirusScanner: Send + Sync {
 
 pub struct ClamScanner {
     binary: String,
+    signatures_dir: Option<PathBuf>,
+    lib_dir: Option<PathBuf>,
+    certs_dir: Option<PathBuf>,
     semaphore: Arc<Semaphore>,
 }
 
@@ -102,8 +105,45 @@ impl ClamScanner {
     pub fn new(binary: impl Into<String>) -> Self {
         Self {
             binary: binary.into(),
+            signatures_dir: None,
+            lib_dir: None,
+            certs_dir: None,
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_SCANS)),
         }
+    }
+
+    pub fn with_runtime(
+        binary: impl Into<String>,
+        signatures_dir: Option<PathBuf>,
+        lib_dir: Option<PathBuf>,
+        certs_dir: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            binary: binary.into(),
+            signatures_dir,
+            lib_dir,
+            certs_dir,
+            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_SCANS)),
+        }
+    }
+}
+
+fn apply_runtime_env(cmd: &mut Command, lib_dir: Option<&Path>, certs_dir: Option<&Path>) {
+    if let Some(dir) = lib_dir
+        && dir.is_dir()
+    {
+        let mut val = dir.to_string_lossy().to_string();
+        if let Ok(existing) = std::env::var("LD_LIBRARY_PATH")
+            && !existing.is_empty()
+        {
+            val = format!("{val}:{existing}");
+        }
+        cmd.env("LD_LIBRARY_PATH", val);
+    }
+    if let Some(dir) = certs_dir
+        && dir.is_dir()
+    {
+        cmd.env("CVD_CERTS_DIR", dir);
     }
 }
 
@@ -120,7 +160,11 @@ impl VirusScanner for ClamScanner {
                 return ScanVerdict::Unavailable("temp_write_failed".into());
             }
             let mut cmd = Command::new(&self.binary);
+            if let Some(sig_dir) = &self.signatures_dir {
+                cmd.arg("--database").arg(sig_dir);
+            }
             cmd.arg("--no-summary").arg("--infected").arg(tmp.path());
+            apply_runtime_env(&mut cmd, self.lib_dir.as_deref(), self.certs_dir.as_deref());
             cmd.kill_on_drop(true);
             let output = match timeout(SCAN_TIMEOUT, cmd.output()).await {
                 Ok(Ok(out)) => out,
@@ -144,9 +188,24 @@ impl VirusScanner for ClamScanner {
 }
 
 /// Run a bounded one-shot `freshclam` signature update supervised by the backend.
-pub async fn run_freshclam_once(binary: &str) -> Result<(), String> {
+pub async fn run_freshclam_once(
+    binary: &str,
+    config_file: Option<&Path>,
+    signatures_dir: Option<&Path>,
+    lib_dir: Option<&Path>,
+    certs_dir: Option<&Path>,
+) -> Result<(), String> {
     let mut cmd = Command::new(binary);
+    if let Some(conf) = config_file
+        && conf.is_file()
+    {
+        cmd.arg("--config-file").arg(conf);
+    }
+    if let Some(dir) = signatures_dir {
+        cmd.arg("--datadir").arg(dir);
+    }
     cmd.arg("--quiet").kill_on_drop(true);
+    apply_runtime_env(&mut cmd, lib_dir, certs_dir);
     let output = timeout(FRESHCLAM_TIMEOUT, cmd.output())
         .await
         .map_err(|_| "freshclam_timeout".to_string())?
@@ -162,7 +221,10 @@ pub async fn run_freshclam_once(binary: &str) -> Result<(), String> {
 /// refreshing `SignatureState` after each run. Aborting the handle stops it on shutdown.
 pub fn spawn_freshclam_supervisor(
     binary: String,
-    sig_dir: std::path::PathBuf,
+    config_file: Option<PathBuf>,
+    sig_dir: PathBuf,
+    lib_dir: Option<PathBuf>,
+    certs_dir: Option<PathBuf>,
     signatures: SignatureState,
     interval: Duration,
 ) -> JoinHandle<()> {
@@ -170,7 +232,15 @@ pub fn spawn_freshclam_supervisor(
         let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
-            if let Err(err) = run_freshclam_once(&binary).await {
+            if let Err(err) = run_freshclam_once(
+                &binary,
+                config_file.as_deref(),
+                Some(&sig_dir),
+                lib_dir.as_deref(),
+                certs_dir.as_deref(),
+            )
+            .await
+            {
                 tracing::warn!(module = "scanner", error = %err, "Freshclam one-shot update failed");
             }
             signatures.refresh_from_dir(&sig_dir);

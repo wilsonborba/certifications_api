@@ -90,6 +90,7 @@ fn test_settings() -> Settings {
         reports_url: String::new(),
         gateway_url: String::new(),
         certifications_service_key: String::new(),
+        clamav: Default::default(),
     }
 }
 

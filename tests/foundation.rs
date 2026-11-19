@@ -30,6 +30,7 @@ fn fixture_settings() -> Settings {
         reports_url: String::new(),
         gateway_url: String::new(),
         certifications_service_key: String::new(),
+        clamav: Default::default(),
     }
 }
 
@@ -70,7 +71,7 @@ async fn service_starts_on_test_port_and_answers_health_ready_and_log_stream() {
     assert_eq!(ready.status(), 200);
     assert_eq!(
         ready.json::<serde_json::Value>().await.unwrap(),
-        serde_json::json!({"status": "ready", "signatures": "missing"})
+        serde_json::json!({"status": "ready", "signatures": "missing", "scanner_binary": "missing"})
     );
     signatures.set(SignatureHealth::Fresh);
     let ready_fresh = client
@@ -80,7 +81,7 @@ async fn service_starts_on_test_port_and_answers_health_ready_and_log_stream() {
         .unwrap();
     assert_eq!(
         ready_fresh.json::<serde_json::Value>().await.unwrap(),
-        serde_json::json!({"status": "ready", "signatures": "fresh"})
+        serde_json::json!({"status": "ready", "signatures": "fresh", "scanner_binary": "missing"})
     );
 
     let stream_resp = client
