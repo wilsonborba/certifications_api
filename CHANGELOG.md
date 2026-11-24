@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🚀 Features
 
+- *(#35)* Add migration 010 for server-only source_provenance ([`a841e6a`](https://github.com/wilsonborba/certifications_api/commit/a841e6a2f88fca4957d6c27f97a4678e58038c75))
+- *(#35)* Enforce canonical selection grammar and persist legacy provenance regression ([`b14fa20`](https://github.com/wilsonborba/certifications_api/commit/b14fa201700453c0330938bc330c5baf49c6e0eb))
+- *(#35)* Align MAX_SELECTION_RANGES to 100 with Cortex #136 ([`d5962fb`](https://github.com/wilsonborba/certifications_api/commit/d5962fba03b4351a2968b8929d54748d7b2de660))
+
 - *(shared)* Drop legacy local plans/waitlist/tickets storage in favor of central `api_for_apps` plans and waitlist (#28, #34)
 - *(admin)* Add admin settings, schema version CRUD/publish/retire, and aggregate statistics routes (#45)
 - *(certificates)* Add once-confirmed holder identity, idempotent certificate issuance with FSM PDF/image, public verification with activity summary, and admin holder/revocation routes (#44)
@@ -27,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(core)* Start Rust service foundation with settings, redacted stdout/SSE logs, `/health`, `/ready`, and `/logs/stream` (#31)
 
 ### 🐛 Bug Fixes
+
+- *(certifications_api#35)* Enforce fsm_ref ownership, bounded uploads, PDF structure count, and bounded FSM reads ([`216efa2`](https://github.com/wilsonborba/certifications_api/commit/216efa2f66a9d36eb5634df8e2502e8d2242c03d))
+- *(#35)* Fail closed on unproven legacy fsm_ref rows and test ObjStm null page_count ([`e4a90c0`](https://github.com/wilsonborba/certifications_api/commit/e4a90c0662f44ba13a85ce93d80cd0c010a736de))
+- *(studies)* Enforce 100-page PDF total cap and text-only passages selection ([`b993c3d`](https://github.com/wilsonborba/certifications_api/commit/b993c3d000e972db1c6ac19f1686e316ec91b76a))
 
 - Remove daily generation quota system entirely ([`39bc644`](https://github.com/wilsonborba/certifications_api/commit/39bc644501b82fe854dfa2680153c2bfdcc0670b))
 - Stop chunk loop at the real question cap, not just a fixed target ([`f3bec8c`](https://github.com/wilsonborba/certifications_api/commit/f3bec8ca1bef71e42390ca586d5e1e993f973db7))
