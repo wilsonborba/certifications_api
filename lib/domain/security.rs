@@ -16,6 +16,7 @@ pub enum FileKind {
     Xlsx,
     PlainText,
     Image,
+    Audio,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -205,6 +206,46 @@ pub fn validate_file_bytes(declared_mime: &str, bytes: &[u8]) -> Result<FileKind
                 return Err(Error::unprocessable("invalid_file: Invalid WebP signature"));
             }
             Ok(FileKind::Image)
+        }
+        "audio/mpeg" | "audio/mp3" => {
+            let valid_id3 = bytes.starts_with(b"ID3");
+            let valid_frame = bytes.len() >= 2 && bytes[0] == 0xff && (bytes[1] & 0xe0) == 0xe0;
+            if !valid_id3 && !valid_frame {
+                return Err(Error::unprocessable("invalid_file: Invalid MP3 signature"));
+            }
+            Ok(FileKind::Audio)
+        }
+        "audio/wav" | "audio/x-wav" | "audio/wave" => {
+            if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+                return Err(Error::unprocessable("invalid_file: Invalid WAV signature"));
+            }
+            Ok(FileKind::Audio)
+        }
+        "audio/ogg" => {
+            if !bytes.starts_with(b"OggS") {
+                return Err(Error::unprocessable("invalid_file: Invalid Ogg signature"));
+            }
+            Ok(FileKind::Audio)
+        }
+        "audio/flac" => {
+            if !bytes.starts_with(b"fLaC") {
+                return Err(Error::unprocessable("invalid_file: Invalid FLAC signature"));
+            }
+            Ok(FileKind::Audio)
+        }
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => {
+            if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
+                return Err(Error::unprocessable(
+                    "invalid_file: Invalid MP4/M4A signature",
+                ));
+            }
+            Ok(FileKind::Audio)
+        }
+        "audio/webm" => {
+            if !bytes.starts_with(b"\x1a\x45\xdf\xa3") {
+                return Err(Error::unprocessable("invalid_file: Invalid WebM signature"));
+            }
+            Ok(FileKind::Audio)
         }
         _ => Err(Error::unprocessable(
             "unsupported_media_type: Unsupported file type",

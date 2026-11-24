@@ -666,6 +666,125 @@ pub async fn get_source(
         .ok_or_else(Error::missing)
 }
 
+pub fn cheap_pdf_page_count(bytes: &[u8]) -> Option<u32> {
+    if !bytes.starts_with(b"%PDF-") || bytes.len() > 16 * 1024 * 1024 {
+        return None;
+    }
+    let hay = String::from_utf8_lossy(bytes);
+    // Count `/Type /Page` objects excluding `/Type /Pages`.
+    let mut count: u32 = 0;
+    let mut pos = 0;
+    while let Some(idx) = hay[pos..].find("/Type") {
+        let rest = &hay[pos + idx + 5..];
+        let trimmed = rest.trim_start();
+        if let Some(after_page) = trimmed.strip_prefix("/Page")
+            && !after_page.starts_with('s')
+            && !after_page
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric())
+        {
+            count = count.saturating_add(1);
+        }
+        pos += idx + 5;
+    }
+    (count > 0).then_some(count)
+}
+
+pub fn cheap_wav_duration_seconds(bytes: &[u8]) -> Option<f64> {
+    if bytes.len() < 44 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+    let mut offset = 12usize;
+    let mut byte_rate: Option<u32> = None;
+    let mut data_size: Option<u32> = None;
+    while offset + 8 <= bytes.len() {
+        let id = &bytes[offset..offset + 4];
+        let size = u32::from_le_bytes([
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ]);
+        let payload_start = offset + 8;
+        let payload_end = payload_start.saturating_add(size as usize);
+        if payload_end > bytes.len() {
+            break;
+        }
+        if id == b"fmt " && size >= 16 {
+            byte_rate = Some(u32::from_le_bytes([
+                bytes[payload_start + 8],
+                bytes[payload_start + 9],
+                bytes[payload_start + 10],
+                bytes[payload_start + 11],
+            ]));
+        } else if id == b"data" {
+            data_size = Some(size);
+        }
+        if byte_rate.is_some() && data_size.is_some() {
+            break;
+        }
+        let padded = (size as usize).saturating_add((size as usize) & 1);
+        offset = payload_start.saturating_add(padded);
+    }
+    match (byte_rate, data_size) {
+        (Some(br), Some(ds)) if br > 0 => Some((ds as f64) / (br as f64)),
+        _ => None,
+    }
+}
+
+pub fn parse_byte_range(header: &str, total: usize) -> Option<(usize, usize)> {
+    if total == 0 {
+        return None;
+    }
+    let spec = header.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (start_str, end_str) = spec.split_once('-')?;
+    if start_str.is_empty() {
+        let suffix: usize = end_str.trim().parse().ok()?;
+        if suffix == 0 {
+            return None;
+        }
+        let start = total.saturating_sub(suffix);
+        return Some((start, total - 1));
+    }
+    let start: usize = start_str.trim().parse().ok()?;
+    if start >= total {
+        return None;
+    }
+    let end = if end_str.trim().is_empty() {
+        total - 1
+    } else {
+        let parsed: usize = end_str.trim().parse().ok()?;
+        if parsed < start {
+            return None;
+        }
+        parsed.min(total - 1)
+    };
+    Some((start, end))
+}
+
+pub async fn get_source_content(
+    store: &Store,
+    caller: &CallerIdentity,
+    study_id: &str,
+    source_id: &str,
+) -> Result<(SourceSummary, Vec<u8>)> {
+    let src = get_source(store, caller, study_id, source_id).await?;
+    if src.status != "ready" {
+        return Err(Error::unprocessable(
+            "source_not_ready: Source is not ready for content streaming",
+        ));
+    }
+    if src.fsm_ref.trim().is_empty() {
+        return Err(Error::missing());
+    }
+    let bytes = store.fsm.get_bytes(&src.fsm_ref).await?;
+    Ok((src, bytes))
+}
+
 pub async fn preview_source(
     store: &Store,
     caller: &CallerIdentity,
@@ -678,13 +797,31 @@ pub async fn preview_source(
             "source_not_ready: Source is not ready for preview",
         ));
     }
-    let preview_text = if !src.fsm_ref.is_empty() && src.mime_type.starts_with("text/") {
-        let bytes = store.fsm.get_bytes(&src.fsm_ref).await.unwrap_or_default();
-        let text = String::from_utf8_lossy(&bytes);
-        text.chars().take(1000).collect::<String>()
-    } else {
-        String::new()
-    };
+    let has_fsm = !src.fsm_ref.trim().is_empty();
+    let mut preview_text = String::new();
+    let mut page_count: Option<u32> = None;
+    let mut duration_seconds: Option<f64> = None;
+
+    if has_fsm {
+        let needs_bytes = src.mime_type.starts_with("text/")
+            || src.mime_type == "application/pdf"
+            || matches!(
+                src.mime_type.as_str(),
+                "audio/wav" | "audio/x-wav" | "audio/wave"
+            );
+        if needs_bytes && let Ok(bytes) = store.fsm.get_bytes(&src.fsm_ref).await {
+            if src.mime_type.starts_with("text/") {
+                let text = String::from_utf8_lossy(&bytes);
+                preview_text = text.chars().take(1000).collect::<String>();
+            } else if src.mime_type == "application/pdf" {
+                page_count = cheap_pdf_page_count(&bytes);
+            } else {
+                duration_seconds = cheap_wav_duration_seconds(&bytes);
+            }
+        }
+    }
+
+    let content_url = has_fsm.then(|| format!("/studies/{study_id}/sources/{source_id}/content"));
     Ok(serde_json::json!({
         "source_id": src.id,
         "filename": src.filename,
@@ -693,6 +830,10 @@ pub async fn preview_source(
         "selection_kind": src.selection_kind,
         "selection_spec": src.selection_spec,
         "preview": preview_text,
+        "content_url": content_url,
+        "supports_range": has_fsm,
+        "page_count": page_count,
+        "duration_seconds": duration_seconds,
     }))
 }
 
