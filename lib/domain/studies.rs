@@ -134,7 +134,7 @@ fn default_text_mime() -> String {
 }
 
 const MAX_SELECTION_SPEC_BYTES: usize = 2000;
-const MAX_SELECTION_RANGES: usize = 64;
+const MAX_SELECTION_RANGES: usize = 100;
 
 fn parse_ascii_u64(s: &str) -> Option<u64> {
     if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
