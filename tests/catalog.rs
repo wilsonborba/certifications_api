@@ -20,6 +20,7 @@ use certifications_api::{
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use sqlx::Row;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -215,7 +216,7 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     assert_eq!(st, StatusCode::CREATED);
     let sid = study["id"].as_str().unwrap().to_string();
 
-    call(
+    let (st, private_upload) = call(
         &app,
         "POST",
         &format!("/studies/{sid}/sources"),
@@ -227,6 +228,8 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
         })),
     )
     .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let private_source_id = private_upload["id"].as_str().unwrap().to_string();
 
     let (st, _) = call(
         &app,
@@ -256,7 +259,28 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
                 { "id": "b", "text": "Right atrium" }
             ],
             "correct_id": "a",
-            "explanation": "The left ventricle ejects blood through the aortic valve."
+            "explanation": "The left ventricle ejects blood through the aortic valve.",
+            "source_id": private_source_id,
+            "citation_ref": "private upload page marker"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions"),
+        Some("author-1"),
+        Some(json!({
+            "language": "en",
+            "prompt": "Which chamber receives oxygenated blood from the lungs?",
+            "alternatives": [
+                { "id": "a", "text": "Left atrium" },
+                { "id": "b", "text": "Right ventricle" }
+            ],
+            "correct_id": "a",
+            "explanation": "The left atrium receives oxygenated blood from the lungs."
         })),
     )
     .await;
@@ -339,6 +363,88 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     assert_eq!(cat["total"], 1);
     assert_eq!(cat["suggestions"][0], "Cardiology Basics");
 
+    let (st, first_public_questions) = call(
+        &app,
+        "GET",
+        "/catalog/questions?q=Cardiology&language=en&limit=1&offset=0",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(first_public_questions["items"].as_array().unwrap().len(), 1);
+    assert_eq!(first_public_questions["limit"], 1);
+    assert_eq!(first_public_questions["offset"], 0);
+    assert_eq!(first_public_questions["has_more"], true);
+    assert_eq!(
+        first_public_questions["items"][0]["source_quiz_title"],
+        "Cardiology Basics"
+    );
+    assert_eq!(
+        first_public_questions["items"][0]["source_quiz_tags"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        !first_public_questions
+            .to_string()
+            .contains("private upload page marker")
+    );
+    assert!(
+        !first_public_questions
+            .to_string()
+            .contains(&private_source_id)
+    );
+    assert!(!first_public_questions.to_string().contains("correct_id"));
+    assert!(!first_public_questions.to_string().contains("explanation"));
+    let (st, questions_by_tag) = call(
+        &app,
+        "GET",
+        "/catalog/questions?q=Clinical%20ECG&limit=5",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(questions_by_tag["items"].as_array().unwrap().len(), 2);
+    let (st, second_public_questions) = call(
+        &app,
+        "GET",
+        "/catalog/questions?q=Cardiology&language=en&limit=1&offset=1",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        second_public_questions["items"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(second_public_questions["has_more"], false);
+    assert_ne!(
+        first_public_questions["items"][0]["question_version_id"],
+        second_public_questions["items"][0]["question_version_id"]
+    );
+    assert_ne!(
+        first_public_questions["items"][0]["id"],
+        second_public_questions["items"][0]["id"]
+    );
+    let (st, second_question) = call(
+        &app,
+        "GET",
+        "/catalog/questions?q=receives%20oxygenated",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let second_question_version_id = second_question["items"][0]["question_version_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
     let (st, detail) = call(&app, "GET", &format!("/quizzes/{quiz_id}"), None, None).await;
     assert_eq!(st, StatusCode::OK);
     let detail_str = detail.to_string();
@@ -369,6 +475,332 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     assert_eq!(st, StatusCode::OK);
     assert_eq!(pub_qs["items"].as_array().unwrap().len(), 1);
     assert!(!pub_qs.to_string().contains("correct_id"));
+    assert!(!pub_qs.to_string().contains("explanation"));
+    assert!(!pub_qs.to_string().contains("private upload page marker"));
+    assert!(!pub_qs.to_string().contains(&private_source_id));
+
+    let (st, target_study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("reuse-author"),
+        Some(json!({"title":"Reusable public questions"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let target_study_id = target_study["id"].as_str().unwrap().to_string();
+    let question_version_id = pub_qs["items"][0]["question_version_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{target_study_id}/questions/reuse"),
+        Some("other-user"),
+        Some(json!({"question_version_ids":[question_version_id]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{target_study_id}/questions/reuse"),
+        Some("reuse-author"),
+        Some(json!({
+            "question_version_ids":[question_version_id,question_version_id],
+            "owner_id":"forged-owner",
+            "origin_quiz_id":"forged-origin",
+            "origin_quiz_version_id":"forged-version",
+            "source_scope":"generated_from_current_selected_sources"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM quizzes WHERE study_id = $1")
+            .bind(&target_study_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap(),
+        0
+    );
+
+    let (st, reused) = call(
+        &app,
+        "POST",
+        &format!("/studies/{target_study_id}/questions/reuse"),
+        Some("reuse-author"),
+        Some(json!({"question_version_ids":[question_version_id,question_version_id]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(reused["added_count"], 1);
+    assert_eq!(reused["already_present_count"], 1);
+    assert_eq!(reused["total_question_count"], 1);
+    let target_quiz_id = reused["quiz_id"].as_str().unwrap().to_string();
+    let target_version_id = reused["quiz_version_id"].as_str().unwrap().to_string();
+    let reused_membership = sqlx::query(
+        "SELECT qvq.question_version_id, qvq.source_scope, qvq.origin_quiz_id,
+                qvq.origin_quiz_version_id
+         FROM quiz_version_questions qvq WHERE qvq.quiz_version_id = $1",
+    )
+    .bind(&target_version_id)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        reused_membership.get::<String, _>("question_version_id"),
+        question_version_id
+    );
+    assert_eq!(
+        reused_membership.get::<String, _>("source_scope"),
+        "reused_public_question_version"
+    );
+    assert_eq!(
+        reused_membership.get::<String, _>("origin_quiz_id"),
+        quiz_id
+    );
+    assert_eq!(
+        reused_membership.get::<String, _>("origin_quiz_version_id"),
+        sqlx::query_scalar::<_, String>("SELECT active_version_id FROM quizzes WHERE id = $1")
+            .bind(&quiz_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap()
+    );
+
+    let target_version_count_before_retry: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM quiz_versions WHERE quiz_id = $1")
+            .bind(&target_quiz_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap();
+    let (st, retry) = call(
+        &app,
+        "POST",
+        &format!("/studies/{target_study_id}/questions/reuse"),
+        Some("reuse-author"),
+        Some(json!({"question_version_ids":[question_version_id]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(retry["added_count"], 0);
+    assert_eq!(retry["already_present_count"], 1);
+    assert_eq!(retry["quiz_version_id"], target_version_id);
+    let target_version_count_after_retry: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM quiz_versions WHERE quiz_id = $1")
+            .bind(&target_quiz_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        target_version_count_before_retry,
+        target_version_count_after_retry
+    );
+
+    sqlx::query(&format!(
+        "CREATE TRIGGER fail_reuse_membership BEFORE INSERT ON quiz_version_questions
+         WHEN NEW.question_version_id = '{second_question_version_id}'
+         BEGIN SELECT RAISE(ABORT, 'injected membership write failure'); END"
+    ))
+    .execute(&store.db)
+    .await
+    .unwrap();
+    let (st, failed_reuse) = call(
+        &app,
+        "POST",
+        &format!("/studies/{target_study_id}/questions/reuse"),
+        Some("reuse-author"),
+        Some(json!({"question_version_ids":[second_question_version_id]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{failed_reuse}");
+    sqlx::query("DROP TRIGGER fail_reuse_membership")
+        .execute(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM quiz_versions WHERE quiz_id = $1")
+            .bind(&target_quiz_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap(),
+        target_version_count_before_retry
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT active_version_id FROM quizzes WHERE id = $1")
+            .bind(&target_quiz_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap(),
+        target_version_id
+    );
+
+    let (st, target_questions) = call(
+        &app,
+        "GET",
+        &format!("/studies/{target_study_id}/questions"),
+        Some("reuse-author"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        target_questions["items"][0]["source_scope"],
+        "reused_public_question_version"
+    );
+    assert_eq!(target_questions["items"][0]["origin_quiz_id"], quiz_id);
+    assert_eq!(target_questions["items"][0]["citation_ref"], "");
+    assert!(
+        target_questions["items"][0]["visuals"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let reused_question_id = target_questions["items"][0]["id"].as_str().unwrap();
+    let (st, edit_reused) = call(
+        &app,
+        "PATCH",
+        &format!("/studies/{target_study_id}/questions/{reused_question_id}"),
+        Some("reuse-author"),
+        Some(json!({"prompt":"Attempt to edit canonical reused version"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert!(
+        edit_reused
+            .to_string()
+            .contains("reused_question_immutable")
+    );
+    let (st, add_visual) = call(
+        &app,
+        "POST",
+        &format!("/studies/{target_study_id}/questions/{reused_question_id}/visual"),
+        Some("reuse-author"),
+        Some(json!({"visual_spec":{"kind":"diagram"}})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert!(add_visual.to_string().contains("reused_question_immutable"));
+    let citation_count_after_reuse: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM question_citations WHERE question_version_id = $1",
+    )
+    .bind(&question_version_id)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(citation_count_after_reuse, 1);
+
+    let (st, private_study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("private-author"),
+        Some(json!({"title":"Not publicly reusable"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let private_study_id = private_study["id"].as_str().unwrap().to_string();
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{private_study_id}/questions"),
+        Some("private-author"),
+        Some(json!({
+            "language":"en",
+            "prompt":"Private question not in public catalog",
+            "alternatives":[{"id":"a","text":"A"},{"id":"b","text":"B"}],
+            "correct_id":"a",
+            "explanation":"Private explanation"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let private_question_version_id: String = sqlx::query_scalar(
+        "SELECT qvq.question_version_id FROM quizzes q
+         JOIN quiz_version_questions qvq ON qvq.quiz_version_id = q.active_version_id
+         WHERE q.study_id = $1",
+    )
+    .bind(&private_study_id)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    let (st, private_catalog_search) = call(
+        &app,
+        "GET",
+        "/catalog/questions?q=Private%20question%20not%20in%20public%20catalog",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(
+        private_catalog_search["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let (st, private_reuse) = call(
+        &app,
+        "POST",
+        &format!("/studies/{target_study_id}/questions/reuse"),
+        Some("reuse-author"),
+        Some(json!({"question_version_ids":[private_question_version_id]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(private_reuse.to_string().contains("question_not_reusable"));
+
+    let (st, published_target) = call(
+        &app,
+        "POST",
+        &format!("/studies/{target_study_id}/publication"),
+        Some("reuse-author"),
+        Some(json!({"tags":["Reuse"]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(published_target["id"], target_quiz_id);
+    let (st, target_public_detail) = call(
+        &app,
+        "GET",
+        &format!("/quizzes/{target_quiz_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(
+        target_public_detail["study_material"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !target_public_detail
+            .to_string()
+            .contains("private upload page marker")
+    );
+    assert!(
+        !target_public_detail
+            .to_string()
+            .contains(&private_source_id)
+    );
+    assert!(!target_public_detail.to_string().contains("correct_id"));
+    let (st, taking) = call(
+        &app,
+        "POST",
+        &format!("/quizzes/{target_quiz_id}/attempts"),
+        Some("learner-reuse"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert!(!taking.to_string().contains("correct_id"));
+    assert!(!taking.to_string().contains("private upload page marker"));
 
     // Real completed attempt updates public statistics.
     let qver_id: String = sqlx::query_scalar("SELECT active_version_id FROM quizzes WHERE id = $1")
@@ -432,47 +864,6 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
         .unwrap();
     }
 
-    let question_version_id: String = sqlx::query_scalar(
-        "SELECT question_version_id FROM quiz_version_questions WHERE quiz_version_id = $1",
-    )
-    .bind(&qver_id)
-    .fetch_one(&store.db)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE quiz_version_questions SET source_scope = 'generated_from_current_selected_sources'
-         WHERE quiz_version_id = $1",
-    )
-    .bind(&qver_id)
-    .execute(&store.db)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO question_versions(id, question_id, version_num, language, schema_name, schema_version, couch_doc_id, created_at)
-         SELECT 'qver-extra', question_id, 2, language, schema_name, schema_version, couch_doc_id, created_at
-         FROM question_versions WHERE id = $1",
-    )
-    .bind(&question_version_id)
-    .execute(&store.db)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO quiz_version_questions(quiz_version_id, position, question_version_id, source_scope)
-         VALUES($1, 1, 'qver-extra', 'unclassified')",
-    )
-    .bind(&qver_id)
-    .execute(&store.db)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO attempt_answers(id, attempt_id, question_version_id, selected_option_id, is_correct, answered_at)
-         VALUES('answer-1', 'att-1', $1, 'a', 1, 145)",
-    )
-    .bind(&question_version_id)
-    .execute(&store.db)
-    .await
-    .unwrap();
-
     let (st, stats) = call(
         &app,
         "GET",
@@ -484,32 +875,13 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     assert_eq!(st, StatusCode::OK);
     assert_eq!(stats["completed_attempt_count"], 12);
     assert_eq!(
-        stats["question_provenance"]["generated_from_current_selected_sources"]["attempt_count"],
-        11
+        stats["question_provenance"]["unavailable_attempt_count"],
+        12
     );
-    assert_eq!(
-        stats["question_provenance"]["generated_from_current_selected_sources"]["question_count"],
-        11
-    );
-    assert_eq!(
-        stats["question_provenance"]["generated_from_current_selected_sources"]["correct_question_count"],
-        1
-    );
-    assert_eq!(
-        stats["question_provenance"]["reused_public_question_version"]["question_count"],
-        0
-    );
-    assert_eq!(
-        stats["question_provenance"]["unclassified"]["question_count"],
-        11
-    );
-    assert_eq!(
-        stats["question_provenance"]["combined"]["attempt_count"],
-        11
-    );
+    assert_eq!(stats["question_provenance"]["combined"]["attempt_count"], 0);
     assert_eq!(
         stats["question_provenance"]["combined"]["question_count"],
-        22
+        0
     );
     assert_eq!(stats["distinct_participants"], 12);
     assert!((stats["average_score_pct"].as_f64().unwrap() - 717.0 / 11.0).abs() < 1e-9);

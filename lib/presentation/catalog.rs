@@ -43,8 +43,8 @@ async fn list_catalog_questions(
     State(app): State<App>,
     Query(query): Query<CatalogQuestionQuery>,
 ) -> Result<Json<Value>> {
-    let items = catalog::list_catalog_questions(&app.store, query).await?;
-    Ok(Json(json!({ "items": items })))
+    let page = catalog::list_catalog_questions(&app.store, query).await?;
+    Ok(Json(json!(page)))
 }
 
 async fn get_quiz(
