@@ -380,3 +380,343 @@ async fn reports_picker_and_report_source_enforce_permissions_and_unconfigured_5
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
 }
+
+fn multipart_body(boundary: &str, filename: &str, mime: &str, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {mime}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(data);
+    out.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    out
+}
+
+fn minimal_wav(duration_secs: u32) -> Vec<u8> {
+    let sample_rate: u32 = 8000;
+    let channels: u16 = 1;
+    let bits_per_sample: u16 = 8;
+    let byte_rate: u32 = sample_rate * (channels as u32) * (bits_per_sample as u32 / 8);
+    let data_len: u32 = byte_rate * duration_secs;
+    let riff_len: u32 = 36 + data_len;
+    let mut wav = Vec::with_capacity(44 + data_len as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&riff_len.to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&channels.to_le_bytes());
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // block align
+    wav.extend_from_slice(&bits_per_sample.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.resize(44 + data_len as usize, 0x80);
+    wav
+}
+
+async fn call_raw(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    user: Option<&str>,
+    content_type: Option<&str>,
+    range: Option<&str>,
+    body: Vec<u8>,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut req = Request::builder().method(method).uri(uri);
+    if let Some(u) = user {
+        req = req.header("x-uuid", u);
+    }
+    if let Some(ct) = content_type {
+        req = req.header("content-type", ct);
+    }
+    if let Some(r) = range {
+        req = req.header("range", r);
+    }
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, headers, bytes)
+}
+
+#[tokio::test]
+async fn multipart_pdf_and_wav_uploads_stream_with_range_preview_metadata_and_quota() {
+    let mut store = Store::fixture().await;
+    let fsm = MemoryFsm::new();
+    store.fsm = fsm.clone();
+    let quotas = QuotaCache::default();
+    quotas
+        .update_in_db(
+            &store,
+            QuotaConfig {
+                max_file_bytes: 32_768,
+                max_study_bytes: 65_536,
+                max_account_bytes: 131_072,
+            },
+            "admin-1",
+        )
+        .await
+        .unwrap();
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings: test_settings(),
+        quotas,
+        signatures: Default::default(),
+    });
+
+    let (st, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u1"),
+        Some(json!({"title": "Binary Sources"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sid = study["id"].as_str().unwrap();
+
+    // 1. Multipart PDF upload
+    let pdf_bytes = b"%PDF-1.4\n1 0 obj<</Type /Pages /Count 2>>endobj\n2 0 obj<</Type /Page>>endobj\n3 0 obj<</Type /Page>>endobj\n%%EOF".to_vec();
+    let boundary = "----asodya35boundary";
+    let body = multipart_body(boundary, "slides.pdf", "application/pdf", &pdf_bytes);
+    let (st, _, raw) = call_raw(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/sources"),
+        Some("u1"),
+        Some(&format!("multipart/form-data; boundary={boundary}")),
+        None,
+        body,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let pdf_src: Value = serde_json::from_slice(&raw).unwrap();
+    let pdf_id = pdf_src["id"].as_str().unwrap();
+    assert_eq!(pdf_src["mime_type"], "application/pdf");
+    assert_eq!(pdf_src["size_bytes"], pdf_bytes.len() as i64);
+    assert_eq!(fsm.put_count(), 1);
+
+    // Preview returns cheap PDF page_count + content_url + supports_range
+    let (st, preview) = call(
+        &app,
+        "GET",
+        &format!("/studies/{sid}/sources/{pdf_id}/preview"),
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(preview["page_count"], 2);
+    assert_eq!(preview["supports_range"], true);
+    assert_eq!(
+        preview["content_url"],
+        format!("/studies/{sid}/sources/{pdf_id}/content")
+    );
+    assert!(preview["duration_seconds"].is_null());
+
+    // Full content + Range 206 + invalid Range 416 + cross-user 403
+    let (st, hdrs, bytes) = call_raw(
+        &app,
+        "GET",
+        &format!("/studies/{sid}/sources/{pdf_id}/content"),
+        Some("u1"),
+        None,
+        None,
+        vec![],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(hdrs.get("accept-ranges").unwrap(), "bytes");
+    assert_eq!(hdrs.get("content-type").unwrap(), "application/pdf");
+    assert_eq!(bytes, pdf_bytes);
+
+    let (st, hdrs, slice) = call_raw(
+        &app,
+        "GET",
+        &format!("/studies/{sid}/sources/{pdf_id}/content"),
+        Some("u1"),
+        None,
+        Some("bytes=0-4"),
+        vec![],
+    )
+    .await;
+    assert_eq!(st, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        hdrs.get("content-range").unwrap().to_str().unwrap(),
+        format!("bytes 0-4/{}", pdf_bytes.len())
+    );
+    assert_eq!(slice, b"%PDF-");
+
+    let (st, _, _) = call_raw(
+        &app,
+        "GET",
+        &format!("/studies/{sid}/sources/{pdf_id}/content"),
+        Some("u1"),
+        None,
+        Some("bytes=99999-100000"),
+        vec![],
+    )
+    .await;
+    assert_eq!(st, StatusCode::RANGE_NOT_SATISFIABLE);
+
+    let (st, _, _) = call_raw(
+        &app,
+        "GET",
+        &format!("/studies/{sid}/sources/{pdf_id}/content"),
+        Some("u2"),
+        None,
+        None,
+        vec![],
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // 2. Multipart WAV audio upload + duration_seconds metadata + interval selection
+    let wav_bytes = minimal_wav(2);
+    let wav_body = multipart_body(boundary, "lecture.wav", "audio/wav", &wav_bytes);
+    let (st, _, raw) = call_raw(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/sources"),
+        Some("u1"),
+        Some(&format!("multipart/form-data; boundary={boundary}")),
+        None,
+        wav_body,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let wav_src: Value = serde_json::from_slice(&raw).unwrap();
+    let wav_id = wav_src["id"].as_str().unwrap();
+
+    let (st, wav_preview) = call(
+        &app,
+        "GET",
+        &format!("/studies/{sid}/sources/{wav_id}/preview"),
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!((wav_preview["duration_seconds"].as_f64().unwrap() - 2.0).abs() < 0.01);
+    assert!(wav_preview["page_count"].is_null());
+
+    // 3. Invalid magic bytes rejected without consuming FSM or quota
+    let bad_pdf = multipart_body(boundary, "evil.pdf", "application/pdf", b"not-a-pdf-header");
+    let (st, _, _) = call_raw(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/sources"),
+        Some("u1"),
+        Some(&format!("multipart/form-data; boundary={boundary}")),
+        None,
+        bad_pdf,
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(fsm.put_count(), 2);
+
+    let (st, detail) = call(&app, "GET", &format!("/studies/{sid}"), Some("u1"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        detail["quota"]["used_bytes"],
+        (pdf_bytes.len() + wav_bytes.len()) as i64
+    );
+    assert_eq!(detail["quota"]["reserved_bytes"], 0);
+}
+
+#[tokio::test]
+async fn prepared_study_fsm_ref_streams_content_and_link_returns_404() {
+    let mut store = Store::fixture().await;
+    let fsm = MemoryFsm::new();
+    let pdf_bytes = b"%PDF-1.4\n1 0 obj<</Type /Page>>endobj\n%%EOF".to_vec();
+    fsm.seed("shared/ann-1/doc.pdf", &pdf_bytes);
+    store.fsm = fsm.clone();
+    let app = presentation::router(App {
+        store,
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+
+    let (st, study) = call(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("u1"),
+        Some(json!({
+            "title": "Prepared Study",
+            "sources": [
+                {
+                    "filename": "doc.pdf",
+                    "mime_type": "application/pdf",
+                    "fsm_ref": "shared/ann-1/doc.pdf",
+                    "size_bytes": pdf_bytes.len(),
+                    "selection_kind": "pages",
+                    "selection_spec": "1"
+                }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(fsm.put_count(), 0);
+    let sid = study["study"]["id"].as_str().unwrap();
+    let fsm_src_id = study["sources"][0]["id"].as_str().unwrap();
+
+    let (st, link_src) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/sources"),
+        Some("u1"),
+        Some(json!({
+            "kind": "link",
+            "filename": "notes.html",
+            "mime_type": "text/html",
+            "external_ref": "https://example.org/notes"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let link_src_id = link_src["id"].as_str().unwrap();
+
+    let (st, _, bytes) = call_raw(
+        &app,
+        "GET",
+        &format!("/studies/{sid}/sources/{fsm_src_id}/content"),
+        Some("u1"),
+        None,
+        Some("bytes=0-4"),
+        vec![],
+    )
+    .await;
+    assert_eq!(st, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(bytes, b"%PDF-");
+
+    let (st, _, _) = call_raw(
+        &app,
+        "GET",
+        &format!("/studies/{sid}/sources/{link_src_id}/content"),
+        Some("u1"),
+        None,
+        None,
+        vec![],
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}

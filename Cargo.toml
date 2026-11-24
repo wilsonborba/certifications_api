@@ -12,7 +12,7 @@ path = "lib/main.rs"
 
 [dependencies]
 anyhow = "1"
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 chrono = "0.4"
 dotenvy = "0.15"
 futures-util = "0.3"

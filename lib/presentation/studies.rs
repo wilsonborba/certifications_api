@@ -12,8 +12,10 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
-    http::StatusCode,
+    body::Body,
+    extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Query, Request, State},
+    http::{HeaderMap, StatusCode, header},
+    response::Response,
     routing::{get, patch, post},
 };
 use serde::Deserialize;
@@ -51,10 +53,17 @@ pub fn routes() -> Router<App> {
             "/studies/{study_id}",
             get(detail).patch(update).delete(remove),
         )
-        .route("/studies/{study_id}/sources", post(add_source))
+        .route(
+            "/studies/{study_id}/sources",
+            post(add_source).layer(DefaultBodyLimit::disable()),
+        )
         .route(
             "/studies/{study_id}/sources/{source_id}",
             get(get_source).delete(remove_source),
+        )
+        .route(
+            "/studies/{study_id}/sources/{source_id}/content",
+            get(content_source),
         )
         .route(
             "/studies/{study_id}/sources/{source_id}/preview",
@@ -142,8 +151,95 @@ async fn add_source(
     State(app): State<App>,
     SessionUser(caller): SessionUser,
     Path(study_id): Path<String>,
-    Json(raw): Json<Value>,
+    req: Request,
 ) -> Result<(StatusCode, Json<Value>)> {
+    let is_multipart = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.to_ascii_lowercase().starts_with("multipart/form-data"));
+
+    if is_multipart {
+        let _ = studies::get_study(&app.store, &caller, &study_id, &app.quotas).await?;
+        let mut multipart = Multipart::from_request(req, &app)
+            .await
+            .map_err(|_| Error::unprocessable("invalid_multipart: Malformed multipart body"))?;
+        let max_file_bytes = app.quotas.get().max_file_bytes.max(0) as usize;
+        let mut filename: Option<String> = None;
+        let mut mime_type: Option<String> = None;
+        let mut file_bytes: Option<Vec<u8>> = None;
+
+        while let Some(mut field) = multipart.next_field().await.map_err(|_| {
+            Error::unprocessable("invalid_multipart: Failed reading multipart field")
+        })? {
+            match field.name() {
+                Some("file") => {
+                    if filename.is_none()
+                        && let Some(name) = field.file_name()
+                    {
+                        filename = Some(name.to_string());
+                    }
+                    if mime_type.is_none()
+                        && let Some(ct) = field.content_type()
+                    {
+                        mime_type = Some(ct.to_string());
+                    }
+                    let mut buf = Vec::new();
+                    while let Some(chunk) = field.chunk().await.map_err(|_| {
+                        Error::unprocessable("invalid_multipart: Truncated file upload")
+                    })? {
+                        if buf.len().saturating_add(chunk.len()) > max_file_bytes {
+                            return Err(Error::unprocessable(
+                                "quota_exceeded: File size exceeds study quota",
+                            ));
+                        }
+                        buf.extend_from_slice(&chunk);
+                    }
+                    file_bytes = Some(buf);
+                }
+                Some("filename") => {
+                    let val = field
+                        .text()
+                        .await
+                        .map_err(|_| Error::unprocessable("invalid_multipart: Invalid filename"))?;
+                    if !val.trim().is_empty() {
+                        filename = Some(val);
+                    }
+                }
+                Some("mime_type") => {
+                    let val = field.text().await.map_err(|_| {
+                        Error::unprocessable("invalid_multipart: Invalid mime_type")
+                    })?;
+                    if !val.trim().is_empty() {
+                        mime_type = Some(val);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let bytes = file_bytes
+            .ok_or_else(|| Error::unprocessable("invalid_source: file part is required"))?;
+        let fname = filename.unwrap_or_default();
+        let mime = mime_type.unwrap_or_else(|| "application/octet-stream".to_string());
+        let src = studies::add_source_upload(
+            &app.store,
+            &caller,
+            &study_id,
+            &fname,
+            &mime,
+            &bytes,
+            &app.quotas,
+        )
+        .await?;
+        return Ok((StatusCode::CREATED, Json(json!(src))));
+    }
+
+    let raw_bytes = axum::body::Bytes::from_request(req, &app)
+        .await
+        .map_err(|_| Error::unprocessable("invalid_body"))?;
+    let raw: Value =
+        serde_json::from_slice(&raw_bytes).map_err(|_| Error::unprocessable("invalid_body"))?;
     reject_caller_authority_fields(&raw)?;
     let input: UploadSourceBody =
         serde_json::from_value(raw).map_err(|_| Error::unprocessable("invalid_body"))?;
@@ -190,6 +286,49 @@ async fn get_source(
 ) -> Result<Json<Value>> {
     let src = studies::get_source(&app.store, &caller, &study_id, &source_id).await?;
     Ok(Json(json!(src)))
+}
+
+async fn content_source(
+    State(app): State<App>,
+    SessionUser(caller): SessionUser,
+    Path((study_id, source_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response> {
+    let (src, bytes) =
+        studies::get_source_content(&app.store, &caller, &study_id, &source_id).await?;
+    let total = bytes.len();
+    let content_type = header::HeaderValue::from_str(&src.mime_type)
+        .unwrap_or_else(|_| header::HeaderValue::from_static("application/octet-stream"));
+
+    if let Some(range_hdr) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
+        let Some((start, end)) = studies::parse_byte_range(range_hdr, total) else {
+            return Ok(Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, format!("bytes */{total}"))
+                .body(Body::empty())
+                .unwrap());
+        };
+        let slice = bytes[start..=end].to_vec();
+        return Ok(Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_TYPE, content_type)
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(
+                header::CONTENT_RANGE,
+                format!("bytes {start}-{end}/{total}"),
+            )
+            .header(header::CONTENT_LENGTH, slice.len().to_string())
+            .body(Body::from(slice))
+            .unwrap());
+    }
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, total.to_string())
+        .body(Body::from(bytes))
+        .unwrap())
 }
 
 async fn preview_source(
