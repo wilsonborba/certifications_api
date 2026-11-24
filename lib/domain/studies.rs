@@ -133,23 +133,260 @@ fn default_text_mime() -> String {
     "text/plain".to_string()
 }
 
-fn validate_selection(kind: &str, spec: &str) -> Result<()> {
+const MAX_SELECTION_SPEC_BYTES: usize = 2000;
+const MAX_SELECTION_RANGES: usize = 100;
+const MAX_SELECTED_PDF_PAGES: u64 = 100;
+
+fn normalize_mime_base(mime_type: &str) -> String {
+    mime_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn parse_ascii_u64(s: &str) -> Option<u64> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse::<u64>().ok()
+}
+
+pub fn canonicalize_selection(
+    kind: &str,
+    spec: &str,
+    mime_type: Option<&str>,
+    max_pages: Option<u32>,
+    max_duration_ms: Option<u64>,
+) -> Result<String> {
     if !matches!(kind, "all" | "pages" | "passages" | "intervals") {
         return Err(Error::unprocessable(
             "invalid_selection: Selection kind must be all, pages, passages, or intervals",
         ));
     }
-    if kind != "all" && spec.trim().is_empty() {
+    let trimmed = spec.trim();
+    if trimmed.len() > MAX_SELECTION_SPEC_BYTES {
+        return Err(Error::unprocessable(
+            "invalid_selection: Selection spec exceeds 2000 bytes",
+        ));
+    }
+    if kind == "all" {
+        if !trimmed.is_empty() {
+            return Err(Error::unprocessable(
+                "invalid_selection: Selection spec must be empty when kind is all",
+            ));
+        }
+        return Ok(String::new());
+    }
+    if trimmed.is_empty() {
         return Err(Error::unprocessable(
             "invalid_selection: Selection spec is required when kind is not all",
         ));
     }
-    if spec.len() > 2000 {
-        return Err(Error::unprocessable(
-            "invalid_selection: Selection spec is too long",
-        ));
+
+    match kind {
+        "pages" => {
+            if let Some(mt) = mime_type
+                && normalize_mime_base(mt) != "application/pdf"
+            {
+                return Err(Error::unprocessable(
+                    "invalid_selection: pages selection requires application/pdf source",
+                ));
+            }
+            let parts: Vec<&str> = trimmed.split(',').collect();
+            if parts.len() > MAX_SELECTION_RANGES {
+                return Err(Error::unprocessable(
+                    "invalid_selection: Too many page ranges",
+                ));
+            }
+            let mut ranges: Vec<(u32, u32)> = Vec::with_capacity(parts.len());
+            let mut total_pages: u64 = 0;
+            for raw_part in parts {
+                let part = raw_part.trim();
+                if part.is_empty() {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: Empty page range segment",
+                    ));
+                }
+                let (s, e) = if let Some((a, b)) = part.split_once('-') {
+                    let sv = parse_ascii_u64(a)
+                        .and_then(|v| u32::try_from(v).ok())
+                        .ok_or_else(|| {
+                            Error::unprocessable("invalid_selection: Invalid page start")
+                        })?;
+                    let ev = parse_ascii_u64(b)
+                        .and_then(|v| u32::try_from(v).ok())
+                        .ok_or_else(|| {
+                            Error::unprocessable("invalid_selection: Invalid page end")
+                        })?;
+                    (sv, ev)
+                } else {
+                    let v = parse_ascii_u64(part)
+                        .and_then(|v| u32::try_from(v).ok())
+                        .ok_or_else(|| {
+                            Error::unprocessable("invalid_selection: Invalid page number")
+                        })?;
+                    (v, v)
+                };
+                if s == 0 || e < s || e > 100_000 {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: Page range must be 1-based with start <= end",
+                    ));
+                }
+                if let Some(limit) = max_pages
+                    && e > limit
+                {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: Page range exceeds PDF page_count",
+                    ));
+                }
+                if let Some(&(_, prev_end)) = ranges.last()
+                    && s <= prev_end
+                {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: Page ranges must be strictly increasing and disjoint",
+                    ));
+                }
+                total_pages = total_pages.saturating_add(u64::from(e - s + 1));
+                if total_pages > MAX_SELECTED_PDF_PAGES {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: Total selected PDF pages must not exceed 100",
+                    ));
+                }
+                ranges.push((s, e));
+            }
+            Ok(ranges
+                .into_iter()
+                .map(|(s, e)| {
+                    if s == e {
+                        s.to_string()
+                    } else {
+                        format!("{s}-{e}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(","))
+        }
+        "passages" => {
+            if let Some(mt) = mime_type
+                && !normalize_mime_base(mt).starts_with("text/")
+            {
+                return Err(Error::unprocessable(
+                    "invalid_selection: passages selection requires text/* source",
+                ));
+            }
+            let parts: Vec<&str> = trimmed.split(',').collect();
+            if parts.len() > MAX_SELECTION_RANGES {
+                return Err(Error::unprocessable(
+                    "invalid_selection: Too many passage ranges",
+                ));
+            }
+            let mut ranges: Vec<(u64, u64)> = Vec::with_capacity(parts.len());
+            for raw_part in parts {
+                let part = raw_part.trim();
+                let rest = part.strip_prefix("p1:").ok_or_else(|| {
+                    Error::unprocessable("invalid_selection: Passage range must use p1:start-end")
+                })?;
+                let (a, b) = rest.split_once('-').ok_or_else(|| {
+                    Error::unprocessable("invalid_selection: Passage range must use p1:start-end")
+                })?;
+                let s = parse_ascii_u64(a).ok_or_else(|| {
+                    Error::unprocessable("invalid_selection: Invalid passage start offset")
+                })?;
+                let e = parse_ascii_u64(b).ok_or_else(|| {
+                    Error::unprocessable("invalid_selection: Invalid passage end offset")
+                })?;
+                if e <= s {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: Passage range must be half-open with end > start",
+                    ));
+                }
+                if let Some(&(_, prev_end)) = ranges.last()
+                    && s < prev_end
+                {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: Passage ranges must be sorted and non-overlapping",
+                    ));
+                }
+                ranges.push((s, e));
+            }
+            Ok(ranges
+                .into_iter()
+                .map(|(s, e)| format!("p1:{s}-{e}"))
+                .collect::<Vec<_>>()
+                .join(","))
+        }
+        "intervals" => {
+            if let Some(mt) = mime_type
+                && !normalize_mime_base(mt).starts_with("audio/")
+            {
+                return Err(Error::unprocessable(
+                    "invalid_selection: intervals selection requires an audio source",
+                ));
+            }
+            let body = trimmed.strip_prefix("ms:").ok_or_else(|| {
+                Error::unprocessable("invalid_selection: Intervals spec must start with ms:")
+            })?;
+            if body.is_empty() {
+                return Err(Error::unprocessable(
+                    "invalid_selection: Intervals spec requires at least one start-end range",
+                ));
+            }
+            let parts: Vec<&str> = body.split(',').collect();
+            if parts.len() > MAX_SELECTION_RANGES {
+                return Err(Error::unprocessable(
+                    "invalid_selection: Too many audio intervals",
+                ));
+            }
+            let mut ranges: Vec<(u64, u64)> = Vec::with_capacity(parts.len());
+            for raw_part in parts {
+                let part = raw_part.trim();
+                let (a, b) = part.split_once('-').ok_or_else(|| {
+                    Error::unprocessable(
+                        "invalid_selection: Each interval must be integer milliseconds start-end",
+                    )
+                })?;
+                let s = parse_ascii_u64(a).ok_or_else(|| {
+                    Error::unprocessable("invalid_selection: Invalid interval start milliseconds")
+                })?;
+                let e = parse_ascii_u64(b).ok_or_else(|| {
+                    Error::unprocessable("invalid_selection: Invalid interval end milliseconds")
+                })?;
+                if e <= s {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: Interval must be half-open with end > start",
+                    ));
+                }
+                if let Some(dur) = max_duration_ms
+                    && e > dur
+                {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: Interval exceeds known audio duration",
+                    ));
+                }
+                if let Some(last) = ranges.last_mut() {
+                    if s < last.1 {
+                        return Err(Error::unprocessable(
+                            "invalid_selection: Intervals must be sorted and disjoint",
+                        ));
+                    }
+                    if s == last.1 {
+                        last.1 = e;
+                        continue;
+                    }
+                }
+                ranges.push((s, e));
+            }
+            let joined = ranges
+                .into_iter()
+                .map(|(s, e)| format!("{s}-{e}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            Ok(format!("ms:{joined}"))
+        }
+        _ => unreachable!(),
     }
-    Ok(())
 }
 
 async fn load_owned_study(
@@ -269,11 +506,130 @@ pub async fn create_study(
     })
 }
 
+async fn authorize_fsm_ref(
+    store: &Store,
+    caller: &CallerIdentity,
+    fsm_ref: &str,
+    trusted_service: bool,
+) -> Result<Option<i64>> {
+    let trimmed = fsm_ref.trim();
+    if trimmed.is_empty() {
+        return Err(Error::unprocessable("invalid_source: fsm_ref is required"));
+    }
+    let existing = sqlx::query(
+        "SELECT owner_id, size_bytes, status FROM sources WHERE fsm_ref = $1 AND status <> 'deleted' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(trimmed)
+    .fetch_optional(&store.db)
+    .await?;
+
+    if let Some(row) = existing {
+        let owner_id: String = row.get("owner_id");
+        let size_bytes: i64 = row.get("size_bytes");
+        let status: String = row.get("status");
+        if owner_id != caller.user_id || status != "ready" {
+            return Err(Error::forbidden(
+                "fsm_ref_forbidden: Caller is not authorized to reference this file",
+            ));
+        }
+        return Ok(Some(size_bytes));
+    }
+
+    if trusted_service {
+        return Ok(None);
+    }
+    Err(Error::forbidden(
+        "fsm_ref_forbidden: Reference is not an authorized owned file",
+    ))
+}
+
+async fn ensure_source_blob_readable(
+    store: &Store,
+    caller: &CallerIdentity,
+    study_id: &str,
+    src: &SourceSummary,
+) -> Result<()> {
+    let trimmed = src.fsm_ref.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with('/')
+        || trimmed.contains("..")
+        || trimmed.contains("://")
+    {
+        return Err(Error::forbidden(
+            "fsm_ref_forbidden: Source blob reference is not an authorized path",
+        ));
+    }
+    let conflict = sqlx::query(
+        "SELECT owner_id FROM sources WHERE fsm_ref = $1 AND status <> 'deleted' AND owner_id <> $2 LIMIT 1",
+    )
+    .bind(trimmed)
+    .bind(&caller.user_id)
+    .fetch_optional(&store.db)
+    .await?;
+    if conflict.is_some() {
+        return Err(Error::forbidden(
+            "fsm_ref_forbidden: Caller does not own referenced blob",
+        ));
+    }
+    let row_provenance: Option<String> =
+        sqlx::query("SELECT source_provenance FROM sources WHERE id = $1 AND owner_id = $2")
+            .bind(&src.id)
+            .bind(&caller.user_id)
+            .fetch_optional(&store.db)
+            .await?
+            .map(|r| r.get("source_provenance"));
+    if !matches!(
+        row_provenance.as_deref(),
+        Some("upload" | "prepared_service" | "owned_ref")
+    ) {
+        return Err(Error::forbidden(
+            "fsm_ref_forbidden: Source row lacks verified server-only authorization provenance",
+        ));
+    }
+    let proven = match src.source_kind.as_str() {
+        "upload" => {
+            let expected_prefix = format!("certifications/{}/", caller.user_id);
+            trimmed.starts_with(&expected_prefix) && !src.sha256.trim().is_empty()
+        }
+        "fsm_ref" => {
+            let owned_upload = sqlx::query(
+                "SELECT 1 FROM sources WHERE fsm_ref = $1 AND owner_id = $2 AND source_kind = 'upload' AND status = 'ready' AND sha256 <> '' LIMIT 1",
+            )
+            .bind(trimmed)
+            .bind(&caller.user_id)
+            .fetch_optional(&store.db)
+            .await?
+            .is_some();
+            if owned_upload {
+                true
+            } else {
+                let prepared_origin: Option<String> = sqlx::query(
+                    "SELECT source_origin FROM studies WHERE id = $1 AND owner_id = $2",
+                )
+                .bind(study_id)
+                .bind(&caller.user_id)
+                .fetch_optional(&store.db)
+                .await?
+                .map(|r| r.get("source_origin"));
+                prepared_origin.as_deref() == Some("annotations")
+            }
+        }
+        _ => false,
+    };
+    if !proven {
+        return Err(Error::forbidden(
+            "fsm_ref_forbidden: Historical or unverified blob reference lacks authoritative ownership provenance",
+        ));
+    }
+    Ok(())
+}
+
 pub async fn create_prepared_study(
     store: &Store,
     caller: &CallerIdentity,
     input: PreparedStudyInput,
     quotas: &QuotaCache,
+    trusted_service: bool,
 ) -> Result<StudyDetail> {
     let title = input.title.trim();
     if title.is_empty() || title.chars().count() > 200 {
@@ -286,13 +642,24 @@ pub async fn create_prepared_study(
             "invalid_sources: Prepared study requires 1 to 20 sources",
         ));
     }
+    let mut verified_sizes = Vec::with_capacity(input.sources.len());
+    let mut canonical_specs = Vec::with_capacity(input.sources.len());
     for s in &input.sources {
         if s.fsm_ref.trim().is_empty() || s.filename.trim().is_empty() || s.size_bytes < 0 {
             return Err(Error::unprocessable(
                 "invalid_source: Prepared source requires filename, fsm_ref, and non-negative size",
             ));
         }
-        validate_selection(&s.selection_kind, &s.selection_spec)?;
+        let canon = canonicalize_selection(
+            &s.selection_kind,
+            &s.selection_spec,
+            Some(&s.mime_type),
+            None,
+            None,
+        )?;
+        let verified_size = authorize_fsm_ref(store, caller, &s.fsm_ref, trusted_service).await?;
+        verified_sizes.push(verified_size.unwrap_or(s.size_bytes));
+        canonical_specs.push(canon);
     }
 
     let study_id = new_id();
@@ -311,22 +678,33 @@ pub async fn create_prepared_study(
     .execute(&mut *tx)
     .await?;
 
-    for s in input.sources {
+    let provenance = if trusted_service {
+        "prepared_service"
+    } else {
+        "owned_ref"
+    };
+    for ((s, effective_size), canon_spec) in input
+        .sources
+        .into_iter()
+        .zip(verified_sizes)
+        .zip(canonical_specs)
+    {
         let source_id = new_id();
         sqlx::query(
-            "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, created_at, updated_at)
-             VALUES($1, $2, $3, $4, $5, $6, $7, $8, 'fsm_ref', 'ready', $9, $10, 0, '', $11, $11)",
+            "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, source_provenance, created_at, updated_at)
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8, 'fsm_ref', 'ready', $9, $10, 0, '', $11, $12, $12)",
         )
         .bind(&source_id)
         .bind(&caller.user_id)
         .bind(&study_id)
         .bind(s.filename.trim())
         .bind(s.mime_type.trim())
-        .bind(s.size_bytes)
+        .bind(effective_size)
         .bind(s.sha256.trim())
         .bind(s.fsm_ref.trim())
         .bind(s.selection_kind)
-        .bind(s.selection_spec.trim())
+        .bind(canon_spec)
+        .bind(provenance)
         .bind(ts)
         .execute(&mut *tx)
         .await?;
@@ -556,7 +934,7 @@ pub async fn add_source_upload(
     quotas::commit_ledger(store, &ledger_id).await?;
     let done_ts = now();
     sqlx::query(
-        "UPDATE sources SET sha256 = $1, fsm_ref = $2, status = 'ready', updated_at = $3 WHERE id = $4",
+        "UPDATE sources SET sha256 = $1, fsm_ref = $2, status = 'ready', source_provenance = 'upload', updated_at = $3 WHERE id = $4",
     )
     .bind(&hash)
     .bind(&fsm_key)
@@ -596,7 +974,13 @@ pub async fn add_source_reference(
         ));
     }
     let mut is_restricted = input.is_restricted;
-    if input.kind == "report" {
+    let mut effective_size = input.size_bytes.max(0);
+    if input.kind == "fsm_ref" {
+        if let Some(verified_size) = authorize_fsm_ref(store, caller, &input.fsm_ref, false).await?
+        {
+            effective_size = verified_size;
+        }
+    } else if input.kind == "report" {
         let (project, report) = input
             .external_ref
             .trim()
@@ -616,20 +1000,26 @@ pub async fn add_source_reference(
     let source_id = new_id();
     let ts = now();
     let restricted = i32::from(is_restricted);
+    let provenance = if input.kind == "fsm_ref" {
+        "owned_ref"
+    } else {
+        "unknown"
+    };
     sqlx::query(
-        "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, created_at, updated_at)
-         VALUES($1, $2, $3, $4, $5, $6, '', $7, $8, 'ready', 'all', '', $9, $10, $11, $11)",
+        "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, source_provenance, created_at, updated_at)
+         VALUES($1, $2, $3, $4, $5, $6, '', $7, $8, 'ready', 'all', '', $9, $10, $11, $12, $12)",
     )
     .bind(&source_id)
     .bind(&caller.user_id)
     .bind(study_id)
     .bind(input.filename.trim())
     .bind(input.mime_type.trim())
-    .bind(input.size_bytes.max(0))
+    .bind(effective_size)
     .bind(input.fsm_ref.trim())
     .bind(&input.kind)
     .bind(restricted)
     .bind(input.external_ref.trim())
+    .bind(provenance)
     .bind(ts)
     .execute(&store.db)
     .await?;
@@ -638,7 +1028,7 @@ pub async fn add_source_reference(
         id: source_id,
         filename: input.filename.trim().to_string(),
         mime_type: input.mime_type.trim().to_string(),
-        size_bytes: input.size_bytes.max(0),
+        size_bytes: effective_size,
         sha256: String::new(),
         fsm_ref: input.fsm_ref.trim().to_string(),
         source_kind: input.kind,
@@ -666,29 +1056,136 @@ pub async fn get_source(
         .ok_or_else(Error::missing)
 }
 
-pub fn cheap_pdf_page_count(bytes: &[u8]) -> Option<u32> {
+fn strip_pdf_comments_and_streams(bytes: &[u8]) -> Option<String> {
+    let mut out = Vec::with_capacity(bytes.len().min(512 * 1024));
+    let mut i = 0usize;
+    let mut paren_depth = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if paren_depth > 0 {
+            if b == b'\\' && i + 1 < bytes.len() {
+                out.push(b' ');
+                i += 2;
+                continue;
+            }
+            if b == b'(' {
+                paren_depth += 1;
+            } else if b == b')' {
+                paren_depth -= 1;
+            }
+            out.push(b' ');
+            i += 1;
+            continue;
+        }
+        if b == b'(' {
+            paren_depth = 1;
+            out.push(b' ');
+            i += 1;
+            continue;
+        }
+        if b == b'%' {
+            while i < bytes.len() && bytes[i] != b'\n' && bytes[i] != b'\r' {
+                i += 1;
+            }
+            out.push(b' ');
+            continue;
+        }
+        if bytes[i..].starts_with(b"stream")
+            && (i == 0 || bytes[i - 1].is_ascii_whitespace() || bytes[i - 1] == b'>')
+            && bytes.get(i + 6).is_some_and(|c| *c == b'\r' || *c == b'\n')
+        {
+            if let Some(rel) = bytes[i + 6..].windows(9).position(|w| w == b"endstream") {
+                out.extend_from_slice(b" ");
+                i = i + 6 + rel + 9;
+                continue;
+            }
+            return None;
+        }
+        out.push(b);
+        i += 1;
+    }
+    Some(String::from_utf8_lossy(&out).into_owned())
+}
+
+fn parse_pdf_ref(dict: &str, key: &str) -> Option<(u32, u16)> {
+    let mut pos = 0usize;
+    while let Some(idx) = dict[pos..].find(key) {
+        let after = &dict[pos + idx + key.len()..];
+        let next = after.chars().next();
+        if next.is_none_or(|c| c.is_ascii_whitespace() || c == '<' || c == '/') {
+            let mut parts = after
+                .split(|c: char| {
+                    c.is_ascii_whitespace() || matches!(c, '<' | '>' | '[' | ']' | '/')
+                })
+                .filter(|s| !s.is_empty());
+            if let (Some(o), Some(g), Some("R")) = (parts.next(), parts.next(), parts.next())
+                && let (Ok(obj), Ok(gen_num)) = (o.parse::<u32>(), g.parse::<u16>())
+            {
+                return Some((obj, gen_num));
+            }
+        }
+        pos += idx + key.len();
+    }
+    None
+}
+
+fn parse_pdf_int(dict: &str, key: &str) -> Option<u32> {
+    let mut pos = 0usize;
+    while let Some(idx) = dict[pos..].find(key) {
+        let after = &dict[pos + idx + key.len()..];
+        let next = after.chars().next();
+        if next.is_none_or(|c| c.is_ascii_whitespace()) {
+            let tok = after
+                .split(|c: char| {
+                    c.is_ascii_whitespace() || matches!(c, '<' | '>' | '[' | ']' | '/')
+                })
+                .find(|s| !s.is_empty())?;
+            if let Ok(val) = tok.parse::<u32>() {
+                return Some(val);
+            }
+        }
+        pos += idx + key.len();
+    }
+    None
+}
+
+fn find_pdf_object_body(cleaned: &str, obj: u32, gen_num: u16) -> Option<&str> {
+    let needle = format!("{obj} {gen_num} obj");
+    let mut pos = 0usize;
+    while let Some(idx) = cleaned[pos..].find(&needle) {
+        let start = pos + idx;
+        let boundary_ok = start == 0 || cleaned.as_bytes()[start - 1].is_ascii_whitespace();
+        let after_idx = start + needle.len();
+        let after_ok = cleaned
+            .as_bytes()
+            .get(after_idx)
+            .is_some_and(|b| b.is_ascii_whitespace() || *b == b'<' || *b == b'[');
+        if boundary_ok && after_ok {
+            let rest = &cleaned[after_idx..];
+            let end = rest.find("endobj")?;
+            return Some(&rest[..end]);
+        }
+        pos = after_idx;
+    }
+    None
+}
+
+pub fn extract_pdf_page_count(bytes: &[u8]) -> Option<u32> {
     if !bytes.starts_with(b"%PDF-") || bytes.len() > 16 * 1024 * 1024 {
         return None;
     }
-    let hay = String::from_utf8_lossy(bytes);
-    // Count `/Type /Page` objects excluding `/Type /Pages`.
-    let mut count: u32 = 0;
-    let mut pos = 0;
-    while let Some(idx) = hay[pos..].find("/Type") {
-        let rest = &hay[pos + idx + 5..];
-        let trimmed = rest.trim_start();
-        if let Some(after_page) = trimmed.strip_prefix("/Page")
-            && !after_page.starts_with('s')
-            && !after_page
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphanumeric())
-        {
-            count = count.saturating_add(1);
-        }
-        pos += idx + 5;
+    let cleaned = strip_pdf_comments_and_streams(bytes)?;
+    if cleaned.contains("/ObjStm") || cleaned.contains("/Encrypt") {
+        return None;
     }
-    (count > 0).then_some(count)
+    let trailer_idx = cleaned.rfind("trailer")?;
+    let trailer = &cleaned[trailer_idx..];
+    let (root_obj, root_gen) = parse_pdf_ref(trailer, "/Root")?;
+    let catalog = find_pdf_object_body(&cleaned, root_obj, root_gen)?;
+    let (pages_obj, pages_gen) = parse_pdf_ref(catalog, "/Pages")?;
+    let pages_dict = find_pdf_object_body(&cleaned, pages_obj, pages_gen)?;
+    let count = parse_pdf_int(pages_dict, "/Count")?;
+    (1..=100_000).contains(&count).then_some(count)
 }
 
 pub fn cheap_wav_duration_seconds(bytes: &[u8]) -> Option<f64> {
@@ -771,6 +1268,7 @@ pub async fn get_source_content(
     caller: &CallerIdentity,
     study_id: &str,
     source_id: &str,
+    max_bytes: usize,
 ) -> Result<(SourceSummary, Vec<u8>)> {
     let src = get_source(store, caller, study_id, source_id).await?;
     if src.status != "ready" {
@@ -781,7 +1279,8 @@ pub async fn get_source_content(
     if src.fsm_ref.trim().is_empty() {
         return Err(Error::missing());
     }
-    let bytes = store.fsm.get_bytes(&src.fsm_ref).await?;
+    ensure_source_blob_readable(store, caller, study_id, &src).await?;
+    let bytes = store.fsm.get_bytes_bounded(&src.fsm_ref, max_bytes).await?;
     Ok((src, bytes))
 }
 
@@ -790,6 +1289,7 @@ pub async fn preview_source(
     caller: &CallerIdentity,
     study_id: &str,
     source_id: &str,
+    max_bytes: usize,
 ) -> Result<serde_json::Value> {
     let src = get_source(store, caller, study_id, source_id).await?;
     if src.status != "ready" {
@@ -803,18 +1303,20 @@ pub async fn preview_source(
     let mut duration_seconds: Option<f64> = None;
 
     if has_fsm {
+        ensure_source_blob_readable(store, caller, study_id, &src).await?;
         let needs_bytes = src.mime_type.starts_with("text/")
             || src.mime_type == "application/pdf"
             || matches!(
                 src.mime_type.as_str(),
                 "audio/wav" | "audio/x-wav" | "audio/wave"
             );
-        if needs_bytes && let Ok(bytes) = store.fsm.get_bytes(&src.fsm_ref).await {
+        if needs_bytes && let Ok(bytes) = store.fsm.get_bytes_bounded(&src.fsm_ref, max_bytes).await
+        {
             if src.mime_type.starts_with("text/") {
                 let text = String::from_utf8_lossy(&bytes);
                 preview_text = text.chars().take(1000).collect::<String>();
             } else if src.mime_type == "application/pdf" {
-                page_count = cheap_pdf_page_count(&bytes);
+                page_count = extract_pdf_page_count(&bytes);
             } else {
                 duration_seconds = cheap_wav_duration_seconds(&bytes);
             }
@@ -844,14 +1346,40 @@ pub async fn update_selection(
     source_id: &str,
     input: SelectionInput,
 ) -> Result<SourceSummary> {
-    validate_selection(&input.kind, &input.spec)?;
-    let _ = get_source(store, caller, study_id, source_id).await?;
+    let src = get_source(store, caller, study_id, source_id).await?;
+    let mut max_pages = None;
+    let mut max_duration_ms = None;
+    if !src.fsm_ref.trim().is_empty()
+        && src.status == "ready"
+        && matches!(input.kind.as_str(), "pages" | "intervals")
+        && ensure_source_blob_readable(store, caller, study_id, &src)
+            .await
+            .is_ok()
+        && let Ok(bytes) = store
+            .fsm
+            .get_bytes_bounded(&src.fsm_ref, 16 * 1024 * 1024)
+            .await
+    {
+        if input.kind == "pages" && src.mime_type.eq_ignore_ascii_case("application/pdf") {
+            max_pages = extract_pdf_page_count(&bytes);
+        } else if input.kind == "intervals" {
+            max_duration_ms =
+                cheap_wav_duration_seconds(&bytes).map(|secs| (secs * 1000.0).round() as u64);
+        }
+    }
+    let canon = canonicalize_selection(
+        &input.kind,
+        &input.spec,
+        Some(&src.mime_type),
+        max_pages,
+        max_duration_ms,
+    )?;
     let ts = now();
     sqlx::query(
         "UPDATE sources SET selection_kind = $1, selection_spec = $2, updated_at = $3 WHERE id = $4 AND study_id = $5",
     )
     .bind(&input.kind)
-    .bind(input.spec.trim())
+    .bind(&canon)
     .bind(ts)
     .bind(source_id)
     .bind(study_id)

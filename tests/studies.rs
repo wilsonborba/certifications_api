@@ -160,6 +160,38 @@ async fn quota_enforces_limits_and_releases_failed_uploads() {
     assert_eq!(detail["quota"]["remaining_account_bytes"], 35);
 }
 
+async fn call_with_service_key(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    user: Option<&str>,
+    service_key: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut req = Request::builder().method(method).uri(uri);
+    if let Some(u) = user {
+        req = req.header("x-uuid", u);
+    }
+    if let Some(k) = service_key {
+        req = req.header("x-service-key", k);
+    }
+    if body.is_some() {
+        req = req.header("content-type", "application/json");
+    }
+    let resp = app
+        .clone()
+        .oneshot(
+            req.body(Body::from(body.map(|v| v.to_string()).unwrap_or_default()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let val = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, val)
+}
+
 #[tokio::test]
 async fn selections_survive_refresh_and_prepared_studies_reuse_fsm_without_upload() {
     let mut store = Store::fixture().await;
@@ -167,19 +199,22 @@ async fn selections_survive_refresh_and_prepared_studies_reuse_fsm_without_uploa
     fsm.seed("annotations/u1/file-1", b"Cell respiration uses ATP.");
     store.fsm = fsm.clone() as Arc<dyn certifications_api::dal::fsm::FsmClient>;
 
+    let mut settings = test_settings();
+    settings.certifications_service_key = "ann-svc-key".into();
     let app = presentation::router(App {
         store: store.clone(),
-        settings: test_settings(),
+        settings,
         quotas: QuotaCache::default(),
         signatures: Default::default(),
     });
 
     // Prepared study from Annotations arrives filled and reuses stored FSM refs without putting bytes.
-    let (st, prepared) = call(
+    let (st, prepared) = call_with_service_key(
         &app,
         "POST",
         "/studies/prepared",
         Some("u1"),
+        Some("ann-svc-key"),
         Some(json!({
             "title": "Biology Prep",
             "sources": [{
@@ -208,7 +243,7 @@ async fn selections_survive_refresh_and_prepared_studies_reuse_fsm_without_uploa
         "PATCH",
         &format!("/studies/{sid}/sources/{src_id}/selection"),
         Some("u1"),
-        Some(json!({"kind": "pages", "spec": "1-3,5"})),
+        Some(json!({"kind": "passages", "spec": "p1:0-10,p1:15-25"})),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -222,8 +257,8 @@ async fn selections_survive_refresh_and_prepared_studies_reuse_fsm_without_uploa
     )
     .await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(refreshed["selection_kind"], "pages");
-    assert_eq!(refreshed["selection_spec"], "1-3,5");
+    assert_eq!(refreshed["selection_kind"], "passages");
+    assert_eq!(refreshed["selection_spec"], "p1:0-10,p1:15-25");
 
     // Analysis summary reflects sources.
     let (st, analysis) = call(
@@ -321,7 +356,7 @@ async fn reports_picker_and_report_source_enforce_permissions_and_unconfigured_5
     let mut store = Store::fixture().await;
     store.reports = Arc::new(MockReports);
     let app = presentation::router(App {
-        store,
+        store: store.clone(),
         settings: test_settings(),
         quotas: QuotaCache::default(),
         signatures: Default::default(),
@@ -491,8 +526,8 @@ async fn multipart_pdf_and_wav_uploads_stream_with_range_preview_metadata_and_qu
     assert_eq!(st, StatusCode::CREATED);
     let sid = study["id"].as_str().unwrap();
 
-    // 1. Multipart PDF upload
-    let pdf_bytes = b"%PDF-1.4\n1 0 obj<</Type /Pages /Count 2>>endobj\n2 0 obj<</Type /Page>>endobj\n3 0 obj<</Type /Page>>endobj\n%%EOF".to_vec();
+    // 1. Multipart PDF upload: valid 1-page PDF with `% /Type /Page` comment & `/Type /Page` in stream -> page_count == 1
+    let pdf_bytes = b"%PDF-1.4\n% /Type /Page\n1 0 obj<</Type /Catalog /Pages 2 0 R>>endobj\n2 0 obj<</Type /Pages /Count 1 /Kids[3 0 R]>>endobj\n3 0 obj<</Type /Page /Contents 4 0 R>>endobj\n4 0 obj<</Length 15>>stream\n/Type /Page\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%EOF".to_vec();
     let boundary = "----asodya35boundary";
     let body = multipart_body(boundary, "slides.pdf", "application/pdf", &pdf_bytes);
     let (st, _, raw) = call_raw(
@@ -522,7 +557,7 @@ async fn multipart_pdf_and_wav_uploads_stream_with_range_preview_metadata_and_qu
     )
     .await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(preview["page_count"], 2);
+    assert_eq!(preview["page_count"], 1);
     assert_eq!(preview["supports_range"], true);
     assert_eq!(
         preview["content_url"],
@@ -543,6 +578,7 @@ async fn multipart_pdf_and_wav_uploads_stream_with_range_preview_metadata_and_qu
     .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(hdrs.get("accept-ranges").unwrap(), "bytes");
+    assert_eq!(hdrs.get("cache-control").unwrap(), "no-store");
     assert_eq!(hdrs.get("content-type").unwrap(), "application/pdf");
     assert_eq!(bytes, pdf_bytes);
 
@@ -557,13 +593,14 @@ async fn multipart_pdf_and_wav_uploads_stream_with_range_preview_metadata_and_qu
     )
     .await;
     assert_eq!(st, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(hdrs.get("cache-control").unwrap(), "no-store");
     assert_eq!(
         hdrs.get("content-range").unwrap().to_str().unwrap(),
         format!("bytes 0-4/{}", pdf_bytes.len())
     );
     assert_eq!(slice, b"%PDF-");
 
-    let (st, _, _) = call_raw(
+    let (st, hdrs, _) = call_raw(
         &app,
         "GET",
         &format!("/studies/{sid}/sources/{pdf_id}/content"),
@@ -574,6 +611,7 @@ async fn multipart_pdf_and_wav_uploads_stream_with_range_preview_metadata_and_qu
     )
     .await;
     assert_eq!(st, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(hdrs.get("cache-control").unwrap(), "no-store");
 
     let (st, _, _) = call_raw(
         &app,
@@ -644,21 +682,24 @@ async fn multipart_pdf_and_wav_uploads_stream_with_range_preview_metadata_and_qu
 async fn prepared_study_fsm_ref_streams_content_and_link_returns_404() {
     let mut store = Store::fixture().await;
     let fsm = MemoryFsm::new();
-    let pdf_bytes = b"%PDF-1.4\n1 0 obj<</Type /Page>>endobj\n%%EOF".to_vec();
+    let pdf_bytes = b"%PDF-1.4\n1 0 obj<</Type /Catalog /Pages 2 0 R>>endobj\n2 0 obj<</Type /Pages /Count 1 /Kids[3 0 R]>>endobj\n3 0 obj<</Type /Page>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF".to_vec();
     fsm.seed("shared/ann-1/doc.pdf", &pdf_bytes);
     store.fsm = fsm.clone();
+    let mut settings = test_settings();
+    settings.certifications_service_key = "ann-svc-key".into();
     let app = presentation::router(App {
-        store,
-        settings: test_settings(),
+        store: store.clone(),
+        settings,
         quotas: QuotaCache::default(),
         signatures: Default::default(),
     });
 
-    let (st, study) = call(
+    let (st, study) = call_with_service_key(
         &app,
         "POST",
         "/studies/prepared",
         Some("u1"),
+        Some("ann-svc-key"),
         Some(json!({
             "title": "Prepared Study",
             "sources": [
@@ -719,4 +760,518 @@ async fn prepared_study_fsm_ref_streams_content_and_link_returns_404() {
     )
     .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn cross_owner_fsm_ref_rejected_with_zero_fsm_reads_and_bounds_enforced() {
+    let mut store = Store::fixture().await;
+    let fsm = MemoryFsm::new();
+    store.fsm = fsm.clone();
+    let quotas = QuotaCache::default();
+    quotas
+        .update_in_db(
+            &store,
+            QuotaConfig {
+                max_file_bytes: 1024,
+                max_study_bytes: 4096,
+                max_account_bytes: 8192,
+            },
+            "admin-1",
+        )
+        .await
+        .unwrap();
+    let mut settings = test_settings();
+    settings.certifications_service_key = "ann-svc-key".into();
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings,
+        quotas,
+        signatures: Default::default(),
+    });
+
+    // Owner B uploads a private PDF.
+    let (_, b_study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("owner-b"),
+        Some(json!({"title": "B Private"})),
+    )
+    .await;
+    let b_sid = b_study["id"].as_str().unwrap();
+    let pdf_b = b"%PDF-1.4\n1 0 obj<</Type /Catalog /Pages 2 0 R>>endobj\n2 0 obj<</Type /Pages /Count 1>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF";
+    let boundary = "----secboundary35";
+    let (st, _, raw_b) = call_raw(
+        &app,
+        "POST",
+        &format!("/studies/{b_sid}/sources"),
+        Some("owner-b"),
+        Some(&format!("multipart/form-data; boundary={boundary}")),
+        None,
+        multipart_body(boundary, "secret.pdf", "application/pdf", pdf_b),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let b_src: Value = serde_json::from_slice(&raw_b).unwrap();
+    let b_fsm_ref = b_src["fsm_ref"].as_str().unwrap();
+
+    // Owner A creates a study and tries to reference Owner B's fsm_ref via POST /sources AND /studies/prepared.
+    let (_, a_study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("owner-a"),
+        Some(json!({"title": "A Study"})),
+    )
+    .await;
+    let a_sid = a_study["id"].as_str().unwrap();
+
+    let gets_before = fsm.get_count();
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{a_sid}/sources"),
+        Some("owner-a"),
+        Some(json!({
+            "kind": "fsm_ref",
+            "filename": "stolen.pdf",
+            "mime_type": "application/pdf",
+            "fsm_ref": b_fsm_ref,
+            "size_bytes": 100
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(fsm.get_count(), gets_before);
+
+    // Untrusted /studies/prepared without service key fails closed even for arbitrary fsm_ref.
+    let (st, _) = call(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("owner-a"),
+        Some(json!({
+            "title": "Fake Prep",
+            "sources": [{
+                "filename": "stolen.pdf",
+                "mime_type": "application/pdf",
+                "fsm_ref": b_fsm_ref,
+                "size_bytes": 100
+            }]
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(fsm.get_count(), gets_before);
+
+    // Even with service key, referencing Owner B's owned blob for Owner A fails closed!
+    let (st, _) = call_with_service_key(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("owner-a"),
+        Some("ann-svc-key"),
+        Some(json!({
+            "title": "Cross-owner Prep",
+            "sources": [{
+                "filename": "stolen.pdf",
+                "mime_type": "application/pdf",
+                "fsm_ref": b_fsm_ref,
+                "size_bytes": 100
+            }]
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(fsm.get_count(), gets_before);
+
+    // Multipart duplicate file part, authority field, and oversized metadata fail without FSM writes or quota leaks.
+    let puts_before = fsm.put_count();
+    let dup_body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nhi\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"b.txt\"\r\nContent-Type: text/plain\r\n\r\nhi2\r\n--{boundary}--\r\n"
+    );
+    let (st, _, _) = call_raw(
+        &app,
+        "POST",
+        &format!("/studies/{a_sid}/sources"),
+        Some("owner-a"),
+        Some(&format!("multipart/form-data; boundary={boundary}")),
+        None,
+        dup_body.into_bytes(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let auth_body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"owner_id\"\r\n\r\nowner-b\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nhi\r\n--{boundary}--\r\n"
+    );
+    let (st, _, _) = call_raw(
+        &app,
+        "POST",
+        &format!("/studies/{a_sid}/sources"),
+        Some("owner-a"),
+        Some(&format!("multipart/form-data; boundary={boundary}")),
+        None,
+        auth_body.into_bytes(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let big_name = "x".repeat(600);
+    let meta_body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"filename\"\r\n\r\n{big_name}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nhi\r\n--{boundary}--\r\n"
+    );
+    let (st, _, _) = call_raw(
+        &app,
+        "POST",
+        &format!("/studies/{a_sid}/sources"),
+        Some("owner-a"),
+        Some(&format!("multipart/form-data; boundary={boundary}")),
+        None,
+        meta_body.into_bytes(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Oversized multipart body (> max_file_bytes + 64 KiB) fails with 413.
+    let too_big = vec![b'a'; 70_000];
+    let (st, _, _) = call_raw(
+        &app,
+        "POST",
+        &format!("/studies/{a_sid}/sources"),
+        Some("owner-a"),
+        Some(&format!("multipart/form-data; boundary={boundary}")),
+        None,
+        multipart_body(boundary, "big.txt", "text/plain", &too_big),
+    )
+    .await;
+    assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(fsm.put_count(), puts_before);
+
+    let (_, detail_a) = call(
+        &app,
+        "GET",
+        &format!("/studies/{a_sid}"),
+        Some("owner-a"),
+        None,
+    )
+    .await;
+    assert_eq!(detail_a["quota"]["used_bytes"], 0);
+    assert_eq!(detail_a["quota"]["reserved_bytes"], 0);
+
+    // Encrypted/compressed PDF returns null page_count honestly instead of guessing.
+    let enc_pdf = b"%PDF-1.4\n1 0 obj<</Type /Catalog /Pages 2 0 R>>endobj\n2 0 obj<</Type /Pages /Count 5>>endobj\n3 0 obj<</Encrypt 4 0 R>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF";
+    let (st, _, raw_enc) = call_raw(
+        &app,
+        "POST",
+        &format!("/studies/{a_sid}/sources"),
+        Some("owner-a"),
+        Some(&format!("multipart/form-data; boundary={boundary}")),
+        None,
+        multipart_body(boundary, "enc.pdf", "application/pdf", enc_pdf),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let enc_src: Value = serde_json::from_slice(&raw_enc).unwrap();
+    let enc_id = enc_src["id"].as_str().unwrap();
+    let (st, enc_prev) = call(
+        &app,
+        "GET",
+        &format!("/studies/{a_sid}/sources/{enc_id}/preview"),
+        Some("owner-a"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(enc_prev["page_count"].is_null());
+
+    // Historical/raw unproven fsm_ref row in a non-prepared study fails closed with zero FSM reads.
+    let raw_src_id = "legacy-raw-src";
+    let raw_fsm = "legacy/unproven/blob.pdf";
+    certifications_api::dal::fsm::FsmClient::put_bytes(&*fsm, raw_fsm, b"%PDF-1.4\n%%EOF")
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, created_at, updated_at)
+         VALUES($1, 'owner-a', $2, 'legacy.pdf', 'application/pdf', 15, '', $3, 'fsm_ref', 'ready', 'all', '', 0, '', 1, 1)",
+    )
+    .bind(raw_src_id)
+    .bind(a_sid)
+    .bind(raw_fsm)
+    .execute(&store.db)
+    .await
+    .unwrap();
+    let gets_before_legacy = fsm.get_count();
+    let (st, _) = call(
+        &app,
+        "GET",
+        &format!("/studies/{a_sid}/sources/{raw_src_id}/content"),
+        Some("owner-a"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(fsm.get_count(), gets_before_legacy);
+
+    // Cross-reference /ObjStm PDF stays unknown (null page_count).
+    let objstm_pdf = b"%PDF-1.5\n1 0 obj<</Type /Catalog /Pages 2 0 R>>endobj\n2 0 obj<</Type /Pages /Count 7>>endobj\n3 0 obj<</Type /ObjStm /N 1 /First 5>>stream\nabc\nendstream endobj\ntrailer<</Root 1 0 R>>\n%%EOF";
+    assert!(certifications_api::domain::studies::extract_pdf_page_count(objstm_pdf).is_none());
+}
+
+#[tokio::test]
+async fn legacy_annotations_prepared_row_with_unknown_provenance_fails_closed_with_zero_fsm_reads()
+{
+    let mut store = Store::fixture().await;
+    let fsm = MemoryFsm::new();
+    store.fsm = fsm.clone();
+    let mut settings = test_settings();
+    settings.certifications_service_key = "ann-svc-key".into();
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings,
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+
+    // Historical study with source_origin = 'annotations' and a raw fsm_ref row whose
+    // source_provenance defaulted to 'unknown' (migration 010) MUST fail closed with zero FSM reads.
+    let legacy_sid = "legacy-prep-study";
+    let legacy_src = "legacy-prep-src";
+    let legacy_fsm = "annotations/legacy/raw.pdf";
+    certifications_api::dal::fsm::FsmClient::put_bytes(&*fsm, legacy_fsm, b"%PDF-1.4\n%%EOF")
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO studies(id, owner_id, title, description, source_origin, status, quiz_id, expires_at, created_at, updated_at)
+         VALUES($1, 'owner-a', 'Legacy Prep', '', 'annotations', 'draft', '', 9999999999, 1, 1)",
+    )
+    .bind(legacy_sid)
+    .execute(&store.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, created_at, updated_at)
+         VALUES($1, 'owner-a', $2, 'legacy.pdf', 'application/pdf', 15, '', $3, 'fsm_ref', 'ready', 'all', '', 0, '', 1, 1)",
+    )
+    .bind(legacy_src)
+    .bind(legacy_sid)
+    .bind(legacy_fsm)
+    .execute(&store.db)
+    .await
+    .unwrap();
+
+    let gets_before = fsm.get_count();
+    let (st, _) = call(
+        &app,
+        "GET",
+        &format!("/studies/{legacy_sid}/sources/{legacy_src}/content"),
+        Some("owner-a"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(fsm.get_count(), gets_before);
+
+    // Verified service-key prepared study (source_provenance = 'prepared_service') still reads.
+    let (st, prep) = call_with_service_key(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("owner-a"),
+        Some("ann-svc-key"),
+        Some(json!({
+            "title": "Verified Prep",
+            "sources": [{
+                "filename": "good.pdf",
+                "mime_type": "application/pdf",
+                "fsm_ref": legacy_fsm,
+                "size_bytes": 15
+            }]
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let new_sid = prep["study"]["id"].as_str().unwrap();
+    let new_src = prep["sources"][0]["id"].as_str().unwrap();
+    let (st_ok, _, body) = call_raw(
+        &app,
+        "GET",
+        &format!("/studies/{new_sid}/sources/{new_src}/content"),
+        Some("owner-a"),
+        None,
+        None,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(st_ok, StatusCode::OK);
+    assert_eq!(body, b"%PDF-1.4\n%%EOF");
+}
+
+#[test]
+fn selection_grammar_validates_pages_passages_and_ms_intervals() {
+    use certifications_api::domain::studies::canonicalize_selection;
+
+    // Pages
+    assert_eq!(
+        canonicalize_selection("pages", "1-3, 5", Some("application/pdf"), Some(10), None).unwrap(),
+        "1-3,5"
+    );
+    assert!(canonicalize_selection("pages", "0-2", Some("application/pdf"), None, None).is_err());
+    assert!(canonicalize_selection("pages", "3,1", Some("application/pdf"), None, None).is_err());
+    assert!(
+        canonicalize_selection("pages", "1-5", Some("application/pdf"), Some(4), None).is_err()
+    );
+    assert!(canonicalize_selection("pages", "1-2", Some("audio/wav"), None, None).is_err());
+
+    // Passages
+    assert_eq!(
+        canonicalize_selection(
+            "passages",
+            "p1:0-25, p1:25-40",
+            Some("text/plain"),
+            None,
+            None
+        )
+        .unwrap(),
+        "p1:0-25,p1:25-40"
+    );
+    assert!(canonicalize_selection("passages", "0-25", Some("text/plain"), None, None).is_err());
+    assert!(
+        canonicalize_selection("passages", "p1:10-10", Some("text/plain"), None, None).is_err()
+    );
+
+    // Audio intervals (ms:start-end, adjacent normalized, overlaps/floats/exponents/bounds rejected)
+    assert_eq!(
+        canonicalize_selection(
+            "intervals",
+            "ms:0-12500,30000-45000",
+            Some("audio/wav"),
+            None,
+            Some(60_000)
+        )
+        .unwrap(),
+        "ms:0-12500,30000-45000"
+    );
+    assert_eq!(
+        canonicalize_selection(
+            "intervals",
+            "ms:0-1000,1000-2000",
+            Some("audio/wav"),
+            None,
+            Some(5000)
+        )
+        .unwrap(),
+        "ms:0-2000"
+    );
+    assert!(canonicalize_selection("intervals", "0-1000", Some("audio/wav"), None, None).is_err());
+    assert!(
+        canonicalize_selection("intervals", "ms:1e2-500", Some("audio/wav"), None, None).is_err()
+    );
+    assert!(
+        canonicalize_selection(
+            "intervals",
+            "ms:0-5000,4000-6000",
+            Some("audio/wav"),
+            None,
+            None
+        )
+        .is_err()
+    );
+    assert!(
+        canonicalize_selection(
+            "intervals",
+            "ms:0-5000",
+            Some("audio/wav"),
+            None,
+            Some(4000)
+        )
+        .is_err()
+    );
+    assert!(
+        canonicalize_selection(
+            "intervals",
+            "ms:0-5000",
+            Some("application/pdf"),
+            None,
+            None
+        )
+        .is_err()
+    );
+
+    // Cross-service Cortex#136 alignment:
+    // 1. Canonical noncontiguous multi-audio fixture (`ms:0-100,200-300`)
+    assert_eq!(
+        canonicalize_selection(
+            "intervals",
+            "ms:0-100, 200-300",
+            Some("audio/wav; rate=16000"),
+            None,
+            None
+        )
+        .unwrap(),
+        "ms:0-100,200-300"
+    );
+    // 2. PDF total selected pages <= 100 (single & multi-range boundary + overflow) and MIME parameter normalization
+    assert_eq!(
+        canonicalize_selection(
+            "pages",
+            "1-50,51-100",
+            Some("application/pdf; charset=binary"),
+            None,
+            None
+        )
+        .unwrap(),
+        "1-50,51-100"
+    );
+    assert!(canonicalize_selection("pages", "1-101", Some("application/pdf"), None, None).is_err());
+    assert!(
+        canonicalize_selection("pages", "1-50,51-101", Some("application/pdf"), None, None)
+            .is_err()
+    );
+    assert!(
+        canonicalize_selection("pages", "1-5,5-10", Some("application/pdf"), None, None).is_err()
+    );
+    // 3. Passages requires text/* (with optional MIME params); DOCX allows `all` only, not `passages`
+    assert_eq!(
+        canonicalize_selection(
+            "passages",
+            "p1:0-10,p1:10-20",
+            Some("text/plain; charset=utf-8"),
+            None,
+            None
+        )
+        .unwrap(),
+        "p1:0-10,p1:10-20"
+    );
+    assert!(
+        canonicalize_selection(
+            "passages",
+            "p1:0-10,p1:5-15",
+            Some("text/plain"),
+            None,
+            None
+        )
+        .is_err()
+    );
+    assert!(
+        canonicalize_selection(
+            "passages",
+            "p1:0-10",
+            Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            None,
+            None
+        )
+        .is_err()
+    );
+    assert_eq!(
+        canonicalize_selection(
+            "all",
+            "",
+            Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            None,
+            None
+        )
+        .unwrap(),
+        ""
+    );
 }
