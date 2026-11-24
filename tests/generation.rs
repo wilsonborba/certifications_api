@@ -8,8 +8,8 @@ use certifications_api::{
     dal::{
         Store,
         cortex::{
-            BoxFuture, CortexClient, CortexJobOutcome, GeneratedAlternative, GeneratedQuestion,
-            GenerationRequest,
+            BoxFuture, CortexClient, GeneratedAlternative, GeneratedQuestion, GenerationRequest,
+            GenerationResult,
         },
         schemas::{self, DraftSchema, SchemaField},
     },
@@ -25,7 +25,7 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::Row;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use tower::ServiceExt;
@@ -34,6 +34,7 @@ struct MockCortex {
     calls: AtomicUsize,
     emit_cjk_first: AtomicBool,
     emit_bad_citation: AtomicBool,
+    source_text: Mutex<String>,
 }
 
 impl MockCortex {
@@ -42,6 +43,7 @@ impl MockCortex {
             calls: AtomicUsize::new(0),
             emit_cjk_first: AtomicBool::new(false),
             emit_bad_citation: AtomicBool::new(false),
+            source_text: Mutex::new(String::new()),
         })
     }
 }
@@ -53,9 +55,14 @@ impl CortexClient for MockCortex {
     fn generate_questions<'a>(
         &'a self,
         req: &'a GenerationRequest,
-    ) -> BoxFuture<'a, CoreResult<Vec<GeneratedQuestion>>> {
+    ) -> BoxFuture<'a, CoreResult<GenerationResult>> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.source_text.lock().unwrap() = req
+                .sources
+                .first()
+                .map(|source| String::from_utf8_lossy(&source.bytes).into_owned())
+                .unwrap_or_default();
             let src = if self.emit_bad_citation.load(Ordering::SeqCst) {
                 "fabricated-source".to_string()
             } else {
@@ -68,35 +75,40 @@ impl CortexClient for MockCortex {
             } else {
                 "What is ATP?".to_string()
             };
-            Ok(vec![GeneratedQuestion {
-                prompt,
-                alternatives: vec![
-                    GeneratedAlternative {
-                        id: "a".into(),
-                        text: if req.language == "th" {
-                            "พลังงาน".into()
-                        } else {
-                            "Energy currency".into()
+            Ok(GenerationResult {
+                questions: vec![GeneratedQuestion {
+                    prompt,
+                    alternatives: vec![
+                        GeneratedAlternative {
+                            id: "a".into(),
+                            text: if req.language == "th" {
+                                "พลังงาน".into()
+                            } else {
+                                "Energy currency".into()
+                            },
                         },
-                    },
-                    GeneratedAlternative {
-                        id: "b".into(),
-                        text: if req.language == "th" {
-                            "น้ำ".into()
-                        } else {
-                            "Water".into()
+                        GeneratedAlternative {
+                            id: "b".into(),
+                            text: if req.language == "th" {
+                                "น้ำ".into()
+                            } else {
+                                "Water".into()
+                            },
                         },
+                    ],
+                    correct_id: "a".into(),
+                    explanation: if req.language == "th" {
+                        "ใช้ในเซลล์".into()
+                    } else {
+                        "Used in cells".into()
                     },
-                ],
-                correct_id: "a".into(),
-                explanation: if req.language == "th" {
-                    "ใช้ในเซลล์".into()
-                } else {
-                    "Used in cells".into()
-                },
-                source_id: src,
-                citation_ref: "p.1".into(),
-            }])
+                    source_id: src,
+                    citation_ref: "p.1".into(),
+                }],
+                session_id: "temporary-session".into(),
+                output_id: "temporary-output".into(),
+                status: "done".into(),
+            })
         })
     }
     fn correct_language<'a>(
@@ -118,12 +130,6 @@ impl CortexClient for MockCortex {
                 })
                 .collect())
         })
-    }
-    fn check_request_outcome<'a>(
-        &'a self,
-        _cortex_job_id: &'a str,
-    ) -> BoxFuture<'a, CoreResult<CortexJobOutcome>> {
-        Box::pin(async { Ok(CortexJobOutcome::NotFound) })
     }
     fn fetch_timing_averages<'a>(
         &'a self,
@@ -249,7 +255,7 @@ async fn refresh_is_idempotent_second_active_job_blocked_and_stop_resume_requeue
     )
     .await;
     let sid = study["id"].as_str().unwrap().to_string();
-    call(
+    let (_, source) = call(
         &app,
         "POST",
         &format!("/studies/{sid}/sources"),
@@ -257,6 +263,16 @@ async fn refresh_is_idempotent_second_active_job_blocked_and_stop_resume_requeue
         Some(json!({"filename": "bio.txt", "mime_type": "text/plain", "content_text": "ATP is energy."})),
     )
     .await;
+    let source_id = source["id"].as_str().unwrap().to_string();
+    let (st, _) = call(
+        &app,
+        "PATCH",
+        &format!("/studies/{sid}/sources/{source_id}/selection"),
+        Some("u1"),
+        Some(json!({"kind":"passages","spec":"p1:0-3"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
 
     // Start generation with idempotency_key.
     let (st, job1) = call(
@@ -294,6 +310,17 @@ async fn refresh_is_idempotent_second_active_job_blocked_and_stop_resume_requeue
     .await;
     assert_eq!(st, StatusCode::CONFLICT);
 
+    // Selection edits after queueing do not change the frozen source snapshot.
+    let (st, _) = call(
+        &app,
+        "PATCH",
+        &format!("/studies/{sid}/sources/{source_id}/selection"),
+        Some("u1"),
+        Some(json!({"kind":"passages","spec":"p1:7-13"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
     // Stop and resume requeues cleanly.
     let (st, stopped) = call(
         &app,
@@ -325,11 +352,12 @@ async fn refresh_is_idempotent_second_active_job_blocked_and_stop_resume_requeue
         access_level: 3,
         display_name: None,
     };
-    let done = generations::process_job(&store, &caller, &jid2)
-        .await
-        .unwrap();
+    assert!(generations::process_next_queued(&store).await.unwrap());
+    let done = generations::get_job(&store, &caller, &jid2).await.unwrap();
+    assert!(!generations::process_next_queued(&store).await.unwrap());
     assert_eq!(done.status, "completed");
     assert_eq!(done.saved_count, 1);
+    assert_eq!(*cortex.source_text.lock().unwrap(), "ATP");
     let qid = done.quiz_id.unwrap();
     let vis: String = sqlx::query_scalar("SELECT visibility FROM quizzes WHERE id = $1")
         .bind(&qid)
@@ -363,6 +391,30 @@ async fn refresh_is_idempotent_second_active_job_blocked_and_stop_resume_requeue
         None
     );
     assert_eq!(generated_membership.get::<i64, _>("citation_count"), 1);
+
+    // A corrupted queued integrity snapshot must fail before Cortex is called.
+    let (st, sabotaged) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/generations"),
+        Some("u1"),
+        Some(json!({"language": "en", "count": 1, "idempotency_key": "req-sabotaged"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sabotaged_id = sabotaged["id"].as_str().unwrap();
+    sqlx::query("UPDATE generation_job_sources SET sha256 = 'wrong' WHERE job_id = $1")
+        .bind(sabotaged_id)
+        .execute(&store.db)
+        .await
+        .unwrap();
+    assert!(generations::process_next_queued(&store).await.unwrap());
+    let sabotaged = generations::get_job(&store, &caller, sabotaged_id)
+        .await
+        .unwrap();
+    assert_eq!(sabotaged.status, "failed");
+    assert_eq!(sabotaged.error_code, "source_integrity_failed");
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 1);
 
     let sse_resp = app
         .clone()

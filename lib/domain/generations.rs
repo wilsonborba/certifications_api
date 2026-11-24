@@ -2,7 +2,8 @@ use crate::{
     core::{Error, Result, now},
     dal::{
         Store,
-        cortex::{CortexJobOutcome, GeneratedQuestion, GenerationRequest},
+        cortex::{GeneratedQuestion, GenerationRequest, GenerationSource},
+        fsm::sha256_hex,
         new_id,
     },
     domain::{
@@ -220,28 +221,28 @@ pub async fn start_generation(
         ));
     }
 
-    let source_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM sources WHERE study_id = $1 AND status = 'ready' ORDER BY created_at ASC",
+    let mut tx = store.db.begin().await?;
+    let source_rows = sqlx::query(
+        "SELECT id, filename, mime_type, size_bytes, sha256, source_kind, selection_kind, selection_spec
+         FROM sources WHERE study_id = $1 AND status = 'ready' ORDER BY created_at ASC, id ASC",
     )
     .bind(study_id)
-    .fetch_all(&store.db)
+    .fetch_all(&mut *tx)
     .await?;
-    if source_ids.is_empty() {
+    if source_rows.is_empty() {
         return Err(Error::unprocessable(
             "no_ready_sources: Study has no ready sources for generation",
         ));
     }
-
     let ahead: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM generation_jobs WHERE status IN ('queued', 'running')",
     )
-    .fetch_one(&store.db)
+    .fetch_one(&mut *tx)
     .await?;
     let queue_position = ahead + 1;
 
     let job_id = new_id();
     let ts = now();
-    let mut tx = store.db.begin().await?;
     sqlx::query(
         "INSERT INTO generation_jobs(id, owner_id, study_id, quiz_id, status, language, requested_count, idempotency_key, queue_position, saved_count, queued_at)
          VALUES($1, $2, $3, $4, 'queued', $5, $6, $7, $8, 0, $9)",
@@ -258,10 +259,21 @@ pub async fn start_generation(
     .execute(&mut *tx)
     .await?;
 
-    for sid in &source_ids {
-        sqlx::query("INSERT INTO generation_job_sources(job_id, source_id) VALUES($1, $2)")
+    for source in source_rows {
+        sqlx::query(
+            "INSERT INTO generation_job_sources
+             (job_id, source_id, filename, mime_type, size_bytes, sha256, source_kind, selection_kind, selection_spec)
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
             .bind(&job_id)
-            .bind(sid)
+            .bind(source.get::<String, _>("id"))
+            .bind(source.get::<String, _>("filename"))
+            .bind(source.get::<String, _>("mime_type"))
+            .bind(source.get::<i64, _>("size_bytes"))
+            .bind(source.get::<String, _>("sha256"))
+            .bind(source.get::<String, _>("source_kind"))
+            .bind(source.get::<String, _>("selection_kind"))
+            .bind(source.get::<String, _>("selection_spec"))
             .execute(&mut *tx)
             .await?;
     }
@@ -277,6 +289,114 @@ pub async fn start_generation(
     get_job(store, caller, &job_id).await
 }
 
+fn utf16_offset_to_byte(text: &str, target: usize) -> Option<usize> {
+    let mut units = 0usize;
+    for (byte, ch) in text.char_indices() {
+        if units == target {
+            return Some(byte);
+        }
+        let next = units.checked_add(ch.len_utf16())?;
+        if target > units && target < next {
+            return None;
+        }
+        units = next;
+    }
+    (units == target).then_some(text.len())
+}
+
+fn select_text_content(
+    bytes: &[u8],
+    mime_type: &str,
+    kind: &str,
+    spec: &str,
+) -> Result<(String, String)> {
+    if !mime_type.starts_with("text/") {
+        return Err(Error::unprocessable(
+            "unsupported_source: Non-text sources require Cortex file selection support",
+        ));
+    }
+    let decoded = std::str::from_utf8(bytes).map_err(|_| {
+        Error::unprocessable("invalid_source_encoding: Text source is not valid UTF-8")
+    })?;
+    let decoded = decoded.strip_prefix('\u{feff}').unwrap_or(decoded);
+    let text = decoded.replace("\r\n", "\n").replace('\r', "\n");
+    match kind {
+        "all" => Ok((text, "all".into())),
+        "passages" => {
+            let mut selected = Vec::new();
+            let mut normalized = Vec::new();
+            for range in spec.split(',') {
+                let (page, offsets) = range.trim().split_once(':').ok_or_else(|| {
+                    Error::unprocessable("invalid_source_selection: Expected p1:start-end ranges")
+                })?;
+                if page != "p1" {
+                    return Err(Error::unprocessable(
+                        "invalid_source_selection: Text selections use page p1",
+                    ));
+                }
+                let (start, end) = offsets.split_once('-').ok_or_else(|| {
+                    Error::unprocessable("invalid_source_selection: Expected start-end offsets")
+                })?;
+                let start = start.parse::<usize>().map_err(|_| {
+                    Error::unprocessable("invalid_source_selection: Offsets must be integers")
+                })?;
+                let end = end.parse::<usize>().map_err(|_| {
+                    Error::unprocessable("invalid_source_selection: Offsets must be integers")
+                })?;
+                if end <= start {
+                    return Err(Error::unprocessable(
+                        "invalid_source_selection: Text ranges must be non-empty and forward",
+                    ));
+                }
+                let start_byte = utf16_offset_to_byte(&text, start).ok_or_else(|| {
+                    Error::unprocessable(
+                        "invalid_source_selection: Text offsets cannot split a UTF-16 surrogate pair",
+                    )
+                })?;
+                let end_byte = utf16_offset_to_byte(&text, end).ok_or_else(|| {
+                    Error::unprocessable(
+                        "invalid_source_selection: Text offsets cannot split a UTF-16 surrogate pair",
+                    )
+                })?;
+                if end_byte <= start_byte {
+                    return Err(Error::unprocessable(
+                        "invalid_source_selection: Text range is empty or outside the source",
+                    ));
+                }
+                selected.push(text[start_byte..end_byte].to_string());
+                normalized.push(format!("p1:{start}-{end}"));
+            }
+            if selected.is_empty() {
+                return Err(Error::unprocessable(
+                    "invalid_source_selection: At least one text range is required",
+                ));
+            }
+            Ok((selected.join("\n"), normalized.join(",")))
+        }
+        _ => Err(Error::unprocessable(
+            "unsupported_source: This text source requires all or passages selection",
+        )),
+    }
+}
+
+async fn fail_job(
+    store: &Store,
+    job_id: &str,
+    code: &str,
+    message: &str,
+) -> Result<GenerationJobSummary> {
+    sqlx::query(
+        "UPDATE generation_jobs SET status = 'failed', error_code = $1, finished_at = $2 WHERE id = $3 AND status = 'running'",
+    )
+    .bind(code)
+    .bind(now())
+    .bind(job_id)
+    .execute(&store.db)
+    .await?;
+    emit_event(store, job_id, "failed", message).await?;
+    Err(Error::unprocessable(format!("{code}: {message}")))
+}
+
 pub async fn process_job(
     store: &Store,
     caller: &CallerIdentity,
@@ -287,19 +407,18 @@ pub async fn process_job(
         return Ok(job);
     }
 
-    // Check existing Cortex outcome before issuing a duplicate external request.
-    let existing_cortex_id: String =
-        sqlx::query_scalar("SELECT cortex_job_id FROM generation_jobs WHERE id = $1")
-            .bind(job_id)
-            .fetch_one(&store.db)
-            .await?;
-    if !existing_cortex_id.is_empty()
-        && let Ok(CortexJobOutcome::Pending) = store
-            .cortex
-            .check_request_outcome(&existing_cortex_id)
-            .await
-    {
-        return Ok(job);
+    if job.status == "running" {
+        let code: String =
+            sqlx::query_scalar("SELECT error_code FROM generation_jobs WHERE id = $1")
+                .bind(job_id)
+                .fetch_one(&store.db)
+                .await?;
+        if code == "cortex_outcome_unknown" {
+            return Ok(job);
+        }
+        return Err(Error::conflict(
+            "generation_already_running: This generation is already being processed",
+        ));
     }
 
     let estimated_before = estimates::estimate_for_study(
@@ -321,21 +440,105 @@ pub async fn process_job(
 
     let started = now();
     let wait_ms = (started - job_queued_at).max(0) * 1000;
-    sqlx::query("UPDATE generation_jobs SET status = 'running', started_at = $1 WHERE id = $2")
+    let claimed = sqlx::query("UPDATE generation_jobs SET status = 'running', started_at = $1 WHERE id = $2 AND status = 'queued'")
         .bind(started)
         .bind(job_id)
         .execute(&store.db)
         .await?;
+    if claimed.rows_affected() == 0 {
+        return get_job(store, caller, job_id).await;
+    }
     emit_event(store, job_id, "running", "Calling Cortex T0 Easy").await?;
 
     let prep_inst = std::time::Instant::now();
     let prep_started_at = now();
-    let source_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT source_id FROM generation_job_sources WHERE job_id = $1 ORDER BY source_id",
+    let source_rows = sqlx::query(
+        "SELECT gjs.source_id, gjs.filename, gjs.mime_type, gjs.size_bytes, gjs.sha256,
+                gjs.source_kind, gjs.selection_kind, gjs.selection_spec,
+                s.owner_id, s.status, s.fsm_ref
+         FROM generation_job_sources gjs JOIN sources s ON s.id = gjs.source_id
+         WHERE gjs.job_id = $1 ORDER BY gjs.source_id",
     )
     .bind(job_id)
     .fetch_all(&store.db)
     .await?;
+    let mut sources = Vec::with_capacity(source_rows.len());
+    let mut source_ids = Vec::with_capacity(source_rows.len());
+    for row in source_rows {
+        let source_id: String = row.get("source_id");
+        let source_owner: String = row.get("owner_id");
+        let status: String = row.get("status");
+        let fsm_ref: String = row.get("fsm_ref");
+        let size_bytes: i64 = row.get("size_bytes");
+        let sha256: String = row.get("sha256");
+        let mime_type: String = row.get("mime_type");
+        let selection_kind: String = row.get("selection_kind");
+        let selection_spec: String = row.get("selection_spec");
+        if source_owner != caller.user_id || status != "ready" || fsm_ref.trim().is_empty() {
+            return fail_job(
+                store,
+                job_id,
+                "source_unavailable",
+                "A selected source is no longer available for this generation",
+            )
+            .await;
+        }
+        let bytes = match store.fsm.get_bytes(&fsm_ref).await {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return fail_job(
+                    store,
+                    job_id,
+                    "source_unavailable",
+                    "A selected source is no longer available for this generation",
+                )
+                .await;
+            }
+        };
+        if size_bytes < 0
+            || bytes.len() as i64 != size_bytes
+            || sha256.trim().is_empty()
+            || sha256_hex(&bytes) != sha256
+        {
+            return fail_job(
+                store,
+                job_id,
+                "source_integrity_failed",
+                "A selected source no longer matches its saved integrity check",
+            )
+            .await;
+        }
+        let (selected, selection) =
+            match select_text_content(&bytes, &mime_type, &selection_kind, &selection_spec) {
+                Ok(selected) => selected,
+                Err(error) => {
+                    let message = if error.1.starts_with("unsupported_source") {
+                        "This source type requires the supported Cortex file-selection bridge"
+                    } else {
+                        "A saved source selection is invalid"
+                    };
+                    let code = if error.1.starts_with("unsupported_source") {
+                        "unsupported_source_selection"
+                    } else {
+                        "invalid_source_selection"
+                    };
+                    return fail_job(store, job_id, code, message).await;
+                }
+            };
+        let suffix = match mime_type.as_str() {
+            "text/markdown" => "md",
+            "text/csv" => "csv",
+            _ => "txt",
+        };
+        sources.push(GenerationSource {
+            source_id: source_id.clone(),
+            filename: format!("source-{source_id}.{suffix}"),
+            mime_type: "text/plain".into(),
+            selection,
+            bytes: selected.into_bytes(),
+        });
+        source_ids.push(source_id);
+    }
     let allowed_sources: HashSet<String> = source_ids.iter().cloned().collect();
 
     let mut existing_prompts = Vec::new();
@@ -344,6 +547,7 @@ pub async fn process_job(
             "SELECT qv.couch_doc_id FROM quiz_version_questions qvq
              JOIN quiz_versions qver ON qver.id = qvq.quiz_version_id
              JOIN question_versions qv ON qv.id = qvq.question_version_id
+             JOIN quizzes q ON q.id = qver.quiz_id AND q.active_version_id = qver.id
              WHERE qver.quiz_id = $1",
         )
         .bind(qid)
@@ -361,10 +565,10 @@ pub async fn process_job(
 
     let req = GenerationRequest {
         owner_id: caller.user_id.clone(),
-        job_id: job_id.to_string(),
         language: job.language.clone(),
         count: job.requested_count,
         source_ids,
+        sources,
         existing_prompts: existing_prompts.clone(),
     };
     let prep_ms = prep_inst.elapsed().as_millis() as i64;
@@ -384,8 +588,8 @@ pub async fn process_job(
 
     let cortex_inst = std::time::Instant::now();
     let cortex_started_at = now();
-    let mut generated = match store.cortex.generate_questions(&req).await {
-        Ok(q) => q,
+    let result = match store.cortex.generate_questions(&req).await {
+        Ok(result) => result,
         Err(err) => {
             let cortex_ms = cortex_inst.elapsed().as_millis() as i64;
             let _ = estimates::record_step(
@@ -401,17 +605,39 @@ pub async fn process_job(
                 },
             )
             .await;
-            sqlx::query(
-                "UPDATE generation_jobs SET status = 'failed', error_code = 'cortex_failed', finished_at = $1 WHERE id = $2",
+            let _ = err;
+            return fail_job(
+                store,
+                job_id,
+                "cortex_outcome_unknown",
+                "Cortex may have accepted this generation; automatic retry is disabled",
             )
-            .bind(now())
-            .bind(job_id)
-            .execute(&store.db)
-            .await?;
-            emit_event(store, job_id, "failed", "Cortex generation failed").await?;
-            return Err(err);
+            .await;
         }
     };
+    sqlx::query(
+        "UPDATE generation_jobs SET cortex_session_id = $1, cortex_output_id = $2 WHERE id = $3",
+    )
+    .bind(&result.session_id)
+    .bind(&result.output_id)
+    .bind(job_id)
+    .execute(&store.db)
+    .await?;
+    if result.status != "done" {
+        let (code, message) = if result.status == "failed" {
+            (
+                "cortex_failed",
+                "Cortex reported that the generation failed",
+            )
+        } else {
+            (
+                "cortex_outcome_unknown",
+                "Cortex returned without a final result; automatic retry is disabled",
+            )
+        };
+        return fail_job(store, job_id, code, message).await;
+    }
+    let mut generated = result.questions;
 
     if has_wrong_script(&job.language, &generated) {
         emit_event(
@@ -421,10 +647,22 @@ pub async fn process_job(
             "Detected wrong script; requesting Cortex correction",
         )
         .await?;
-        generated = store
+        generated = match store
             .cortex
             .correct_language(&caller.user_id, &job.language, &generated)
-            .await?;
+            .await
+        {
+            Ok(questions) => questions,
+            Err(_) => {
+                return fail_job(
+                    store,
+                    job_id,
+                    "cortex_outcome_unknown",
+                    "Cortex may have accepted language correction; automatic retry is disabled",
+                )
+                .await;
+            }
+        };
         if has_wrong_script(&job.language, &generated) {
             let cortex_ms = cortex_inst.elapsed().as_millis() as i64;
             let _ = estimates::record_step(
@@ -694,6 +932,43 @@ pub async fn process_job(
     get_job(store, caller, job_id).await
 }
 
+/// Drain the oldest persisted generation at a time. The conditional status
+/// transition in `process_job` is the durable claim, so two pollers cannot
+/// submit the same queued job to Cortex.
+pub async fn process_next_queued(store: &Store) -> Result<bool> {
+    let row = sqlx::query(
+        "SELECT id, owner_id FROM generation_jobs WHERE status = 'queued' ORDER BY queued_at ASC, id ASC LIMIT 1",
+    )
+    .fetch_optional(&store.db)
+    .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let caller = CallerIdentity {
+        user_id: row.get("owner_id"),
+        access_level: 0,
+        display_name: None,
+    };
+    let job_id: String = row.get("id");
+    if let Err(error) = process_job(store, &caller, &job_id).await {
+        tracing::warn!(job_id = %job_id, error = %error, "Generation queue item stopped");
+    }
+    Ok(true)
+}
+
+pub async fn run_queue_worker(store: Store) {
+    loop {
+        match process_next_queued(&store).await {
+            Ok(true) => continue,
+            Ok(false) => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+            Err(error) => {
+                tracing::error!(error = %error, "Generation queue poll failed");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    }
+}
+
 pub async fn stop_generation(
     store: &Store,
     caller: &CallerIdentity,
@@ -722,6 +997,11 @@ pub async fn resume_generation(
     if !matches!(prev.status.as_str(), "cancelled" | "failed") {
         return Err(Error::conflict(
             "cannot_resume: Only stopped or failed generation jobs can be resumed",
+        ));
+    }
+    if prev.error_code == "cortex_outcome_unknown" {
+        return Err(Error::conflict(
+            "cannot_resume_unknown_cortex_outcome: Cortex may already have accepted this request",
         ));
     }
     let active: i64 = sqlx::query_scalar(
@@ -762,7 +1042,10 @@ pub async fn resume_generation(
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "INSERT INTO generation_job_sources(job_id, source_id) SELECT $1, source_id FROM generation_job_sources WHERE job_id = $2",
+        "INSERT INTO generation_job_sources
+         (job_id, source_id, filename, mime_type, size_bytes, sha256, source_kind, selection_kind, selection_spec)
+         SELECT $1, source_id, filename, mime_type, size_bytes, sha256, source_kind, selection_kind, selection_spec
+         FROM generation_job_sources WHERE job_id = $2",
     )
     .bind(&new_job_id)
     .bind(job_id)

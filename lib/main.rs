@@ -12,6 +12,9 @@ async fn main() -> anyhow::Result<()> {
     let settings = Settings::from_env();
     logs::init(&settings);
     let store = Store::connect(&settings).await?;
+    let generation_worker = tokio::spawn(
+        certifications_api::domain::generations::run_queue_worker(store.clone()),
+    );
     let quotas = certifications_api::domain::quotas::QuotaCache::default();
     let _ = quotas.refresh_from_db(&store).await;
     let sig_dir = std::path::PathBuf::from(&settings.clamav.signatures_dir);
@@ -40,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await;
     freshclam_task.abort();
+    generation_worker.abort();
     res?;
     Ok(())
 }
