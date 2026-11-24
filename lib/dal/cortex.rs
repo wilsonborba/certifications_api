@@ -40,6 +40,8 @@ pub struct GenerationSource {
     pub filename: String,
     pub mime_type: String,
     pub selection: String,
+    pub selection_kind: String,
+    pub selection_spec: String,
     pub bytes: Vec<u8>,
 }
 
@@ -248,6 +250,8 @@ impl HttpCortex {
         let form = reqwest::multipart::Form::new()
             .text("app_id", "certifications")
             .text("temporary", "true")
+            .text("selection_kind", source.selection_kind.clone())
+            .text("selection_spec", source.selection_spec.clone())
             .part("file", part);
         let resp = self
             .http

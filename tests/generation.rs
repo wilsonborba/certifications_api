@@ -13,6 +13,11 @@ use certifications_api::{
             BoxFuture, CortexClient, GeneratedAlternative, GeneratedQuestion, GenerationRequest,
             GenerationResult,
         },
+        fsm::MemoryFsm,
+        reports::{
+            BoxFuture as ReportsFuture, ReadableReportDataset, ReportDatasetMaterial,
+            ReportInputRef, ReportLineage, ReportPickerItem, ReportWatermark, ReportsClient,
+        },
         schemas::{self, DraftSchema, SchemaField},
     },
     domain::{
@@ -36,6 +41,102 @@ use tower::ServiceExt;
 struct CortexGate {
     entered: Notify,
     release: Notify,
+}
+
+struct MockReportSource {
+    accessible: AtomicBool,
+    bytes: Mutex<Vec<u8>>,
+}
+
+impl ReportsClient for MockReportSource {
+    fn list_readable_reports<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _project: Option<&'a str>,
+    ) -> ReportsFuture<'a, CoreResult<Vec<ReportPickerItem>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn check_report_access<'a>(
+        &'a self,
+        _user_id: &'a str,
+        project: &'a str,
+        report: &'a str,
+    ) -> ReportsFuture<'a, CoreResult<ReportPickerItem>> {
+        Box::pin(async move {
+            if self.accessible.load(Ordering::SeqCst) && project == "proj" && report == "rep" {
+                Ok(ReportPickerItem {
+                    project: project.into(),
+                    report: report.into(),
+                    title: "Report".into(),
+                    is_restricted: false,
+                })
+            } else {
+                Err(certifications_api::core::Error::forbidden(
+                    "report_access_denied: Caller lacks read permission for this report",
+                ))
+            }
+        })
+    }
+    fn list_readable_datasets<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _project: &'a str,
+        _report: &'a str,
+    ) -> ReportsFuture<'a, CoreResult<Vec<ReadableReportDataset>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn fetch_report_dataset<'a>(
+        &'a self,
+        _user_id: &'a str,
+        project: &'a str,
+        report: &'a str,
+        dataset: &'a str,
+    ) -> ReportsFuture<'a, CoreResult<ReportDatasetMaterial>> {
+        Box::pin(async move {
+            if self.accessible.load(Ordering::SeqCst)
+                && project == "proj"
+                && report == "rep"
+                && dataset == "data"
+            {
+                Ok(ReportDatasetMaterial {
+                    bytes: self.bytes.lock().unwrap().clone(),
+                    is_restricted: false,
+                    row_count: 1,
+                    lineage_sha256: "a".repeat(64),
+                    lineage: ReportLineage {
+                        calculation_id: "calc1".into(),
+                        calculation_version: 1,
+                        inputs: vec![ReportInputRef {
+                            schema: "records".into(),
+                            version: 2,
+                        }],
+                        source_watermark: [(
+                            "records".into(),
+                            ReportWatermark {
+                                records: 1,
+                                last_received_at: Some("2026-11-24T00:00:00Z".into()),
+                            },
+                        )]
+                        .into(),
+                        filters: json!({}),
+                        calculated_at: "2026-11-24T00:00:00Z".into(),
+                    },
+                })
+            } else {
+                Err(certifications_api::core::Error::forbidden(
+                    "report_access_denied: Caller lacks read permission for this dataset",
+                ))
+            }
+        })
+    }
+    fn render_question_visual<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _prompt: &'a str,
+        _visual_spec: &'a Value,
+    ) -> ReportsFuture<'a, CoreResult<certifications_api::dal::reports::RenderedVisual>> {
+        Box::pin(async { Err(certifications_api::core::Error::unavailable()) })
+    }
 }
 
 #[derive(Clone, Default)]
@@ -83,6 +184,7 @@ struct MockCortex {
     emit_cjk_first: AtomicBool,
     emit_bad_citation: AtomicBool,
     source_text: Mutex<String>,
+    source_file: Mutex<Option<certifications_api::dal::cortex::GenerationSource>>,
     prompt_suffix: Mutex<String>,
     gate: Mutex<Option<Arc<CortexGate>>>,
 }
@@ -94,6 +196,7 @@ impl MockCortex {
             emit_cjk_first: AtomicBool::new(false),
             emit_bad_citation: AtomicBool::new(false),
             source_text: Mutex::new(String::new()),
+            source_file: Mutex::new(None),
             prompt_suffix: Mutex::new(String::new()),
             gate: Mutex::new(None),
         })
@@ -120,6 +223,7 @@ impl CortexClient for MockCortex {
                 .first()
                 .map(|source| String::from_utf8_lossy(&source.bytes).into_owned())
                 .unwrap_or_default();
+            *self.source_file.lock().unwrap() = req.sources.first().cloned();
             let src = if self.emit_bad_citation.load(Ordering::SeqCst) {
                 "fabricated-source".to_string()
             } else {
@@ -290,6 +394,46 @@ async fn call(
     (status, val)
 }
 
+fn multipart_source(boundary: &str, filename: &str, mime: &str, bytes: &[u8]) -> Vec<u8> {
+    let mut body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {mime}\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
+}
+
+async fn call_multipart_source(
+    app: &Router,
+    uri: &str,
+    user: &str,
+    boundary: &str,
+    filename: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(uri)
+                .header("x-uuid", user)
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(multipart_source(
+                    boundary, filename, mime, bytes,
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
 async fn wait_for_job_status(app: &Router, job_id: &str, expected: &str) -> Value {
     tokio::time::timeout(std::time::Duration::from_secs(8), async {
         loop {
@@ -315,6 +459,189 @@ async fn wait_for_job_status(app: &Router, job_id: &str, expected: &str) -> Valu
     })
     .await
     .expect("worker did not reach the expected job status")
+}
+
+async fn queued_report_generation() -> (
+    Store,
+    Router,
+    Arc<MockCortex>,
+    Arc<MockReportSource>,
+    String,
+) {
+    let mut store = Store::fixture().await;
+    let cortex = MockCortex::new();
+    let reports = Arc::new(MockReportSource {
+        accessible: AtomicBool::new(true),
+        bytes: Mutex::new(br#"[{"value":7}]"#.to_vec()),
+    });
+    store.cortex = cortex.clone();
+    store.reports = reports.clone();
+    publish_question_schema(&store).await;
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+    let (_, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u1"),
+        Some(json!({"title": "Report study"})),
+    )
+    .await;
+    let study_id = study["id"].as_str().unwrap().to_string();
+    let (source_status, source) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/sources"),
+        Some("u1"),
+        Some(json!({
+            "kind": "report",
+            "filename": "Metrics",
+            "external_ref": "proj/rep/data"
+        })),
+    )
+    .await;
+    assert_eq!(source_status, StatusCode::CREATED);
+    assert_eq!(source["mime_type"], "text/plain");
+    assert_eq!(source["fsm_ref"], "");
+    assert_eq!(source["size_bytes"], 13);
+    assert!(!source["sha256"].as_str().unwrap().is_empty());
+
+    let (job_status, job) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/generations"),
+        Some("u1"),
+        Some(json!({"language": "en", "count": 1, "idempotency_key": "reports-source"})),
+    )
+    .await;
+    assert_eq!(job_status, StatusCode::CREATED);
+    let job_id = job["id"].as_str().unwrap().to_string();
+    (store, app, cortex, reports, job_id)
+}
+
+#[tokio::test]
+async fn report_dataset_rows_are_frozen_and_used_without_fsm_reads() {
+    let (store, app, cortex, _reports, job_id) = queued_report_generation().await;
+    let frozen: (String, String, i64, String, String, String, i64, i64, String) = sqlx::query_as(
+        "SELECT external_ref, source_kind, size_bytes, sha256, selection_kind,
+                report_calculation_id, report_calculation_version, report_row_count, report_lineage_sha256
+         FROM generation_job_sources WHERE job_id = $1",
+    )
+    .bind(&job_id)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(frozen.0, "proj/rep/data");
+    assert_eq!(frozen.1, "report");
+    assert_eq!(frozen.2, 13);
+    assert!(!frozen.3.is_empty());
+    assert_eq!(frozen.4, "all");
+    assert_eq!(frozen.5, "calc1");
+    assert_eq!(frozen.6, 1);
+    assert_eq!(frozen.7, 1);
+    assert_eq!(frozen.8, "a".repeat(64));
+
+    let worker = tokio::spawn(generations::run_queue_worker(store.clone()));
+    let done = wait_for_job_status(&app, &job_id, "completed").await;
+    assert_eq!(done["status"], "completed");
+    assert_eq!(*cortex.source_text.lock().unwrap(), r#"[{"value":7}]"#);
+    worker.abort();
+}
+
+#[tokio::test]
+async fn report_dataset_access_is_rechecked_before_any_cortex_call() {
+    let (store, app, cortex, reports, job_id) = queued_report_generation().await;
+    reports.accessible.store(false, Ordering::SeqCst);
+
+    let worker = tokio::spawn(generations::run_queue_worker(store));
+    let failed = wait_for_job_status(&app, &job_id, "failed").await;
+    assert_eq!(failed["error_code"], "source_unavailable");
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 0);
+    worker.abort();
+}
+
+#[tokio::test]
+async fn report_dataset_content_changes_fail_the_frozen_hash_check_before_cortex() {
+    let (store, app, cortex, reports, job_id) = queued_report_generation().await;
+    *reports.bytes.lock().unwrap() = br#"[{"value":8}]"#.to_vec();
+
+    let worker = tokio::spawn(generations::run_queue_worker(store));
+    let failed = wait_for_job_status(&app, &job_id, "failed").await;
+    assert_eq!(failed["error_code"], "source_integrity_failed");
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 0);
+    worker.abort();
+}
+
+#[tokio::test]
+async fn pdf_selection_reaches_cortex_files_before_extraction() {
+    let mut store = Store::fixture().await;
+    let fsm = MemoryFsm::new();
+    store.fsm = fsm.clone();
+    let cortex = MockCortex::new();
+    store.cortex = cortex.clone();
+    publish_question_schema(&store).await;
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+    let (_, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u1"),
+        Some(json!({"title": "PDF study"})),
+    )
+    .await;
+    let study_id = study["id"].as_str().unwrap();
+    let pdf = b"%PDF-1.4\n% /Type /Page\n1 0 obj<</Type /Catalog /Pages 2 0 R>>endobj\n2 0 obj<</Type /Pages /Count 1 /Kids[3 0 R]>>endobj\n3 0 obj<</Type /Page /Contents 4 0 R>>endobj\n4 0 obj<</Length 15>>stream\n/Type /Page\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%EOF";
+    let (upload_status, source) = call_multipart_source(
+        &app,
+        &format!("/studies/{study_id}/sources"),
+        "u1",
+        "PDF-BOUNDARY",
+        "slides.pdf",
+        "application/pdf",
+        pdf,
+    )
+    .await;
+    assert_eq!(upload_status, StatusCode::CREATED);
+    let source_id = source["id"].as_str().unwrap();
+    let (selection_status, _) = call(
+        &app,
+        "PATCH",
+        &format!("/studies/{study_id}/sources/{source_id}/selection"),
+        Some("u1"),
+        Some(json!({"kind":"pages", "spec":"1"})),
+    )
+    .await;
+    assert_eq!(selection_status, StatusCode::OK);
+    let (job_status, job) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/generations"),
+        Some("u1"),
+        Some(json!({"language":"en", "count":1, "idempotency_key":"pdf-selection"})),
+    )
+    .await;
+    assert_eq!(job_status, StatusCode::CREATED);
+    let job_id = job["id"].as_str().unwrap();
+
+    let worker = tokio::spawn(generations::run_queue_worker(store.clone()));
+    let done = wait_for_job_status(&app, job_id, "completed").await;
+    assert_eq!(done["status"], "completed");
+    let prepared = cortex.source_file.lock().unwrap().clone().unwrap();
+    assert_eq!(prepared.mime_type, "application/pdf");
+    assert_eq!(prepared.selection_kind, "pages");
+    assert_eq!(prepared.selection_spec, "1");
+    assert_eq!(prepared.bytes, pdf);
+    assert_eq!(fsm.get_count(), 1);
+    worker.abort();
 }
 
 #[tokio::test]

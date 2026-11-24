@@ -545,6 +545,17 @@ async fn get_analysis(
 #[derive(Deserialize)]
 pub struct PickerQuery {
     pub project: Option<String>,
+    pub report: Option<String>,
+}
+
+fn valid_picker_slug(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 async fn reports_picker(
@@ -552,6 +563,29 @@ async fn reports_picker(
     SessionUser(caller): SessionUser,
     Query(q): Query<PickerQuery>,
 ) -> Result<Json<Value>> {
+    if let Some(report) = q.report.as_deref() {
+        let project = q
+            .project
+            .as_deref()
+            .filter(|project| !project.trim().is_empty())
+            .ok_or_else(|| Error::bad("invalid_picker_request: project is required with report"))?;
+        if project.trim() != project || !valid_picker_slug(project) {
+            return Err(Error::bad(
+                "invalid_picker_request: project must be a valid project slug",
+            ));
+        }
+        if report.trim() != report || !valid_picker_slug(report) {
+            return Err(Error::bad(
+                "invalid_picker_request: report must be a valid report slug",
+            ));
+        }
+        let items = app
+            .store
+            .reports
+            .list_readable_datasets(&caller.user_id, project, report)
+            .await?;
+        return Ok(Json(json!({ "items": items })));
+    }
     let items = app
         .store
         .reports

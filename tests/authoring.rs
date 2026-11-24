@@ -8,7 +8,10 @@ use certifications_api::{
     dal::{
         Store,
         fsm::MemoryFsm,
-        reports::{BoxFuture, RenderedVisual, ReportPickerItem, ReportsClient},
+        reports::{
+            BoxFuture, ReadableReportDataset, RenderedVisual, ReportDatasetMaterial,
+            ReportPickerItem, ReportsClient,
+        },
         schemas::{self, DraftSchema, SchemaField},
     },
     domain::{
@@ -40,6 +43,23 @@ impl ReportsClient for MockReports {
         _project: &'a str,
         _report: &'a str,
     ) -> BoxFuture<'a, CoreResult<ReportPickerItem>> {
+        Box::pin(async { Err(CoreError::missing()) })
+    }
+    fn list_readable_datasets<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _project: &'a str,
+        _report: &'a str,
+    ) -> BoxFuture<'a, CoreResult<Vec<ReadableReportDataset>>> {
+        Box::pin(async { Err(CoreError::missing()) })
+    }
+    fn fetch_report_dataset<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _project: &'a str,
+        _report: &'a str,
+        _dataset: &'a str,
+    ) -> BoxFuture<'a, CoreResult<ReportDatasetMaterial>> {
         Box::pin(async { Err(CoreError::missing()) })
     }
     fn render_question_visual<'a>(

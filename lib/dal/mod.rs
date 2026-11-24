@@ -9,7 +9,7 @@ use crate::core::{Error, Result, Settings};
 use sqlx::{AnyPool, ConnectOptions, any::AnyPoolOptions};
 use std::sync::Arc;
 
-pub const SQLITE_MIGRATIONS: [&str; 11] = [
+pub const SQLITE_MIGRATIONS: [&str; 13] = [
     include_str!("../../migrations/001_v2_schema.sql"),
     include_str!("../../tests/sqlite/002_v2_studies_sources.sql"),
     include_str!("../../tests/sqlite/003_v2_generation_events.sql"),
@@ -21,6 +21,8 @@ pub const SQLITE_MIGRATIONS: [&str; 11] = [
     include_str!("../../tests/sqlite/009_v2_public_question_search.sql"),
     include_str!("../../tests/sqlite/010_v2_source_provenance.sql"),
     include_str!("../../tests/sqlite/011_v2_generation_source_snapshot.sql"),
+    include_str!("../../tests/sqlite/012_v2_generation_source_external_ref.sql"),
+    include_str!("../../tests/sqlite/013_v2_report_source_snapshot.sql"),
 ];
 
 #[derive(Clone)]

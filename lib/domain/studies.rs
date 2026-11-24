@@ -734,29 +734,49 @@ pub async fn add_source_reference(
             "invalid_source_kind: Kind must be fsm_ref, link, or report",
         ));
     }
+    if input.kind == "report" && !input.fsm_ref.trim().is_empty() {
+        return Err(Error::unprocessable(
+            "invalid_report_ref: Report sources must not include an FSM reference",
+        ));
+    }
     let mut is_restricted = input.is_restricted;
     let mut effective_size = input.size_bytes.max(0);
+    let mut sha256 = String::new();
+    let mut report_calculation_id = String::new();
+    let mut report_calculation_version = 0i64;
+    let mut report_row_count = 0i64;
+    let mut report_lineage_sha256 = String::new();
+    let effective_mime_type = if input.kind == "report" {
+        "text/plain"
+    } else {
+        input.mime_type.trim()
+    };
     if input.kind == "fsm_ref" {
         if let Some(verified_size) = authorize_fsm_ref(store, caller, &input.fsm_ref, false).await?
         {
             effective_size = verified_size;
         }
     } else if input.kind == "report" {
-        let (project, report) = input
-            .external_ref
-            .trim()
-            .split_once('/')
-            .filter(|(p, r)| !p.is_empty() && !r.is_empty())
-            .ok_or_else(|| {
-                Error::unprocessable(
-                    "invalid_report_ref: Report external_ref must be <project>/<report>",
-                )
-            })?;
+        let (project, report, dataset) = parse_report_external_ref(&input.external_ref)?;
         let checked = store
             .reports
             .check_report_access(&caller.user_id, project, report)
             .await?;
-        is_restricted = checked.is_restricted;
+        let material = store
+            .reports
+            .fetch_report_dataset(&caller.user_id, project, report, dataset)
+            .await?;
+        effective_size = i64::try_from(material.bytes.len()).map_err(|_| {
+            Error::unprocessable(
+                "report_source_too_large: Dataset exceeds the supported source size",
+            )
+        })?;
+        sha256 = sha256_hex(&material.bytes);
+        is_restricted = checked.is_restricted || material.is_restricted;
+        report_calculation_id = material.lineage.calculation_id.clone();
+        report_calculation_version = material.lineage.calculation_version;
+        report_row_count = material.row_count;
+        report_lineage_sha256 = material.lineage_sha256.clone();
     }
     let source_id = new_id();
     let ts = now();
@@ -766,31 +786,39 @@ pub async fn add_source_reference(
     } else {
         "unknown"
     };
+    let mut tx = store.db.begin().await?;
     sqlx::query(
-        "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, source_provenance, created_at, updated_at)
-         VALUES($1, $2, $3, $4, $5, $6, '', $7, $8, 'ready', 'all', '', $9, $10, $11, $12, $12)",
+        "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, source_provenance, report_calculation_id, report_calculation_version, report_row_count, report_lineage_sha256, created_at, updated_at)
+         VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ready', 'all', '', $10, $11, $12, $13, $14, $15, $16, $17, $17)",
     )
     .bind(&source_id)
     .bind(&caller.user_id)
     .bind(study_id)
     .bind(input.filename.trim())
-    .bind(input.mime_type.trim())
+    .bind(effective_mime_type)
     .bind(effective_size)
+    .bind(&sha256)
     .bind(input.fsm_ref.trim())
     .bind(&input.kind)
     .bind(restricted)
     .bind(input.external_ref.trim())
     .bind(provenance)
+    .bind(&report_calculation_id)
+    .bind(report_calculation_version)
+    .bind(report_row_count)
+    .bind(&report_lineage_sha256)
     .bind(ts)
-    .execute(&store.db)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(SourceSummary {
         id: source_id,
         filename: input.filename.trim().to_string(),
-        mime_type: input.mime_type.trim().to_string(),
+        mime_type: effective_mime_type.to_string(),
         size_bytes: effective_size,
-        sha256: String::new(),
+        sha256,
         fsm_ref: input.fsm_ref.trim().to_string(),
         source_kind: input.kind,
         status: "ready".into(),
@@ -801,6 +829,35 @@ pub async fn add_source_reference(
         created_at: ts,
         updated_at: ts,
     })
+}
+
+pub(crate) fn parse_report_external_ref(external_ref: &str) -> Result<(&str, &str, &str)> {
+    let mut parts = external_ref.trim().split('/');
+    let (Some(project), Some(report), Some(dataset), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(Error::unprocessable(
+            "invalid_report_ref: Report external_ref must be <project>/<report>/<dataset>",
+        ));
+    };
+    let valid_slug = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 128
+            && part != "."
+            && part != ".."
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    };
+    if [project, report, dataset]
+        .iter()
+        .any(|part| *part != part.trim() || !valid_slug(part))
+    {
+        return Err(Error::unprocessable(
+            "invalid_report_ref: Report external_ref must contain valid project, report, and dataset identifiers",
+        ));
+    }
+    Ok((project, report, dataset))
 }
 
 pub async fn get_source(

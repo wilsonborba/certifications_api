@@ -287,7 +287,10 @@ async fn selections_survive_refresh_and_prepared_studies_reuse_fsm_without_uploa
 async fn reports_picker_and_report_source_enforce_permissions_and_unconfigured_503() {
     use certifications_api::{
         core::{Error as CoreError, Result as CoreResult},
-        dal::reports::{BoxFuture, ReportPickerItem, ReportsClient},
+        dal::reports::{
+            BoxFuture, ReadableReportDataset, ReportDatasetMaterial, ReportInputRef, ReportLineage,
+            ReportPickerItem, ReportWatermark, ReportsClient,
+        },
     };
 
     struct MockReports;
@@ -331,6 +334,81 @@ async fn reports_picker_and_report_source_enforce_permissions_and_unconfigured_5
                 }
             })
         }
+        fn list_readable_datasets<'a>(
+            &'a self,
+            user_id: &'a str,
+            project: &'a str,
+            report: &'a str,
+        ) -> BoxFuture<'a, CoreResult<Vec<ReadableReportDataset>>> {
+            Box::pin(async move {
+                if user_id == "u1" && project == "proj1" && report == "rep1" {
+                    Ok(vec![ReadableReportDataset {
+                        project: project.into(),
+                        report: report.into(),
+                        dataset: json!({
+                            "dataset_id": "data1",
+                            "title": "Counts",
+                            "description": "",
+                            "equation": null,
+                            "data_tier": "public",
+                            "fields": [],
+                            "filters": [],
+                            "can_view": true,
+                            "visibility": "public",
+                            "meta": null
+                        }),
+                    }])
+                } else if user_id == "u1" && report == "missing" {
+                    Err(CoreError::missing())
+                } else if user_id == "u2" {
+                    Ok(Vec::new())
+                } else {
+                    Err(CoreError::forbidden(
+                        "report_access_denied: Caller lacks read permission for this report",
+                    ))
+                }
+            })
+        }
+        fn fetch_report_dataset<'a>(
+            &'a self,
+            user_id: &'a str,
+            project: &'a str,
+            report: &'a str,
+            dataset: &'a str,
+        ) -> BoxFuture<'a, CoreResult<ReportDatasetMaterial>> {
+            Box::pin(async move {
+                if user_id == "u1" && project == "proj1" && report == "rep1" && dataset == "data1" {
+                    Ok(ReportDatasetMaterial {
+                        bytes: br#"[{"count":2,"name":"one"}]"#.to_vec(),
+                        is_restricted: true,
+                        row_count: 1,
+                        lineage_sha256: "b".repeat(64),
+                        lineage: ReportLineage {
+                            calculation_id: "calc1".into(),
+                            calculation_version: 1,
+                            inputs: vec![ReportInputRef {
+                                schema: "items".into(),
+                                version: 1,
+                            }],
+                            source_watermark: [(
+                                "items".into(),
+                                ReportWatermark {
+                                    records: 2,
+                                    last_received_at: None,
+                                },
+                            )]
+                            .into(),
+                            filters: json!({}),
+                            calculated_at: "2026-11-24T00:00:00Z".into(),
+                        },
+                    })
+                } else {
+                    Err(CoreError::forbidden(
+                        "report_access_denied: Caller lacks read permission for this dataset",
+                    ))
+                }
+            })
+        }
         fn render_question_visual<'a>(
             &'a self,
             _user_id: &'a str,
@@ -366,6 +444,63 @@ async fn reports_picker_and_report_source_enforce_permissions_and_unconfigured_5
     assert_eq!(st, StatusCode::OK);
     assert_eq!(picker["items"].as_array().unwrap().len(), 1);
     assert_eq!(picker["items"][0]["report"], "rep1");
+    assert!(picker["items"][0]["dataset"].is_null());
+
+    // Existing picker can fetch caller-readable dataset descriptors for one explicit report.
+    let (st, datasets) = call(
+        &app,
+        "GET",
+        "/reports/picker?project=proj1&report=rep1",
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(datasets["items"].as_array().unwrap().len(), 1);
+    assert_eq!(datasets["items"][0]["dataset"]["dataset_id"], "data1");
+    assert_eq!(datasets["items"][0]["project"], "proj1");
+    assert_eq!(datasets["items"][0]["report"], "rep1");
+
+    let (st, no_datasets) = call(
+        &app,
+        "GET",
+        "/reports/picker?project=proj1&report=rep1",
+        Some("u2"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(no_datasets["items"].as_array().unwrap().len(), 0);
+
+    let (st, _) = call(
+        &app,
+        "GET",
+        "/reports/picker?project=proj1&report=missing",
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, _) = call(
+        &app,
+        "GET",
+        "/reports/picker?project=proj1&report=rep1",
+        Some("u3"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, _) = call(&app, "GET", "/reports/picker?report=rep1", Some("u1"), None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, _) = call(
+        &app,
+        "GET",
+        "/reports/picker?project=proj1&report=../rep1",
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
 
     let (_, s1) = call(
         &app,
@@ -384,13 +519,47 @@ async fn reports_picker_and_report_source_enforce_permissions_and_unconfigured_5
         Some(json!({
             "kind": "report",
             "filename": "Q4 Metrics",
-            "external_ref": "proj1/rep1",
+            "external_ref": "proj1/rep1/data1",
             "is_restricted": false
         })),
     )
     .await;
     assert_eq!(st, StatusCode::CREATED);
     assert_eq!(src["is_restricted"], true);
+    assert_eq!(
+        src["size_bytes"],
+        br#"[{"count":2,"name":"one"}]"#.len() as i64
+    );
+    assert!(!src["sha256"].as_str().unwrap().is_empty());
+
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid1}/sources"),
+        Some("u1"),
+        Some(json!({
+            "kind": "report",
+            "filename": "Invalid",
+            "external_ref": "proj1/../data1"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid1}/sources"),
+        Some("u1"),
+        Some(json!({
+            "kind": "report",
+            "filename": "Invalid",
+            "external_ref": "proj1/rep1/data1",
+            "fsm_ref": "foreign/blob"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
 
     let (_, s2) = call(
         &app,
@@ -409,7 +578,7 @@ async fn reports_picker_and_report_source_enforce_permissions_and_unconfigured_5
         Some(json!({
             "kind": "report",
             "filename": "Q4 Metrics",
-            "external_ref": "proj1/rep1"
+            "external_ref": "proj1/rep1/data1"
         })),
     )
     .await;

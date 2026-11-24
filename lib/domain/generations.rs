@@ -272,7 +272,8 @@ pub async fn start_generation(
 
     let mut tx = store.db.begin().await?;
     let source_rows = sqlx::query(
-        "SELECT id, filename, mime_type, size_bytes, sha256, source_kind, selection_kind, selection_spec
+        "SELECT id, filename, mime_type, size_bytes, sha256, source_kind, selection_kind, selection_spec, external_ref,
+                report_calculation_id, report_calculation_version, report_row_count, report_lineage_sha256
          FROM sources WHERE study_id = $1 AND status = 'ready' ORDER BY created_at ASC, id ASC",
     )
     .bind(study_id)
@@ -311,8 +312,9 @@ pub async fn start_generation(
     for source in source_rows {
         sqlx::query(
             "INSERT INTO generation_job_sources
-             (job_id, source_id, filename, mime_type, size_bytes, sha256, source_kind, selection_kind, selection_spec)
-             VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             (job_id, source_id, filename, mime_type, size_bytes, sha256, source_kind, selection_kind, selection_spec, external_ref,
+              report_calculation_id, report_calculation_version, report_row_count, report_lineage_sha256)
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
         )
             .bind(&job_id)
             .bind(source.get::<String, _>("id"))
@@ -323,8 +325,27 @@ pub async fn start_generation(
             .bind(source.get::<String, _>("source_kind"))
             .bind(source.get::<String, _>("selection_kind"))
             .bind(source.get::<String, _>("selection_spec"))
+            .bind(source.get::<String, _>("external_ref"))
+            .bind(source.get::<String, _>("report_calculation_id"))
+            .bind(source.get::<i64, _>("report_calculation_version"))
+            .bind(source.get::<i64, _>("report_row_count"))
+            .bind(source.get::<String, _>("report_lineage_sha256"))
             .execute(&mut *tx)
             .await?;
+        if source.get::<String, _>("source_kind") == "report"
+            && (source
+                .get::<String, _>("report_calculation_id")
+                .trim()
+                .is_empty()
+                || source
+                    .get::<String, _>("report_lineage_sha256")
+                    .trim()
+                    .is_empty())
+        {
+            return Err(Error::unprocessable(
+                "source_unavailable: A Reports dataset has no frozen source snapshot",
+            ));
+        }
     }
     tx.commit().await?;
 
@@ -622,10 +643,15 @@ pub async fn process_job(
     let prep_started_at = now();
     let source_rows = sqlx::query(
         "SELECT gjs.source_id, gjs.filename, gjs.mime_type, gjs.size_bytes, gjs.sha256,
-                gjs.source_kind, gjs.selection_kind, gjs.selection_spec,
+                gjs.source_kind, gjs.selection_kind, gjs.selection_spec, gjs.external_ref,
+                gjs.report_calculation_id, gjs.report_calculation_version, gjs.report_row_count, gjs.report_lineage_sha256,
                 s.owner_id, s.status, s.fsm_ref, s.source_kind AS current_source_kind,
                 s.mime_type AS current_mime_type, s.size_bytes AS current_size_bytes,
-                s.sha256 AS current_sha256, s.is_restricted, s.external_ref,
+                s.sha256 AS current_sha256, s.is_restricted, s.external_ref AS current_external_ref,
+                s.report_calculation_id AS current_report_calculation_id,
+                s.report_calculation_version AS current_report_calculation_version,
+                s.report_row_count AS current_report_row_count,
+                s.report_lineage_sha256 AS current_report_lineage_sha256,
                 s.created_at, s.updated_at
          FROM generation_job_sources gjs JOIN sources s ON s.id = gjs.source_id
          WHERE gjs.job_id = $1 ORDER BY gjs.source_id",
@@ -665,7 +691,14 @@ pub async fn process_job(
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         };
-        if source_owner != caller.user_id || status != "ready" || fsm_ref.trim().is_empty() {
+        let external_ref: String = row.get("external_ref");
+        let current_external_ref: String = row.get("current_external_ref");
+        let is_report = current_source_kind == "report";
+        if source_owner != caller.user_id
+            || status != "ready"
+            || (!is_report && fsm_ref.trim().is_empty())
+            || external_ref != current_external_ref
+        {
             return fail_job(
                 store,
                 job_id,
@@ -678,6 +711,15 @@ pub async fn process_job(
             || current_mime_type != mime_type
             || current_size_bytes != size_bytes
             || current_sha256 != sha256
+            || (is_report
+                && (row.get::<String, _>("current_report_calculation_id")
+                    != row.get::<String, _>("report_calculation_id")
+                    || row.get::<i64, _>("current_report_calculation_version")
+                        != row.get::<i64, _>("report_calculation_version")
+                    || row.get::<i64, _>("current_report_row_count")
+                        != row.get::<i64, _>("report_row_count")
+                    || row.get::<String, _>("current_report_lineage_sha256")
+                        != row.get::<String, _>("report_lineage_sha256")))
         {
             return fail_job(
                 store,
@@ -687,28 +729,99 @@ pub async fn process_job(
             )
             .await;
         }
-        if studies::ensure_source_blob_readable(store, caller, &job.study_id, &source)
-            .await
-            .is_err()
-        {
-            return fail_job(
-                store,
-                job_id,
-                "source_unavailable",
-                "A selected source is not authorized for this generation",
-            )
-            .await;
-        }
-        let bytes = match store.fsm.get_bytes(&fsm_ref).await {
-            Ok(bytes) => bytes,
-            Err(_) => {
+        let bytes = if is_report {
+            let (project, report, dataset) = match studies::parse_report_external_ref(&external_ref)
+            {
+                Ok(parts) => parts,
+                Err(_) => {
+                    return fail_job(
+                        store,
+                        job_id,
+                        "source_unavailable",
+                        "A selected Reports dataset is no longer available",
+                    )
+                    .await;
+                }
+            };
+            let checked = if let Ok(checked) = store
+                .reports
+                .check_report_access(&caller.user_id, project, report)
+                .await
+            {
+                checked
+            } else {
                 return fail_job(
                     store,
                     job_id,
                     "source_unavailable",
-                    "A selected source is no longer available for this generation",
+                    "A selected Reports dataset is no longer authorized",
                 )
                 .await;
+            };
+            let material = match store
+                .reports
+                .fetch_report_dataset(&caller.user_id, project, report, dataset)
+                .await
+            {
+                Ok(material) => material,
+                Err(_) => {
+                    return fail_job(
+                        store,
+                        job_id,
+                        "source_unavailable",
+                        "A selected Reports dataset is no longer authorized",
+                    )
+                    .await;
+                }
+            };
+            if (checked.is_restricted || material.is_restricted) != source.is_restricted {
+                return fail_job(
+                    store,
+                    job_id,
+                    "source_unavailable",
+                    "A selected Reports dataset is no longer authorized",
+                )
+                .await;
+            }
+            if material.lineage.calculation_id != row.get::<String, _>("report_calculation_id")
+                || material.lineage.calculation_version
+                    != row.get::<i64, _>("report_calculation_version")
+                || material.row_count != row.get::<i64, _>("report_row_count")
+                || material.lineage_sha256 != row.get::<String, _>("report_lineage_sha256")
+            {
+                return fail_job(
+                    store,
+                    job_id,
+                    "source_integrity_failed",
+                    "A selected Reports dataset no longer matches its saved calculation lineage",
+                )
+                .await;
+            }
+            material.bytes
+        } else {
+            if studies::ensure_source_blob_readable(store, caller, &job.study_id, &source)
+                .await
+                .is_err()
+            {
+                return fail_job(
+                    store,
+                    job_id,
+                    "source_unavailable",
+                    "A selected source is not authorized for this generation",
+                )
+                .await;
+            }
+            match store.fsm.get_bytes(&fsm_ref).await {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    return fail_job(
+                        store,
+                        job_id,
+                        "source_unavailable",
+                        "A selected source is no longer available for this generation",
+                    )
+                    .await;
+                }
             }
         };
         if size_bytes < 0
@@ -724,35 +837,84 @@ pub async fn process_job(
             )
             .await;
         }
-        let (selected, selection) =
-            match select_text_content(&bytes, &mime_type, &selection_kind, &selection_spec) {
-                Ok(selected) => selected,
-                Err(error) => {
-                    let message = if error.1.starts_with("unsupported_source") {
-                        "This source type requires the supported Cortex file-selection bridge"
-                    } else {
-                        "A saved source selection is invalid"
-                    };
-                    let code = if error.1.starts_with("unsupported_source") {
-                        "unsupported_source_selection"
-                    } else {
-                        "invalid_source_selection"
-                    };
-                    return fail_job(store, job_id, code, message).await;
-                }
+        let local_text = current_source_kind == "report" || mime_type.starts_with("text/");
+        if local_text {
+            let (selected, selection) =
+                match select_text_content(&bytes, &mime_type, &selection_kind, &selection_spec) {
+                    Ok(selected) => selected,
+                    Err(error) => {
+                        let message = if error.1.starts_with("unsupported_source") {
+                            "This source type requires the supported Cortex file-selection bridge"
+                        } else {
+                            "A saved source selection is invalid"
+                        };
+                        let code = if error.1.starts_with("unsupported_source") {
+                            "unsupported_source_selection"
+                        } else {
+                            "invalid_source_selection"
+                        };
+                        return fail_job(store, job_id, code, message).await;
+                    }
+                };
+            let suffix = match mime_type.as_str() {
+                "text/markdown" => "md",
+                "text/csv" => "csv",
+                _ => "txt",
             };
-        let suffix = match mime_type.as_str() {
-            "text/markdown" => "md",
-            "text/csv" => "csv",
-            _ => "txt",
-        };
-        sources.push(GenerationSource {
-            source_id: source_id.clone(),
-            filename: format!("source-{source_id}.{suffix}"),
-            mime_type: "text/plain".into(),
-            selection,
-            bytes: selected.into_bytes(),
-        });
+            sources.push(GenerationSource {
+                source_id: source_id.clone(),
+                filename: format!("source-{source_id}.{suffix}"),
+                mime_type: "text/plain".into(),
+                selection,
+                selection_kind: "all".into(),
+                selection_spec: String::new(),
+                bytes: selected.into_bytes(),
+            });
+        } else {
+            let normalized_mime = mime_type.trim().to_ascii_lowercase();
+            let selection_supported = match selection_kind.as_str() {
+                "all" => true,
+                "pages" => normalized_mime == "application/pdf",
+                "passages" => {
+                    normalized_mime
+                        == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                }
+                "intervals" => normalized_mime.starts_with("audio/"),
+                _ => false,
+            };
+            if !selection_supported {
+                return fail_job(
+                    store,
+                    job_id,
+                    "invalid_source_selection",
+                    "The saved selection does not match the source type",
+                )
+                .await;
+            }
+            let suffix = match normalized_mime.as_str() {
+                "application/pdf" => "pdf",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+                "audio/wav" | "audio/x-wav" => "wav",
+                "audio/mpeg" => "mp3",
+                _ if normalized_mime.starts_with("image/") => "img",
+                _ if normalized_mime.starts_with("audio/") => "audio",
+                _ => "bin",
+            };
+            let selection = if selection_kind == "all" {
+                "all".to_string()
+            } else {
+                format!("{selection_kind}:{selection_spec}")
+            };
+            sources.push(GenerationSource {
+                source_id: source_id.clone(),
+                filename: format!("source-{source_id}.{suffix}"),
+                mime_type: mime_type.clone(),
+                selection,
+                selection_kind,
+                selection_spec,
+                bytes,
+            });
+        }
         source_ids.push(source_id);
     }
     let allowed_sources: HashSet<String> = source_ids.iter().cloned().collect();
