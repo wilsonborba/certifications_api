@@ -323,6 +323,17 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     assert!(!detail_str.contains("aortic valve"));
     assert!(!detail_str.contains("secret-internal-draft-filename"));
     assert_eq!(detail["performance"]["basis"], "all_completed_attempts");
+    assert_eq!(detail["performance"]["score_distribution_denominator"], 0);
+    assert!(
+        detail["performance"]["score_distribution"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        detail["performance"]["score_distribution_report_view"]["visual"]["mapping"]["bucket"][0],
+        "score_band"
+    );
 
     let (st, pub_qs) = call(
         &app,
@@ -352,6 +363,27 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     .await
     .unwrap();
 
+    for (id, user, correct, started) in [
+        ("att-2", "learner-2", 49, 200),
+        ("att-3", "learner-3", 50, 300),
+        ("att-4", "learner-4", 79, 400),
+        ("att-5", "learner-5", 80, 500),
+    ] {
+        sqlx::query(
+            "INSERT INTO attempts(id, owner_id, quiz_id, quiz_version_id, status, score_correct, score_total, started_at, completed_at)
+             VALUES($1, $2, $3, $4, 'completed', $5, 100, $6, $6 + 45)",
+        )
+        .bind(id)
+        .bind(user)
+        .bind(&quiz_id)
+        .bind(&qver_id)
+        .bind(correct)
+        .bind(started)
+        .execute(&store.db)
+        .await
+        .unwrap();
+    }
+
     let (st, stats) = call(
         &app,
         "GET",
@@ -361,8 +393,37 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     )
     .await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(stats["completed_attempt_count"], 1);
-    assert_eq!(stats["distinct_participants"], 1);
-    assert_eq!(stats["average_score_pct"], 100.0);
+    assert_eq!(stats["completed_attempt_count"], 5);
+    assert_eq!(stats["distinct_participants"], 5);
+    assert_eq!(stats["average_score_pct"], 71.6);
+    assert_eq!(stats["average_score_denominator"], 5);
     assert_eq!(stats["typical_duration_sec"], 45);
+    assert_eq!(stats["duration_denominator"], 5);
+    assert_eq!(stats["score_distribution_denominator"], 5);
+    assert_eq!(stats["score_distribution"][0]["score_band"], "0-49%");
+    assert_eq!(stats["score_distribution"][0]["attempt_count"], 1);
+    assert_eq!(stats["score_distribution"][1]["score_band"], "50-79%");
+    assert_eq!(stats["score_distribution"][1]["attempt_count"], 2);
+    assert_eq!(stats["score_distribution"][2]["score_band"], "80-100%");
+    assert_eq!(stats["score_distribution"][2]["attempt_count"], 2);
+    assert_eq!(
+        stats["score_distribution_report_view"]["rows"][0]["score_band"],
+        "0-49%"
+    );
+
+    sqlx::query("UPDATE quizzes SET visibility = 'private' WHERE id = $1")
+        .bind(&quiz_id)
+        .execute(&store.db)
+        .await
+        .unwrap();
+    let (st, private_stats) = call(
+        &app,
+        "GET",
+        &format!("/quizzes/{quiz_id}/statistics"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert!(private_stats.get("score_distribution").is_none());
 }

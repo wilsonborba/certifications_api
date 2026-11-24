@@ -44,12 +44,44 @@ pub struct AttemptView {
 pub struct AttemptHistoryItem {
     pub id: String,
     pub quiz_id: String,
+    pub quiz_title: String,
+    pub quiz_origin: String,
     pub quiz_version_id: String,
     pub status: String,
     pub score_correct: i64,
     pub score_total: i64,
     pub started_at: i64,
     pub completed_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AttemptHistoryFilter {
+    pub search: Option<String>,
+    pub started_from: Option<i64>,
+    pub started_to: Option<i64>,
+    pub quiz_id: Option<String>,
+    pub tag: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AttemptHistoryPage {
+    pub items: Vec<AttemptHistoryItem>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PersonalStatistics {
+    pub created_quiz_count: i64,
+    pub completed_attempt_count: i64,
+    pub distinct_quizzes_attempted: i64,
+    pub all_attempt_mean_score_pct: Option<f64>,
+    pub all_attempt_score_denominator: i64,
+    pub latest_attempt_per_quiz_mean_score_pct: Option<f64>,
+    pub latest_attempt_per_quiz_score_denominator: i64,
+    pub average_completion_time_seconds: Option<f64>,
+    pub completion_time_denominator: i64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -318,27 +350,64 @@ pub async fn get_attempt(
 pub async fn list_my_attempts(
     store: &Store,
     caller: &CallerIdentity,
+    filter: &AttemptHistoryFilter,
     limit: i64,
     offset: i64,
-) -> Result<Vec<AttemptHistoryItem>> {
-    let rows = sqlx::query(
-        "SELECT id, quiz_id, quiz_version_id, status, score_correct, score_total, started_at, completed_at
-         FROM attempts
-         WHERE owner_id = $1
-         ORDER BY started_at DESC
-         LIMIT $2 OFFSET $3",
-    )
-    .bind(&caller.user_id)
-    .bind(limit.clamp(1, 50))
-    .bind(offset.max(0))
-    .fetch_all(&store.db)
-    .await?;
+) -> Result<AttemptHistoryPage> {
+    if filter
+        .started_from
+        .zip(filter.started_to)
+        .is_some_and(|(from, to)| from > to)
+    {
+        return Err(Error::unprocessable(
+            "invalid_date_range: started_from must be less than or equal to started_to",
+        ));
+    }
 
-    Ok(rows
+    let search = filter
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let quiz_id = filter
+        .quiz_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let tag = filter
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let mut count = sqlx::QueryBuilder::<sqlx::Any>::new(
+        "SELECT COUNT(*) FROM attempts a JOIN quiz_versions qv ON qv.id = a.quiz_version_id WHERE a.owner_id = ",
+    );
+    count.push_bind(&caller.user_id);
+    push_history_filters(&mut count, filter, search, quiz_id, tag);
+    let total: i64 = count.build_query_scalar().fetch_one(&store.db).await?;
+
+    let limit = limit.clamp(1, 50);
+    let offset = offset.max(0);
+    let mut query = sqlx::QueryBuilder::<sqlx::Any>::new(
+        "SELECT a.id, a.quiz_id, qv.title AS quiz_title, q.origin AS quiz_origin, a.quiz_version_id, a.status, a.score_correct, a.score_total, a.started_at, a.completed_at
+         FROM attempts a JOIN quiz_versions qv ON qv.id = a.quiz_version_id JOIN quizzes q ON q.id = a.quiz_id WHERE a.owner_id = ",
+    );
+    query.push_bind(&caller.user_id);
+    push_history_filters(&mut query, filter, search, quiz_id, tag);
+    query
+        .push(" ORDER BY a.started_at DESC, a.id DESC LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    let rows = query.build().fetch_all(&store.db).await?;
+
+    let items = rows
         .into_iter()
         .map(|r| AttemptHistoryItem {
             id: r.get("id"),
             quiz_id: r.get("quiz_id"),
+            quiz_title: r.get("quiz_title"),
+            quiz_origin: r.get("quiz_origin"),
             quiz_version_id: r.get("quiz_version_id"),
             status: r.get("status"),
             score_correct: r.get("score_correct"),
@@ -346,7 +415,86 @@ pub async fn list_my_attempts(
             started_at: r.get("started_at"),
             completed_at: r.try_get("completed_at").ok(),
         })
-        .collect())
+        .collect();
+    Ok(AttemptHistoryPage {
+        items,
+        total,
+        limit,
+        offset,
+    })
+}
+
+fn push_history_filters<'a>(
+    query: &mut sqlx::QueryBuilder<'a, sqlx::Any>,
+    filter: &'a AttemptHistoryFilter,
+    search: Option<&'a str>,
+    quiz_id: Option<&'a str>,
+    tag: Option<&'a str>,
+) {
+    if let Some(search) = search {
+        query
+            .push(" AND LOWER(qv.title) LIKE LOWER(")
+            .push_bind(format!("%{search}%"))
+            .push(")");
+    }
+    if let Some(from) = filter.started_from {
+        query.push(" AND a.started_at >= ").push_bind(from);
+    }
+    if let Some(to) = filter.started_to {
+        query.push(" AND a.started_at <= ").push_bind(to);
+    }
+    if let Some(quiz_id) = quiz_id {
+        query.push(" AND a.quiz_id = ").push_bind(quiz_id);
+    }
+    if let Some(tag) = tag {
+        query.push(
+            " AND EXISTS (SELECT 1 FROM quiz_tags qt JOIN tags t ON t.id = qt.tag_id WHERE qt.quiz_id = a.quiz_id AND t.slug = ",
+        )
+        .push_bind(tag)
+        .push(")");
+    }
+}
+
+pub async fn personal_statistics(
+    store: &Store,
+    caller: &CallerIdentity,
+) -> Result<PersonalStatistics> {
+    let created_quiz_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM quizzes WHERE owner_id = $1")
+            .bind(&caller.user_id)
+            .fetch_one(&store.db)
+            .await?;
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS completed_attempt_count,
+                COUNT(DISTINCT quiz_id) AS distinct_quizzes_attempted,
+                AVG(CASE WHEN score_total > 0 THEN score_correct * 100.0 / score_total END) AS all_mean,
+                SUM(CASE WHEN score_total > 0 THEN 1 ELSE 0 END) AS all_n,
+                AVG(CASE WHEN latest_rank = 1 AND score_total > 0 THEN score_correct * 100.0 / score_total END) AS latest_mean,
+                SUM(CASE WHEN latest_rank = 1 AND score_total > 0 THEN 1 ELSE 0 END) AS latest_n,
+                AVG(CASE WHEN completed_at >= started_at THEN completed_at - started_at END) AS duration_mean,
+                SUM(CASE WHEN completed_at >= started_at THEN 1 ELSE 0 END) AS duration_n
+         FROM (
+             SELECT a.*, ROW_NUMBER() OVER (
+                 PARTITION BY quiz_id
+                 ORDER BY (completed_at IS NULL) ASC, completed_at DESC, started_at DESC, id DESC
+             ) AS latest_rank
+             FROM attempts a WHERE owner_id = $1 AND status = 'completed'
+         ) completed",
+    )
+    .bind(&caller.user_id)
+    .fetch_one(&store.db)
+    .await?;
+    Ok(PersonalStatistics {
+        created_quiz_count,
+        completed_attempt_count: row.get("completed_attempt_count"),
+        distinct_quizzes_attempted: row.get("distinct_quizzes_attempted"),
+        all_attempt_mean_score_pct: row.try_get("all_mean").ok(),
+        all_attempt_score_denominator: row.try_get("all_n").unwrap_or(0),
+        latest_attempt_per_quiz_mean_score_pct: row.try_get("latest_mean").ok(),
+        latest_attempt_per_quiz_score_denominator: row.try_get("latest_n").unwrap_or(0),
+        average_completion_time_seconds: row.try_get("duration_mean").ok(),
+        completion_time_denominator: row.try_get("duration_n").unwrap_or(0),
+    })
 }
 
 pub async fn save_answer(

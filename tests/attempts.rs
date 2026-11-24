@@ -288,8 +288,83 @@ async fn taking_never_leaks_keys_grading_and_activity_are_idempotent_with_three_
         "complete_observed"
     );
 
+    // Repeat attempt remains a separate sample and gets a deterministic latest slot.
+    let (st, repeated) = call(
+        &app,
+        "POST",
+        &format!("/quizzes/{quiz_id}/attempts"),
+        "learner-1",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let repeated_id = repeated["id"].as_str().unwrap();
+    let (st, repeated_result) = call(
+        &app,
+        "POST",
+        &format!("/attempts/{repeated_id}/submit"),
+        "learner-1",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(repeated_result["score_correct"], 0);
+    assert_eq!(repeated_result["score_total"], 1);
+
     // History lists completed attempt.
     let (st, hist) = call(&app, "GET", "/attempts", "learner-1", None).await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(hist["items"].as_array().unwrap().len(), 1);
+    assert_eq!(hist["items"].as_array().unwrap().len(), 2);
+    assert_eq!(hist["total"], 2);
+    assert_eq!(hist["items"][0]["quiz_title"], "Attempts Quiz");
+    assert_eq!(hist["items"][0]["quiz_origin"], "supplied_by_creator");
+
+    let (st, filtered) = call(
+        &app,
+        "GET",
+        &format!("/attempts?q=Attempts&tag=physics&quiz_id={quiz_id}&started_from=100&started_to=9999999999&limit=5"),
+        "learner-1",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(filtered["total"], 2);
+    assert_eq!(filtered["items"].as_array().unwrap().len(), 2);
+
+    let (st, page_two) = call(&app, "GET", "/attempts?limit=1&offset=1", "learner-1", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(page_two["total"], 2);
+    assert_eq!(page_two["items"].as_array().unwrap().len(), 1);
+
+    let (st, _) = call(
+        &app,
+        "GET",
+        "/attempts?started_from=200&started_to=100",
+        "learner-1",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let (st, own_stats) = call(&app, "GET", "/attempts/overview", "learner-1", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(own_stats["created_quiz_count"], 0);
+    assert_eq!(own_stats["completed_attempt_count"], 2);
+    assert_eq!(own_stats["distinct_quizzes_attempted"], 1);
+    assert_eq!(own_stats["all_attempt_mean_score_pct"], 50.0);
+    assert_eq!(own_stats["all_attempt_score_denominator"], 2);
+    assert_eq!(
+        own_stats["latest_attempt_per_quiz_mean_score_pct"],
+        hist["items"][0]["score_correct"].as_i64().unwrap() as f64 * 100.0
+    );
+    assert_eq!(own_stats["latest_attempt_per_quiz_score_denominator"], 1);
+
+    let (st, other_stats) = call(&app, "GET", "/attempts/overview", "other-user", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(other_stats["completed_attempt_count"], 0);
+    assert!(other_stats["all_attempt_mean_score_pct"].is_null());
+    assert_eq!(other_stats["all_attempt_score_denominator"], 0);
+    let (st, other_history) = call(&app, "GET", "/attempts", "other-user", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(other_history["total"], 0);
 }

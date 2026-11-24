@@ -21,8 +21,49 @@ pub struct PublicQuizStats {
     pub completed_attempt_count: i64,
     pub distinct_participants: i64,
     pub average_score_pct: Option<f64>,
+    pub average_score_denominator: i64,
     pub typical_duration_sec: Option<i64>,
+    pub duration_denominator: i64,
     pub basis: String,
+    pub score_distribution_denominator: i64,
+    pub score_distribution: Vec<ScoreBandCount>,
+    pub score_distribution_report_view: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ScoreBandCount {
+    pub score_band: String,
+    pub attempt_count: i64,
+}
+
+fn score_distribution_page(quiz_id: &str, rows: &[ScoreBandCount]) -> serde_json::Value {
+    serde_json::json!({
+        "descriptor": {
+            "dataset_id": format!("cert:quiz:{quiz_id}:score-distribution"),
+            "title": "Quiz score distribution",
+            "description": "Completed attempt scores grouped into fixed percentage bands",
+            "equation": null,
+            "fields": [
+                {"name":"score_band", "label":"Score band", "type":"string", "role":"dimension"},
+                {"name":"attempt_count", "label":"Attempts", "type":"integer", "role":"measure", "unit":"attempts"}
+            ],
+            "filters": [],
+            "data_tier": "live",
+            "can_view": true,
+            "visibility": "public",
+            "meta": {"source":"Certifications API", "tier":"live", "freshness_mode":"live"}
+        },
+        "rows": rows,
+        "offset": 0,
+        "limit": rows.len(),
+        "total_rows": rows.len(),
+        "visual": {
+            "template":"cert-score-distribution",
+            "version":1,
+            "mapping":{"bucket":["score_band"],"attempts":["attempt_count"]},
+            "options":{}
+        }
+    })
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -414,7 +455,9 @@ pub async fn get_public_quiz_statistics(store: &Store, quiz_id: &str) -> Result<
         "SELECT COUNT(*) AS completed_cnt,
                 COUNT(DISTINCT owner_id) AS distinct_users,
                 AVG(CASE WHEN score_total > 0 THEN (score_correct * 100.0) / score_total END) AS avg_pct,
-                AVG(CASE WHEN completed_at IS NOT NULL THEN completed_at - started_at END) AS avg_dur
+                SUM(CASE WHEN score_total > 0 THEN 1 ELSE 0 END) AS score_n,
+                AVG(CASE WHEN completed_at >= started_at THEN completed_at - started_at END) AS avg_dur,
+                SUM(CASE WHEN completed_at >= started_at THEN 1 ELSE 0 END) AS duration_n
          FROM attempts
          WHERE quiz_id = $1 AND status = 'completed'",
     )
@@ -424,6 +467,7 @@ pub async fn get_public_quiz_statistics(store: &Store, quiz_id: &str) -> Result<
 
     let completed_attempt_count: i64 = row.get("completed_cnt");
     let distinct_participants: i64 = row.get("distinct_users");
+    let average_score_denominator: i64 = row.try_get("score_n").unwrap_or(0);
     let average_score_pct: Option<f64> = if completed_attempt_count > 0 {
         row.try_get("avg_pct").ok()
     } else {
@@ -436,14 +480,55 @@ pub async fn get_public_quiz_statistics(store: &Store, quiz_id: &str) -> Result<
     } else {
         None
     };
+    let duration_denominator: i64 = row.try_get("duration_n").unwrap_or(0);
+
+    let distribution_rows = sqlx::query(
+        "SELECT CASE
+                    WHEN score_correct * 100.0 / score_total < 50 THEN '0-49%'
+                    WHEN score_correct * 100.0 / score_total < 80 THEN '50-79%'
+                    ELSE '80-100%'
+                END AS score_band,
+                COUNT(*) AS attempt_count
+         FROM attempts
+         WHERE quiz_id = $1 AND status = 'completed' AND score_total > 0
+         GROUP BY CASE
+                    WHEN score_correct * 100.0 / score_total < 50 THEN '0-49%'
+                    WHEN score_correct * 100.0 / score_total < 80 THEN '50-79%'
+                    ELSE '80-100%'
+                  END",
+    )
+    .bind(quiz_id)
+    .fetch_all(&store.db)
+    .await?;
+    let band_order = ["0-49%", "50-79%", "80-100%"];
+    let mut score_distribution = distribution_rows
+        .into_iter()
+        .map(|r| ScoreBandCount {
+            score_band: r.get("score_band"),
+            attempt_count: r.get("attempt_count"),
+        })
+        .collect::<Vec<_>>();
+    score_distribution.sort_by_key(|r| {
+        band_order
+            .iter()
+            .position(|band| *band == r.score_band)
+            .unwrap_or(3)
+    });
+    let score_distribution_denominator = score_distribution.iter().map(|r| r.attempt_count).sum();
+    let score_distribution_report_view = score_distribution_page(quiz_id, &score_distribution);
 
     Ok(PublicQuizStats {
         quiz_id: quiz_id.to_string(),
         completed_attempt_count,
         distinct_participants,
         average_score_pct,
+        average_score_denominator,
         typical_duration_sec,
+        duration_denominator,
         basis: "all_completed_attempts".into(),
+        score_distribution_denominator,
+        score_distribution,
+        score_distribution_report_view,
     })
 }
 
