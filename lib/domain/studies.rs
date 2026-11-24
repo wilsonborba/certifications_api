@@ -14,6 +14,7 @@ use sqlx::Row;
 
 pub const STUDY_DRAFT_TTL_SECONDS: i64 = 1800;
 pub const MAX_PAGE_LIMIT: i64 = 50;
+pub const MAX_SELECTION_RANGES: usize = 100;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct StudySummary {
@@ -144,9 +145,19 @@ fn validate_selection(kind: &str, spec: &str) -> Result<()> {
             "invalid_selection: Selection spec is required when kind is not all",
         ));
     }
+    if kind == "all" && !spec.trim().is_empty() {
+        return Err(Error::unprocessable(
+            "invalid_selection: Full-file selection must not include a spec",
+        ));
+    }
     if spec.len() > 2000 {
         return Err(Error::unprocessable(
             "invalid_selection: Selection spec is too long",
+        ));
+    }
+    if kind != "all" && spec.split(',').count() > MAX_SELECTION_RANGES {
+        return Err(Error::unprocessable(
+            "invalid_selection: Selection cannot contain more than 100 ranges",
         ));
     }
     Ok(())
@@ -306,7 +317,7 @@ async fn authorize_fsm_ref(
     ))
 }
 
-async fn ensure_source_blob_readable(
+pub(crate) async fn ensure_source_blob_readable(
     store: &Store,
     caller: &CallerIdentity,
     study_id: &str,
@@ -1206,4 +1217,19 @@ pub async fn get_analysis(
         });
     }
     analyze_study(store, caller, study_id).await
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::{MAX_SELECTION_RANGES, validate_selection};
+
+    #[test]
+    fn selection_specs_enforce_the_shared_size_and_range_caps() {
+        let at_limit = vec!["p1:0-1"; MAX_SELECTION_RANGES].join(",");
+        assert!(validate_selection("passages", &at_limit).is_ok());
+        let over_limit = format!("{at_limit},p1:2-3");
+        assert!(validate_selection("passages", &over_limit).is_err());
+        assert!(validate_selection("all", "not-empty").is_err());
+        assert!(validate_selection("passages", &"x".repeat(2001)).is_err());
+    }
 }

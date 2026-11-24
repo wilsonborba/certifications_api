@@ -12,6 +12,7 @@ use crate::{
         catalog,
         estimates::{self, StepMeasurement},
         guardrail,
+        studies::{self, SourceSummary},
     },
 };
 use axum::http::StatusCode;
@@ -33,6 +34,7 @@ pub struct GenerationJobSummary {
     pub requested_count: i64,
     pub queue_position: i64,
     pub saved_count: i64,
+    pub stop_requested: bool,
     pub error_code: String,
     pub queued_at: i64,
     pub started_at: Option<i64>,
@@ -140,7 +142,7 @@ pub async fn get_job(
     job_id: &str,
 ) -> Result<GenerationJobSummary> {
     let row = sqlx::query(
-        "SELECT id, owner_id, study_id, quiz_id, status, language, requested_count, queue_position, saved_count, error_code, queued_at, started_at, finished_at
+        "SELECT id, owner_id, study_id, quiz_id, status, language, requested_count, queue_position, saved_count, stopped_reason, error_code, queued_at, started_at, finished_at
          FROM generation_jobs WHERE id = $1",
     )
     .bind(job_id)
@@ -158,6 +160,7 @@ pub async fn get_job(
         requested_count: row.get("requested_count"),
         queue_position: row.get("queue_position"),
         saved_count: row.get("saved_count"),
+        stop_requested: row.get::<String, _>("stopped_reason") == "user_stop_requested",
         error_code: row.get("error_code"),
         queued_at: row.get("queued_at"),
         started_at: row.get("started_at"),
@@ -182,14 +185,60 @@ pub async fn start_generation(
         ));
     }
 
-    // Verify owned study and active sources.
-    let study_row = sqlx::query("SELECT owner_id FROM studies WHERE id = $1")
+    // Verify that the caller can start work from this study and expire stale drafts.
+    let study_row = sqlx::query("SELECT owner_id, status, expires_at FROM studies WHERE id = $1")
         .bind(study_id)
         .fetch_optional(&store.db)
         .await?
         .ok_or_else(Error::missing)?;
     let study_owner: String = study_row.get("owner_id");
     require_owner(caller, &study_owner)?;
+    let study_status: String = study_row.get("status");
+    let expires_at: Option<i64> = study_row.get("expires_at");
+    if study_status == "expired"
+        || (study_status == "draft" && expires_at.is_some_and(|expiry| now() > expiry))
+    {
+        if study_status == "draft" {
+            sqlx::query("UPDATE studies SET status = 'expired', updated_at = $1 WHERE id = $2 AND status = 'draft'")
+                .bind(now())
+                .bind(study_id)
+                .execute(&store.db)
+                .await?;
+        }
+        return Err(Error(
+            StatusCode::GONE,
+            "study_expired: Abandoned pre-generation study draft expired".into(),
+        ));
+    }
+    if !matches!(study_status.as_str(), "draft" | "active") {
+        return Err(Error(
+            StatusCode::CONFLICT,
+            "study_unavailable: Study cannot start a generation in its current state".into(),
+        ));
+    }
+
+    let target_quiz_id = input
+        .quiz_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned);
+    if let Some(quiz_id) = target_quiz_id.as_deref() {
+        let target_ok = sqlx::query(
+            "SELECT id FROM quizzes WHERE id = $1 AND owner_id = $2 AND study_id = $3 AND visibility = 'private'",
+        )
+        .bind(quiz_id)
+        .bind(&caller.user_id)
+        .bind(study_id)
+        .fetch_optional(&store.db)
+        .await?;
+        if target_ok.is_none() {
+            return Err(Error(
+                StatusCode::NOT_FOUND,
+                "quiz_not_available: Target quiz is not an owned private quiz in this study".into(),
+            ));
+        }
+    }
 
     // Idempotent retry on same idempotency_key.
     let idem = input.idempotency_key.trim();
@@ -250,7 +299,7 @@ pub async fn start_generation(
     .bind(&job_id)
     .bind(&caller.user_id)
     .bind(study_id)
-    .bind(&input.quiz_id)
+    .bind(&target_quiz_id)
     .bind(&input.language)
     .bind(input.count)
     .bind(idem)
@@ -310,6 +359,13 @@ fn select_text_content(
     kind: &str,
     spec: &str,
 ) -> Result<(String, String)> {
+    if spec.len() > 2000
+        || (kind != "all" && spec.split(',').count() > studies::MAX_SELECTION_RANGES)
+    {
+        return Err(Error::unprocessable(
+            "invalid_source_selection: Selection exceeds the shared size or range limit",
+        ));
+    }
     if !mime_type.starts_with("text/") {
         return Err(Error::unprocessable(
             "unsupported_source: Non-text sources require Cortex file selection support",
@@ -385,7 +441,7 @@ async fn fail_job(
     code: &str,
     message: &str,
 ) -> Result<GenerationJobSummary> {
-    sqlx::query(
+    let failed = sqlx::query(
         "UPDATE generation_jobs SET status = 'failed', error_code = $1, finished_at = $2 WHERE id = $3 AND status = 'running'",
     )
     .bind(code)
@@ -393,8 +449,44 @@ async fn fail_job(
     .bind(job_id)
     .execute(&store.db)
     .await?;
-    emit_event(store, job_id, "failed", message).await?;
+    if failed.rows_affected() > 0 {
+        emit_event(store, job_id, "failed", message).await?;
+    }
     Err(Error::unprocessable(format!("{code}: {message}")))
+}
+
+async fn stop_was_requested(store: &Store, job_id: &str) -> Result<bool> {
+    let reason: String =
+        sqlx::query_scalar("SELECT stopped_reason FROM generation_jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_one(&store.db)
+            .await?;
+    Ok(reason == "user_stop_requested")
+}
+
+async fn finish_requested_stop(
+    store: &Store,
+    caller: &CallerIdentity,
+    job_id: &str,
+) -> Result<GenerationJobSummary> {
+    let stopped = sqlx::query(
+        "UPDATE generation_jobs SET status = 'cancelled', error_code = '', finished_at = $1
+         WHERE id = $2 AND status = 'running' AND stopped_reason = 'user_stop_requested'",
+    )
+    .bind(now())
+    .bind(job_id)
+    .execute(&store.db)
+    .await?;
+    if stopped.rows_affected() > 0 {
+        emit_event(
+            store,
+            job_id,
+            "cancelled",
+            "Stopped at a safe boundary after the current step",
+        )
+        .await?;
+    }
+    get_job(store, caller, job_id).await
 }
 
 pub async fn process_job(
@@ -449,13 +541,92 @@ pub async fn process_job(
         return get_job(store, caller, job_id).await;
     }
     emit_event(store, job_id, "running", "Calling Cortex T0 Easy").await?;
+    if stop_was_requested(store, job_id).await? {
+        return finish_requested_stop(store, caller, job_id).await;
+    }
+
+    let study = sqlx::query("SELECT owner_id, status, expires_at FROM studies WHERE id = $1")
+        .bind(&job.study_id)
+        .fetch_optional(&store.db)
+        .await?;
+    let Some(study) = study else {
+        return fail_job(
+            store,
+            job_id,
+            "study_unavailable",
+            "The selected study is no longer available",
+        )
+        .await;
+    };
+    let study_owner: String = study.get("owner_id");
+    let study_status: String = study.get("status");
+    let study_expiry: Option<i64> = study.get("expires_at");
+    if study_owner != caller.user_id {
+        return fail_job(
+            store,
+            job_id,
+            "study_unavailable",
+            "The selected study is no longer available",
+        )
+        .await;
+    }
+    if study_status == "expired"
+        || (study_status == "draft" && study_expiry.is_some_and(|expiry| now() > expiry))
+    {
+        if study_status == "draft" {
+            sqlx::query("UPDATE studies SET status = 'expired', updated_at = $1 WHERE id = $2 AND status = 'draft'")
+                .bind(now())
+                .bind(&job.study_id)
+                .execute(&store.db)
+                .await?;
+        }
+        return fail_job(
+            store,
+            job_id,
+            "study_expired",
+            "The selected study draft expired before generation started",
+        )
+        .await;
+    }
+    if !matches!(study_status.as_str(), "draft" | "active") {
+        return fail_job(
+            store,
+            job_id,
+            "study_unavailable",
+            "The selected study is no longer available",
+        )
+        .await;
+    }
+
+    if let Some(quiz_id) = job.quiz_id.as_deref().filter(|id| !id.trim().is_empty()) {
+        let target = sqlx::query(
+            "SELECT id FROM quizzes WHERE id = $1 AND owner_id = $2 AND study_id = $3 AND visibility = 'private'",
+        )
+        .bind(quiz_id)
+        .bind(&caller.user_id)
+        .bind(&job.study_id)
+        .fetch_optional(&store.db)
+        .await?;
+        if target.is_none() {
+            return fail_job(
+                store,
+                job_id,
+                "quiz_not_available",
+                "The target quiz is no longer an owned private quiz in this study",
+            )
+            .await;
+        }
+    }
 
     let prep_inst = std::time::Instant::now();
     let prep_started_at = now();
     let source_rows = sqlx::query(
         "SELECT gjs.source_id, gjs.filename, gjs.mime_type, gjs.size_bytes, gjs.sha256,
                 gjs.source_kind, gjs.selection_kind, gjs.selection_spec,
-                s.owner_id, s.status, s.fsm_ref
+                s.owner_id, s.status, s.fsm_ref, s.source_kind AS current_source_kind,
+                s.mime_type AS current_mime_type, s.size_bytes AS current_size_bytes,
+                s.sha256 AS current_sha256, s.is_restricted, s.external_ref,
+                s.created_at, s.updated_at
          FROM generation_job_sources gjs JOIN sources s ON s.id = gjs.source_id
          WHERE gjs.job_id = $1 ORDER BY gjs.source_id",
     )
@@ -474,12 +645,57 @@ pub async fn process_job(
         let mime_type: String = row.get("mime_type");
         let selection_kind: String = row.get("selection_kind");
         let selection_spec: String = row.get("selection_spec");
+        let current_source_kind: String = row.get("current_source_kind");
+        let current_mime_type: String = row.get("current_mime_type");
+        let current_size_bytes: i64 = row.get("current_size_bytes");
+        let current_sha256: String = row.get("current_sha256");
+        let source = SourceSummary {
+            id: source_id.clone(),
+            filename: row.get("filename"),
+            mime_type: current_mime_type.clone(),
+            size_bytes: current_size_bytes,
+            sha256: current_sha256.clone(),
+            fsm_ref: fsm_ref.clone(),
+            source_kind: current_source_kind.clone(),
+            status: status.clone(),
+            selection_kind: selection_kind.clone(),
+            selection_spec: selection_spec.clone(),
+            is_restricted: row.get::<i64, _>("is_restricted") != 0,
+            external_ref: row.get("external_ref"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        };
         if source_owner != caller.user_id || status != "ready" || fsm_ref.trim().is_empty() {
             return fail_job(
                 store,
                 job_id,
                 "source_unavailable",
                 "A selected source is no longer available for this generation",
+            )
+            .await;
+        }
+        if current_source_kind != row.get::<String, _>("source_kind")
+            || current_mime_type != mime_type
+            || current_size_bytes != size_bytes
+            || current_sha256 != sha256
+        {
+            return fail_job(
+                store,
+                job_id,
+                "source_integrity_failed",
+                "A selected source no longer matches its saved metadata",
+            )
+            .await;
+        }
+        if studies::ensure_source_blob_readable(store, caller, &job.study_id, &source)
+            .await
+            .is_err()
+        {
+            return fail_job(
+                store,
+                job_id,
+                "source_unavailable",
+                "A selected source is not authorized for this generation",
             )
             .await;
         }
@@ -588,6 +804,19 @@ pub async fn process_job(
 
     let cortex_inst = std::time::Instant::now();
     let cortex_started_at = now();
+    let cortex_claim = sqlx::query(
+        "UPDATE generation_jobs SET error_code = 'cortex_request_in_flight'
+         WHERE id = $1 AND status = 'running' AND stopped_reason <> 'user_stop_requested'",
+    )
+    .bind(job_id)
+    .execute(&store.db)
+    .await?;
+    if cortex_claim.rows_affected() == 0 {
+        if stop_was_requested(store, job_id).await? {
+            return finish_requested_stop(store, caller, job_id).await;
+        }
+        return get_job(store, caller, job_id).await;
+    }
     let result = match store.cortex.generate_questions(&req).await {
         Ok(result) => result,
         Err(err) => {
@@ -616,13 +845,21 @@ pub async fn process_job(
         }
     };
     sqlx::query(
-        "UPDATE generation_jobs SET cortex_session_id = $1, cortex_output_id = $2 WHERE id = $3",
+        "UPDATE generation_jobs SET cortex_session_id = $1, cortex_output_id = $2, error_code = 'cortex_outcome_unknown' WHERE id = $3",
     )
     .bind(&result.session_id)
     .bind(&result.output_id)
     .bind(job_id)
     .execute(&store.db)
     .await?;
+    let current_status: String =
+        sqlx::query_scalar("SELECT status FROM generation_jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_one(&store.db)
+            .await?;
+    if current_status != "running" {
+        return get_job(store, caller, job_id).await;
+    }
     if result.status != "done" {
         let (code, message) = if result.status == "failed" {
             (
@@ -640,6 +877,9 @@ pub async fn process_job(
     let mut generated = result.questions;
 
     if has_wrong_script(&job.language, &generated) {
+        if stop_was_requested(store, job_id).await? {
+            return finish_requested_stop(store, caller, job_id).await;
+        }
         emit_event(
             store,
             job_id,
@@ -647,6 +887,19 @@ pub async fn process_job(
             "Detected wrong script; requesting Cortex correction",
         )
         .await?;
+        let correction_claim = sqlx::query(
+            "UPDATE generation_jobs SET error_code = 'cortex_correction_in_flight'
+             WHERE id = $1 AND status = 'running' AND stopped_reason <> 'user_stop_requested'",
+        )
+        .bind(job_id)
+        .execute(&store.db)
+        .await?;
+        if correction_claim.rows_affected() == 0 {
+            if stop_was_requested(store, job_id).await? {
+                return finish_requested_stop(store, caller, job_id).await;
+            }
+            return get_job(store, caller, job_id).await;
+        }
         generated = match store
             .cortex
             .correct_language(&caller.user_id, &job.language, &generated)
@@ -663,6 +916,20 @@ pub async fn process_job(
                 .await;
             }
         };
+        let current_status: String =
+            sqlx::query_scalar("SELECT status FROM generation_jobs WHERE id = $1")
+                .bind(job_id)
+                .fetch_one(&store.db)
+                .await?;
+        if current_status != "running" {
+            return get_job(store, caller, job_id).await;
+        }
+        sqlx::query(
+            "UPDATE generation_jobs SET error_code = 'cortex_outcome_unknown' WHERE id = $1 AND status = 'running'",
+        )
+        .bind(job_id)
+        .execute(&store.db)
+        .await?;
         if has_wrong_script(&job.language, &generated) {
             let cortex_ms = cortex_inst.elapsed().as_millis() as i64;
             let _ = estimates::record_step(
@@ -678,16 +945,13 @@ pub async fn process_job(
                 },
             )
             .await;
-            sqlx::query(
-                "UPDATE generation_jobs SET status = 'failed', error_code = 'wrong_language_script', finished_at = $1 WHERE id = $2",
+            return fail_job(
+                store,
+                job_id,
+                "wrong_language_script",
+                "Generated questions contain unsupported script",
             )
-            .bind(now())
-            .bind(job_id)
-            .execute(&store.db)
-            .await?;
-            return Err(Error::unprocessable(
-                "wrong_language_script: Generated questions contain unsupported script",
-            ));
+            .await;
         }
     }
     let cortex_ms = cortex_inst.elapsed().as_millis() as i64;
@@ -708,13 +972,12 @@ pub async fn process_job(
     let save_inst = std::time::Instant::now();
     let save_started_at = now();
 
-    // Re-check cancellation before committing results (safe boundary).
     let current_status: String =
         sqlx::query_scalar("SELECT status FROM generation_jobs WHERE id = $1")
             .bind(job_id)
             .fetch_one(&store.db)
             .await?;
-    if current_status == "cancelled" {
+    if current_status != "running" {
         return get_job(store, caller, job_id).await;
     }
 
@@ -726,16 +989,13 @@ pub async fn process_job(
     let mut accepted = Vec::new();
     for q in generated {
         if !allowed_sources.contains(&q.source_id) {
-            sqlx::query(
-                "UPDATE generation_jobs SET status = 'failed', error_code = 'unverified_citation', finished_at = $1 WHERE id = $2",
+            return fail_job(
+                store,
+                job_id,
+                "unverified_citation",
+                "Citation references a source not in this job",
             )
-            .bind(now())
-            .bind(job_id)
-            .execute(&store.db)
-            .await?;
-            return Err(Error::unprocessable(
-                "unverified_citation: Citation references a source not in this job",
-            ));
+            .await;
         }
         let key = q.prompt.trim().to_ascii_lowercase();
         if seen_prompts.insert(key) {
@@ -743,46 +1003,17 @@ pub async fn process_job(
         }
     }
 
+    let quiz_id = job
+        .quiz_id
+        .clone()
+        .filter(|qid| !qid.trim().is_empty())
+        .unwrap_or_else(new_id);
     let ts = now();
-    let quiz_id = match job.quiz_id {
-        Some(ref qid) if !qid.is_empty() => qid.clone(),
-        _ => {
-            let qid = new_id();
-            sqlx::query(
-                "INSERT INTO quizzes(id, owner_id, study_id, visibility, origin, active_version_id, created_at, updated_at)
-                 VALUES($1, $2, $3, 'private', 'generated_with_cortex', '', $4, $4)",
-            )
-            .bind(&qid)
-            .bind(&caller.user_id)
-            .bind(&job.study_id)
-            .bind(ts)
-            .execute(&store.db)
-            .await?;
-            qid
-        }
-    };
-
-    let next_ver: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(version_num), 0) + 1 FROM quiz_versions WHERE quiz_id = $1",
-    )
-    .bind(&quiz_id)
-    .fetch_one(&store.db)
-    .await?;
-    let quiz_version_id = new_id();
-    sqlx::query(
-        "INSERT INTO quiz_versions(id, quiz_id, version_num, title, created_at) VALUES($1, $2, $3, $4, $5)",
-    )
-    .bind(&quiz_version_id)
-    .bind(&quiz_id)
-    .bind(next_ver)
-    .bind(format!("Generated Quiz v{next_ver}"))
-    .bind(ts)
-    .execute(&store.db)
-    .await?;
-
-    let mut saved_count = 0i64;
-    for (pos, q) in accepted.iter().enumerate() {
+    let mut doc_ids = Vec::with_capacity(accepted.len());
+    let mut saved_questions = Vec::with_capacity(accepted.len());
+    for q in &accepted {
         let doc_id = new_id();
+        doc_ids.push(doc_id.clone());
         let payload = json!({
             "prompt": q.prompt,
             "alternatives": q.alternatives,
@@ -790,21 +1021,112 @@ pub async fn process_job(
             "explanation": q.explanation,
             "citation_ref": q.citation_ref,
         });
-        guardrail::store_validated_document(
+        if let Err(error) = guardrail::store_validated_document(
             store,
             QUESTION_SCHEMA_NAME,
             QUESTION_SCHEMA_VERSION,
             &doc_id,
             &payload,
         )
+        .await
+        {
+            for created_doc_id in &doc_ids {
+                guardrail::cleanup_orphan_document(store, created_doc_id).await;
+            }
+            return Err(error);
+        }
+        saved_questions.push((
+            new_id(),
+            new_id(),
+            doc_id,
+            q.source_id.clone(),
+            q.citation_ref.clone(),
+        ));
+    }
+    let saved_count = saved_questions.len() as i64;
+    let done = now();
+    let finalize_result: Result<bool> = async {
+        let mut tx = store.db.begin().await?;
+        // This compare-and-set serializes final publication with stop/cancel.
+        let claim = sqlx::query(
+            "UPDATE generation_jobs SET error_code = 'publishing' WHERE id = $1 AND status = 'running'",
+        )
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+        if claim.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        if job.quiz_id.as_deref().is_some_and(|qid| !qid.trim().is_empty()) {
+            let target_exists = sqlx::query(
+                "SELECT id FROM quizzes WHERE id = $1 AND owner_id = $2 AND study_id = $3 AND visibility = 'private'",
+            )
+            .bind(&quiz_id)
+            .bind(&caller.user_id)
+            .bind(&job.study_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if target_exists.is_none() {
+                return Err(Error(
+                    StatusCode::NOT_FOUND,
+                    "quiz_not_available: Target quiz is not an owned private quiz in this study".into(),
+                ));
+            }
+        } else {
+            sqlx::query(
+                "INSERT INTO quizzes(id, owner_id, study_id, visibility, origin, active_version_id, created_at, updated_at)
+                 VALUES($1, $2, $3, 'private', 'generated_with_cortex', '', $4, $4)",
+            )
+            .bind(&quiz_id)
+            .bind(&caller.user_id)
+            .bind(&job.study_id)
+            .bind(ts)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        let next_ver: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(version_num), 0) + 1 FROM quiz_versions WHERE quiz_id = $1",
+        )
+        .bind(&quiz_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let quiz_version_id = new_id();
+        sqlx::query(
+            "INSERT INTO quiz_versions(id, quiz_id, version_num, title, created_at) VALUES($1, $2, $3, $4, $5)",
+        )
+        .bind(&quiz_version_id)
+        .bind(&quiz_id)
+        .bind(next_ver)
+        .bind(format!("Generated Quiz v{next_ver}"))
+        .bind(ts)
+        .execute(&mut *tx)
         .await?;
 
-        let question_id = new_id();
-        let qv_id = new_id();
-        if let Err(err) = async {
-            let mut tx = store.db.begin().await?;
+        // Extra rounds copy the exact current membership before adding new questions.
+        sqlx::query(
+            "INSERT INTO quiz_version_questions
+                 (quiz_version_id, position, question_version_id, source_scope, origin_quiz_id, origin_quiz_version_id)
+             SELECT $1, qvq.position, qvq.question_version_id, qvq.source_scope, qvq.origin_quiz_id, qvq.origin_quiz_version_id
+             FROM quizzes q JOIN quiz_version_questions qvq ON qvq.quiz_version_id = q.active_version_id
+             WHERE q.id = $2 AND q.active_version_id <> ''",
+        )
+        .bind(&quiz_version_id)
+        .bind(&quiz_id)
+        .execute(&mut *tx)
+        .await?;
+        let mut next_position: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM quiz_version_questions WHERE quiz_version_id = $1",
+        )
+        .bind(&quiz_version_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        for (question_id, qv_id, doc_id, source_id, citation_ref) in &saved_questions {
             sqlx::query("INSERT INTO questions(id, owner_id, origin, created_at) VALUES($1, $2, 'generated_with_cortex', $3)")
-                .bind(&question_id)
+                .bind(question_id)
                 .bind(&caller.user_id)
                 .bind(ts)
                 .execute(&mut *tx)
@@ -813,12 +1135,12 @@ pub async fn process_job(
                 "INSERT INTO question_versions(id, question_id, version_num, language, schema_name, schema_version, couch_doc_id, created_at)
                  VALUES($1, $2, 1, $3, $4, $5, $6, $7)",
             )
-            .bind(&qv_id)
-            .bind(&question_id)
+            .bind(qv_id)
+            .bind(question_id)
             .bind(&job.language)
             .bind(QUESTION_SCHEMA_NAME)
             .bind(QUESTION_SCHEMA_VERSION)
-            .bind(&doc_id)
+            .bind(doc_id)
             .bind(ts)
             .execute(&mut *tx)
             .await?;
@@ -827,9 +1149,9 @@ pub async fn process_job(
                  VALUES($1, $2, $3, $4, $5)",
             )
             .bind(new_id())
-            .bind(&qv_id)
-            .bind(&q.source_id)
-            .bind(&q.citation_ref)
+            .bind(qv_id)
+            .bind(source_id)
+            .bind(citation_ref)
             .bind(ts)
             .execute(&mut *tx)
             .await?;
@@ -838,55 +1160,104 @@ pub async fn process_job(
                  VALUES($1, $2, $3, 'generated_from_current_selected_sources')",
             )
             .bind(&quiz_version_id)
-            .bind(pos as i64)
-            .bind(&qv_id)
+            .bind(next_position)
+            .bind(qv_id)
             .execute(&mut *tx)
             .await?;
-            tx.commit().await?;
-            Ok::<_, Error>(())
+            next_position += 1;
         }
-        .await
-        {
-            guardrail::cleanup_orphan_document(store, &doc_id).await;
-            return Err(err);
-        }
-        saved_count += 1;
-    }
 
-    let done = now();
-    let mut publication_tx = store.db.begin().await?;
-    sqlx::query("UPDATE quizzes SET active_version_id = $1, updated_at = $2 WHERE id = $3")
+        let activated = sqlx::query(
+            "UPDATE quizzes SET active_version_id = $1, updated_at = $2 WHERE id = $3 AND owner_id = $4 AND study_id = $5 AND visibility = 'private'",
+        )
         .bind(&quiz_version_id)
         .bind(done)
         .bind(&quiz_id)
-        .execute(&mut *publication_tx)
+        .bind(&caller.user_id)
+        .bind(&job.study_id)
+        .execute(&mut *tx)
         .await?;
-    catalog::refresh_public_question_search_in_tx(store, &mut publication_tx, &quiz_id).await?;
-    publication_tx.commit().await?;
-    sqlx::query(
-        "UPDATE studies SET status = 'active', quiz_id = $1, updated_at = $2 WHERE id = $3",
-    )
-    .bind(&quiz_id)
-    .bind(done)
-    .bind(&job.study_id)
-    .execute(&store.db)
-    .await?;
-    sqlx::query(
-        "UPDATE generation_jobs SET status = 'completed', quiz_id = $1, saved_count = $2, finished_at = $3 WHERE id = $4",
-    )
-    .bind(&quiz_id)
-    .bind(saved_count)
-    .bind(done)
-    .bind(job_id)
-    .execute(&store.db)
-    .await?;
-    emit_event(
-        store,
-        job_id,
-        "completed",
-        &format!("Saved {saved_count} questions to private quiz {quiz_id}"),
-    )
-    .await?;
+        if activated.rows_affected() != 1 {
+            return Err(Error(
+                StatusCode::NOT_FOUND,
+                "quiz_not_available: Target quiz is not an owned private quiz in this study".into(),
+            ));
+        }
+        catalog::refresh_public_question_search_in_tx(store, &mut tx, &quiz_id).await?;
+
+        let study_updated = sqlx::query(
+            "UPDATE studies SET status = 'active', quiz_id = $1, updated_at = $2
+             WHERE id = $3 AND owner_id = $4 AND status IN ('draft', 'active')
+               AND (status <> 'draft' OR expires_at IS NULL OR expires_at >= $2)",
+        )
+        .bind(&quiz_id)
+        .bind(done)
+        .bind(&job.study_id)
+        .bind(&caller.user_id)
+        .execute(&mut *tx)
+        .await?;
+        if study_updated.rows_affected() != 1 {
+            return Err(Error(
+                StatusCode::GONE,
+                "study_expired: Study is no longer available for generation".into(),
+            ));
+        }
+
+        let stop_requested: i64 = sqlx::query_scalar(
+            "SELECT CASE WHEN stopped_reason = 'user_stop_requested' THEN 1 ELSE 0 END FROM generation_jobs WHERE id = $1",
+        )
+        .bind(job_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let final_status = if stop_requested == 1 {
+            "cancelled"
+        } else {
+            "completed"
+        };
+        let completed = sqlx::query(
+            "UPDATE generation_jobs SET status = $1, quiz_id = $2, saved_count = $3, error_code = '', finished_at = $4
+             WHERE id = $5 AND status = 'running'",
+        )
+        .bind(final_status)
+        .bind(&quiz_id)
+        .bind(saved_count)
+        .bind(done)
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+        if completed.rows_affected() != 1 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO generation_events(job_id, event_type, message, created_at) VALUES($1, $2, $3, $4)",
+        )
+        .bind(job_id)
+        .bind(final_status)
+        .bind(format!("Saved {saved_count} new questions to private quiz {quiz_id}"))
+        .bind(done)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+    .await;
+
+    match finalize_result {
+        Ok(true) => {}
+        Ok(false) => {
+            for doc_id in &doc_ids {
+                guardrail::cleanup_orphan_document(store, doc_id).await;
+            }
+            return get_job(store, caller, job_id).await;
+        }
+        Err(error) => {
+            for doc_id in &doc_ids {
+                guardrail::cleanup_orphan_document(store, doc_id).await;
+            }
+            return Err(error);
+        }
+    }
 
     let save_ms = save_inst.elapsed().as_millis() as i64;
     estimates::record_step(
@@ -952,6 +1323,26 @@ pub async fn process_next_queued(store: &Store) -> Result<bool> {
     let job_id: String = row.get("id");
     if let Err(error) = process_job(store, &caller, &job_id).await {
         tracing::warn!(job_id = %job_id, error = %error, "Generation queue item stopped");
+        let terminal = sqlx::query(
+            "UPDATE generation_jobs SET status = 'failed',
+                 error_code = CASE WHEN error_code IN ('cortex_request_in_flight', 'cortex_correction_in_flight', 'cortex_outcome_unknown')
+                                   THEN 'cortex_outcome_unknown' ELSE 'generation_processing_failed' END,
+                 finished_at = $1
+             WHERE id = $2 AND status = 'running'",
+        )
+        .bind(now())
+        .bind(&job_id)
+        .execute(&store.db)
+        .await?;
+        if terminal.rows_affected() > 0 {
+            let _ = emit_event(
+                store,
+                &job_id,
+                "failed",
+                "Generation stopped after an internal processing error",
+            )
+            .await;
+        }
     }
     Ok(true)
 }
@@ -975,15 +1366,40 @@ pub async fn stop_generation(
     job_id: &str,
 ) -> Result<GenerationJobSummary> {
     let job = get_job(store, caller, job_id).await?;
-    if matches!(job.status.as_str(), "queued" | "running") {
-        sqlx::query(
-            "UPDATE generation_jobs SET status = 'cancelled', stopped_reason = 'user_stopped', finished_at = $1 WHERE id = $2",
+    if job.status == "queued" {
+        let stopped = sqlx::query(
+            "UPDATE generation_jobs SET status = 'cancelled', stopped_reason = 'user_stopped', finished_at = $1 WHERE id = $2 AND status = 'queued'",
         )
         .bind(now())
         .bind(job_id)
         .execute(&store.db)
         .await?;
-        emit_event(store, job_id, "cancelled", "Stopped at safe boundary").await?;
+        if stopped.rows_affected() > 0 {
+            emit_event(
+                store,
+                job_id,
+                "cancelled",
+                "Stopped before generation started",
+            )
+            .await?;
+        }
+    } else if job.status == "running" {
+        let requested = sqlx::query(
+            "UPDATE generation_jobs SET stopped_reason = 'user_stop_requested'
+             WHERE id = $1 AND status = 'running' AND stopped_reason <> 'user_stop_requested'",
+        )
+        .bind(job_id)
+        .execute(&store.db)
+        .await?;
+        if requested.rows_affected() > 0 {
+            emit_event(
+                store,
+                job_id,
+                "stop_requested",
+                "Stop requested; the current step will finish safely",
+            )
+            .await?;
+        }
     }
     get_job(store, caller, job_id).await
 }
