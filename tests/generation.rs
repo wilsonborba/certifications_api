@@ -621,6 +621,9 @@ async fn pdf_selection_reaches_cortex_files_before_extraction() {
     )
     .await;
     assert_eq!(selection_status, StatusCode::OK);
+    // Selection validation reads the PDF once to check its page bound. The worker
+    // must then read it exactly once when preparing the Cortex file request.
+    let reads_before_generation = fsm.get_count();
     let (job_status, job) = call(
         &app,
         "POST",
@@ -640,7 +643,7 @@ async fn pdf_selection_reaches_cortex_files_before_extraction() {
     assert_eq!(prepared.selection_kind, "pages");
     assert_eq!(prepared.selection_spec, "1");
     assert_eq!(prepared.bytes, pdf);
-    assert_eq!(fsm.get_count(), 1);
+    assert_eq!(fsm.get_count(), reads_before_generation + 1);
     worker.abort();
 }
 

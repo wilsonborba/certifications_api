@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(studies)* Add studies, multi-source FSM uploads, prepared study reuse, and quota meter (#35) ([`b7674d0`](https://github.com/wilsonborba/certifications_api/commit/b7674d0b90baa158d3576feed5132b9e11cfaf7b))
 - *(deletion)* Remove deleted content immediately with deferred FSM cleanup (#37) ([`a37fea8`](https://github.com/wilsonborba/certifications_api/commit/a37fea8940980ab73c0e8238985ebc4d173a1421))
 - *(generation)* Add durable per-user generation queue on Cortex T0 Easy (#38) ([`67b82a0`](https://github.com/wilsonborba/certifications_api/commit/67b82a01c123f384008ca3e20ca7d55b5be3b1e8))
+- *(#35)* Align source provenance and selection grammar/caps with Cortex #136 (`233ac47`)
 - *(estimates)* Add generation step timing, estimation statistics, and estimate endpoint (#39) ([`7b443c0`](https://github.com/wilsonborba/certifications_api/commit/7b443c0efb2e16e6e4a55b05f95a7aa3aa53c2c4))
 - *(authoring)* Add question review, manual creation, CSV import, visual rendering, and origin guards (#40) ([`6100b83`](https://github.com/wilsonborba/certifications_api/commit/6100b835652f6470e75fb34d8e9a5ad6fb8dc764))
 - *(catalog)* Add public discovery, quiz detail, tags, and restricted-report publication guard (#41) ([`0d1e8d5`](https://github.com/wilsonborba/certifications_api/commit/0d1e8d5c669f22853dc628172b555eb70b302f61))
