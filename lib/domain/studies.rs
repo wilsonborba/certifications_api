@@ -309,18 +309,64 @@ async fn authorize_fsm_ref(
 async fn ensure_source_blob_readable(
     store: &Store,
     caller: &CallerIdentity,
+    study_id: &str,
     src: &SourceSummary,
 ) -> Result<()> {
+    let trimmed = src.fsm_ref.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with('/')
+        || trimmed.contains("..")
+        || trimmed.contains("://")
+    {
+        return Err(Error::forbidden(
+            "fsm_ref_forbidden: Source blob reference is not an authorized path",
+        ));
+    }
     let conflict = sqlx::query(
         "SELECT owner_id FROM sources WHERE fsm_ref = $1 AND status <> 'deleted' AND owner_id <> $2 LIMIT 1",
     )
-    .bind(src.fsm_ref.trim())
+    .bind(trimmed)
     .bind(&caller.user_id)
     .fetch_optional(&store.db)
     .await?;
     if conflict.is_some() {
         return Err(Error::forbidden(
             "fsm_ref_forbidden: Caller does not own referenced blob",
+        ));
+    }
+    let proven = match src.source_kind.as_str() {
+        "upload" => {
+            let expected_prefix = format!("certifications/{}/", caller.user_id);
+            trimmed.starts_with(&expected_prefix) && !src.sha256.trim().is_empty()
+        }
+        "fsm_ref" => {
+            let owned_upload = sqlx::query(
+                "SELECT 1 FROM sources WHERE fsm_ref = $1 AND owner_id = $2 AND source_kind = 'upload' AND status = 'ready' AND sha256 <> '' LIMIT 1",
+            )
+            .bind(trimmed)
+            .bind(&caller.user_id)
+            .fetch_optional(&store.db)
+            .await?
+            .is_some();
+            if owned_upload {
+                true
+            } else {
+                let prepared_origin: Option<String> = sqlx::query(
+                    "SELECT source_origin FROM studies WHERE id = $1 AND owner_id = $2",
+                )
+                .bind(study_id)
+                .bind(&caller.user_id)
+                .fetch_optional(&store.db)
+                .await?
+                .map(|r| r.get("source_origin"));
+                prepared_origin.as_deref() == Some("annotations")
+            }
+        }
+        _ => false,
+    };
+    if !proven {
+        return Err(Error::forbidden(
+            "fsm_ref_forbidden: Historical or unverified blob reference lacks authoritative ownership provenance",
         ));
     }
     Ok(())
@@ -956,7 +1002,7 @@ pub async fn get_source_content(
     if src.fsm_ref.trim().is_empty() {
         return Err(Error::missing());
     }
-    ensure_source_blob_readable(store, caller, &src).await?;
+    ensure_source_blob_readable(store, caller, study_id, &src).await?;
     let bytes = store.fsm.get_bytes_bounded(&src.fsm_ref, max_bytes).await?;
     Ok((src, bytes))
 }
@@ -980,7 +1026,7 @@ pub async fn preview_source(
     let mut duration_seconds: Option<f64> = None;
 
     if has_fsm {
-        ensure_source_blob_readable(store, caller, &src).await?;
+        ensure_source_blob_readable(store, caller, study_id, &src).await?;
         let needs_bytes = src.mime_type.starts_with("text/")
             || src.mime_type == "application/pdf"
             || matches!(

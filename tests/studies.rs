@@ -356,7 +356,7 @@ async fn reports_picker_and_report_source_enforce_permissions_and_unconfigured_5
     let mut store = Store::fixture().await;
     store.reports = Arc::new(MockReports);
     let app = presentation::router(App {
-        store,
+        store: store.clone(),
         settings: test_settings(),
         quotas: QuotaCache::default(),
         signatures: Default::default(),
@@ -688,7 +688,7 @@ async fn prepared_study_fsm_ref_streams_content_and_link_returns_404() {
     let mut settings = test_settings();
     settings.certifications_service_key = "ann-svc-key".into();
     let app = presentation::router(App {
-        store,
+        store: store.clone(),
         settings,
         quotas: QuotaCache::default(),
         signatures: Default::default(),
@@ -783,7 +783,7 @@ async fn cross_owner_fsm_ref_rejected_with_zero_fsm_reads_and_bounds_enforced() 
     let mut settings = test_settings();
     settings.certifications_service_key = "ann-svc-key".into();
     let app = presentation::router(App {
-        store,
+        store: store.clone(),
         settings,
         quotas,
         signatures: Default::default(),
@@ -984,4 +984,36 @@ async fn cross_owner_fsm_ref_rejected_with_zero_fsm_reads_and_bounds_enforced() 
     .await;
     assert_eq!(st, StatusCode::OK);
     assert!(enc_prev["page_count"].is_null());
+
+    // Historical/raw unproven fsm_ref row in a non-prepared study fails closed with zero FSM reads.
+    let raw_src_id = "legacy-raw-src";
+    let raw_fsm = "legacy/unproven/blob.pdf";
+    certifications_api::dal::fsm::FsmClient::put_bytes(&*fsm, raw_fsm, b"%PDF-1.4\n%%EOF")
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, created_at, updated_at)
+         VALUES($1, 'owner-a', $2, 'legacy.pdf', 'application/pdf', 15, '', $3, 'fsm_ref', 'ready', 'all', '', 0, '', 1, 1)",
+    )
+    .bind(raw_src_id)
+    .bind(a_sid)
+    .bind(raw_fsm)
+    .execute(&store.db)
+    .await
+    .unwrap();
+    let gets_before_legacy = fsm.get_count();
+    let (st, _) = call(
+        &app,
+        "GET",
+        &format!("/studies/{a_sid}/sources/{raw_src_id}/content"),
+        Some("owner-a"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(fsm.get_count(), gets_before_legacy);
+
+    // Cross-reference /ObjStm PDF stays unknown (null page_count).
+    let objstm_pdf = b"%PDF-1.5\n1 0 obj<</Type /Catalog /Pages 2 0 R>>endobj\n2 0 obj<</Type /Pages /Count 7>>endobj\n3 0 obj<</Type /ObjStm /N 1 /First 5>>stream\nabc\nendstream endobj\ntrailer<</Root 1 0 R>>\n%%EOF";
+    assert!(certifications_api::domain::studies::extract_pdf_page_count(objstm_pdf).is_none());
 }
