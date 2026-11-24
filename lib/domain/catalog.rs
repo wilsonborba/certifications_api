@@ -989,9 +989,8 @@ pub(crate) async fn refresh_public_question_search_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Any>,
     quiz_id: &str,
 ) -> Result<()> {
-    let projection =
-        build_public_question_search_projection(store, &mut **tx, quiz_id, None).await?;
-    replace_public_question_search_projection(&mut **tx, quiz_id, &projection.rows).await
+    let projection = build_public_question_search_projection(store, tx, quiz_id, None).await?;
+    replace_public_question_search_projection(tx, quiz_id, &projection.rows).await
 }
 
 #[derive(Clone, Debug)]
@@ -1136,13 +1135,13 @@ async fn rebuild_one_public_question_search_quiz(
         let mut tx = store.db.begin().await?;
         let projection = build_public_question_search_projection(
             store,
-            &mut *tx,
+            &mut tx,
             quiz_id,
             Some(MAX_PUBLIC_SEARCH_REBUILD_QUIZ_QUESTIONS),
         )
         .await?;
-        let existing = existing_public_question_search_question_ids(&mut *tx, quiz_id).await?;
-        replace_public_question_search_projection(&mut *tx, quiz_id, &projection.rows).await?;
+        let existing = existing_public_question_search_question_ids(&mut tx, quiz_id).await?;
+        replace_public_question_search_projection(&mut tx, quiz_id, &projection.rows).await?;
         tx.commit().await.map_err(|_| Error::unavailable())?;
         Ok((projection, existing))
     } else {
@@ -1225,6 +1224,9 @@ pub async fn rebuild_public_question_search_batch(
             .filter(|question_version_id| !current_ids.contains(question_version_id.as_str()))
             .count();
         summary.next_cursor = Some(quiz_id);
+    }
+    if summary.failed_quiz_id.is_some() {
+        summary.has_more = true;
     }
     Ok(summary)
 }

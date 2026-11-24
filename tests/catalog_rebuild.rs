@@ -250,7 +250,7 @@ async fn rebuild_batches_use_a_stable_cursor_and_validate_caps_without_advancing
         .await
         .unwrap();
     assert_eq!(first.scanned_quiz_count, 1);
-    assert_eq!(first.has_more, true);
+    assert!(first.has_more);
     assert_eq!(first.next_cursor.as_deref(), Some("a-first"));
     let second = catalog::rebuild_public_question_search_batch(
         &store,
@@ -261,7 +261,7 @@ async fn rebuild_batches_use_a_stable_cursor_and_validate_caps_without_advancing
     .await
     .unwrap();
     assert_eq!(second.scanned_quiz_count, 1);
-    assert_eq!(second.has_more, false);
+    assert!(!second.has_more);
     assert_eq!(second.next_cursor.as_deref(), Some("z-last"));
     assert!(
         catalog::rebuild_public_question_search_batch(&store, None, 101, false)
@@ -324,6 +324,7 @@ async fn oversized_quiz_fails_closed_and_returns_the_previous_stable_cursor() {
     assert_eq!(result.scanned_quiz_count, 1);
     assert_eq!(result.failed_quiz_id.as_deref(), Some("b-oversized"));
     assert_eq!(result.next_cursor.as_deref(), Some("a-first"));
+    assert!(result.has_more);
     let unchanged: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM public_question_search WHERE quiz_id = 'b-oversized'",
     )
