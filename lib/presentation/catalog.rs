@@ -9,6 +9,7 @@ use crate::{
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
+    http::{HeaderMap, header},
     routing::{get, post},
 };
 use serde::Deserialize;
@@ -46,16 +47,27 @@ async fn list_catalog_questions(
     Ok(Json(json!({ "items": items })))
 }
 
-async fn get_quiz(State(app): State<App>, Path(quiz_id): Path<String>) -> Result<Json<Value>> {
-    let detail = catalog::get_public_quiz(&app.store, &quiz_id).await?;
+async fn get_quiz(
+    State(app): State<App>,
+    Path(quiz_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>> {
+    let language = headers
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|value| value.to_str().ok());
+    let detail = catalog::get_public_quiz(&app.store, &quiz_id, language).await?;
     Ok(Json(json!(detail)))
 }
 
 async fn get_quiz_statistics(
     State(app): State<App>,
     Path(quiz_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<Value>> {
-    let stats = catalog::get_public_quiz_statistics(&app.store, &quiz_id).await?;
+    let language = headers
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|value| value.to_str().ok());
+    let stats = catalog::get_public_quiz_statistics(&app.store, &quiz_id, language).await?;
     Ok(Json(json!(stats)))
 }
 
@@ -72,9 +84,15 @@ async fn publish_quiz(
     State(app): State<App>,
     SessionUser(caller): SessionUser,
     Path(study_id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<PublishBody>,
 ) -> Result<Json<Value>> {
-    let published =
-        catalog::publish_study_quiz(&app.store, &caller, &study_id, body.title, body.tags).await?;
+    let language = headers
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|value| value.to_str().ok());
+    let published = catalog::publish_study_quiz(
+        &app.store, &caller, &study_id, body.title, body.tags, language,
+    )
+    .await?;
     Ok(Json(json!(published)))
 }

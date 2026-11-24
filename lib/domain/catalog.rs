@@ -2,6 +2,7 @@ use crate::{
     core::{Error, Result, now},
     dal::{Store, new_id},
     domain::auth::{CallerIdentity, require_owner},
+    domain::provenance::{QuestionProvenanceStats, question_provenance_stats},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -28,6 +29,7 @@ pub struct PublicQuizStats {
     pub score_distribution_denominator: i64,
     pub score_distribution: Vec<ScoreBandCount>,
     pub score_distribution_report_view: serde_json::Value,
+    pub question_provenance: QuestionProvenanceStats,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -36,22 +38,86 @@ pub struct ScoreBandCount {
     pub attempt_count: i64,
 }
 
-fn score_distribution_page(quiz_id: &str, rows: &[ScoreBandCount]) -> serde_json::Value {
+fn normalize_stats_language(language: Option<&str>) -> &'static str {
+    language
+        .unwrap_or("")
+        .split(',')
+        .map(|part| {
+            part.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .find_map(|value| match value.as_str() {
+            "pt" | "pt-br" => Some("pt-BR"),
+            "th" | "th-th" => Some("th"),
+            "en" | "en-us" | "en-gb" => Some("en"),
+            _ => None,
+        })
+        .unwrap_or("en")
+}
+
+fn score_band_labels(language: &str) -> [&'static str; 3] {
+    match language {
+        "pt-BR" => ["0% a <50%", "50% a <80%", "80% a 100%"],
+        "th" => ["0% ถึงน้อยกว่า 50%", "50% ถึงน้อยกว่า 80%", "80% ถึง 100%"],
+        _ => ["0% to <50%", "50% to <80%", "80% to 100%"],
+    }
+}
+
+fn score_distribution_page(
+    quiz_id: &str,
+    rows: &[ScoreBandCount],
+    language: &str,
+) -> serde_json::Value {
+    let (title, description, band_label, attempts_label, sample_definition) = match language {
+        "pt-BR" => (
+            "Distribuição das pontuações do questionário",
+            "Pontuações de tentativas concluídas agrupadas em faixas percentuais fixas",
+            "Faixa de pontuação",
+            "Tentativas",
+            "Tentativas concluídas com pontuação total maior que zero; cada tentativa conta uma vez.",
+        ),
+        "th" => (
+            "การกระจายคะแนนแบบทดสอบ",
+            "คะแนนจากความพยายามที่เสร็จสิ้นแล้วแบ่งตามช่วงเปอร์เซ็นต์คงที่",
+            "ช่วงคะแนน",
+            "จำนวนครั้ง",
+            "ความพยายามที่เสร็จสิ้นและมีคะแนนรวมมากกว่าศูนย์ โดยนับแต่ละครั้งหนึ่งครั้ง",
+        ),
+        _ => (
+            "Quiz score distribution",
+            "Completed attempt scores grouped into fixed percentage bands",
+            "Score band",
+            "Attempts",
+            "Completed attempts with a positive score total; each attempt counts once.",
+        ),
+    };
+    let sample_size: i64 = rows.iter().map(|row| row.attempt_count).sum();
     serde_json::json!({
         "descriptor": {
             "dataset_id": format!("cert:quiz:{quiz_id}:score-distribution"),
-            "title": "Quiz score distribution",
-            "description": "Completed attempt scores grouped into fixed percentage bands",
+            "title": title,
+            "description": description,
             "equation": null,
             "fields": [
-                {"name":"score_band", "label":"Score band", "type":"string", "role":"dimension"},
-                {"name":"attempt_count", "label":"Attempts", "type":"integer", "role":"measure", "unit":"attempts"}
+                {"name":"score_band", "label":band_label, "type":"string", "role":"dimension"},
+                {"name":"attempt_count", "label":attempts_label, "type":"integer", "role":"measure", "unit":"attempts"}
             ],
             "filters": [],
             "data_tier": "live",
             "can_view": true,
             "visibility": "public",
-            "meta": {"source":"Certifications API", "tier":"live", "freshness_mode":"live"}
+            "meta": {
+                "source":"Certifications API",
+                "tier":"live",
+                "freshness_mode":"live",
+                "language":language,
+                "sample_size":sample_size,
+                "sample_unit":"completed_attempts",
+                "sample_definition":sample_definition
+            }
         },
         "rows": rows,
         "offset": 0,
@@ -280,6 +346,7 @@ pub async fn publish_study_quiz(
     study_id: &str,
     title: Option<String>,
     tags: Option<Vec<String>>,
+    language: Option<&str>,
 ) -> Result<PublicQuizDetail> {
     let row = sqlx::query("SELECT owner_id, title, quiz_id FROM studies WHERE id = $1")
         .bind(study_id)
@@ -419,7 +486,7 @@ pub async fn publish_study_quiz(
         .await?;
     tx.commit().await?;
 
-    get_public_quiz(store, &quiz_id).await
+    get_public_quiz(store, &quiz_id, language).await
 }
 
 async fn load_quiz_tags(store: &Store, quiz_id: &str) -> Result<Vec<TagInfo>> {
@@ -442,7 +509,11 @@ async fn load_quiz_tags(store: &Store, quiz_id: &str) -> Result<Vec<TagInfo>> {
         .collect())
 }
 
-pub async fn get_public_quiz_statistics(store: &Store, quiz_id: &str) -> Result<PublicQuizStats> {
+pub async fn get_public_quiz_statistics(
+    store: &Store,
+    quiz_id: &str,
+    language: Option<&str>,
+) -> Result<PublicQuizStats> {
     let vis: Option<String> = sqlx::query_scalar("SELECT visibility FROM quizzes WHERE id = $1")
         .bind(quiz_id)
         .fetch_optional(&store.db)
@@ -451,13 +522,15 @@ pub async fn get_public_quiz_statistics(store: &Store, quiz_id: &str) -> Result<
         return Err(Error::missing());
     }
 
+    let question_provenance = question_provenance_stats(store, "quiz", quiz_id).await?;
+
     let row = sqlx::query(
         "SELECT COUNT(*) AS completed_cnt,
                 COUNT(DISTINCT owner_id) AS distinct_users,
-                AVG(CASE WHEN score_total > 0 THEN (score_correct * 100.0) / score_total END) AS avg_pct,
-                SUM(CASE WHEN score_total > 0 THEN 1 ELSE 0 END) AS score_n,
-                AVG(CASE WHEN completed_at >= started_at THEN completed_at - started_at END) AS avg_dur,
-                SUM(CASE WHEN completed_at >= started_at THEN 1 ELSE 0 END) AS duration_n
+                AVG(CAST(CASE WHEN score_total > 0 THEN (score_correct * 100.0) / score_total END AS DOUBLE PRECISION)) AS avg_pct,
+                COALESCE(SUM(CASE WHEN score_total > 0 THEN 1 ELSE 0 END), 0) AS score_n,
+                AVG(CAST(CASE WHEN completed_at >= started_at THEN completed_at - started_at END AS DOUBLE PRECISION)) AS avg_dur,
+                COALESCE(SUM(CASE WHEN completed_at >= started_at THEN 1 ELSE 0 END), 0) AS duration_n
          FROM attempts
          WHERE quiz_id = $1 AND status = 'completed'",
     )
@@ -465,22 +538,13 @@ pub async fn get_public_quiz_statistics(store: &Store, quiz_id: &str) -> Result<
     .fetch_one(&store.db)
     .await?;
 
-    let completed_attempt_count: i64 = row.get("completed_cnt");
-    let distinct_participants: i64 = row.get("distinct_users");
-    let average_score_denominator: i64 = row.try_get("score_n").unwrap_or(0);
-    let average_score_pct: Option<f64> = if completed_attempt_count > 0 {
-        row.try_get("avg_pct").ok()
-    } else {
-        None
-    };
-    let typical_duration_sec: Option<i64> = if completed_attempt_count > 0 {
-        row.try_get::<f64, _>("avg_dur")
-            .ok()
-            .map(|v| v.round() as i64)
-    } else {
-        None
-    };
-    let duration_denominator: i64 = row.try_get("duration_n").unwrap_or(0);
+    let completed_attempt_count: i64 = row.try_get("completed_cnt")?;
+    let distinct_participants: i64 = row.try_get("distinct_users")?;
+    let average_score_denominator: i64 = row.try_get("score_n")?;
+    let average_score_pct: Option<f64> = row.try_get("avg_pct")?;
+    let average_duration: Option<f64> = row.try_get("avg_dur")?;
+    let typical_duration_sec = average_duration.map(|value| value.round() as i64);
+    let duration_denominator: i64 = row.try_get("duration_n")?;
 
     let distribution_rows = sqlx::query(
         "SELECT CASE
@@ -503,11 +567,13 @@ pub async fn get_public_quiz_statistics(store: &Store, quiz_id: &str) -> Result<
     let band_order = ["0-49%", "50-79%", "80-100%"];
     let mut score_distribution = distribution_rows
         .into_iter()
-        .map(|r| ScoreBandCount {
-            score_band: r.get("score_band"),
-            attempt_count: r.get("attempt_count"),
+        .map(|r| {
+            Ok(ScoreBandCount {
+                score_band: r.try_get("score_band")?,
+                attempt_count: r.try_get("attempt_count")?,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     score_distribution.sort_by_key(|r| {
         band_order
             .iter()
@@ -515,7 +581,16 @@ pub async fn get_public_quiz_statistics(store: &Store, quiz_id: &str) -> Result<
             .unwrap_or(3)
     });
     let score_distribution_denominator = score_distribution.iter().map(|r| r.attempt_count).sum();
-    let score_distribution_report_view = score_distribution_page(quiz_id, &score_distribution);
+    let language = normalize_stats_language(language);
+    let localized_bands = score_band_labels(language);
+    for row in &mut score_distribution {
+        let band_index = band_order.iter().position(|band| *band == row.score_band);
+        if let Some(label) = band_index.and_then(|index| localized_bands.get(index)) {
+            row.score_band = (*label).to_string();
+        }
+    }
+    let score_distribution_report_view =
+        score_distribution_page(quiz_id, &score_distribution, language);
 
     Ok(PublicQuizStats {
         quiz_id: quiz_id.to_string(),
@@ -529,10 +604,15 @@ pub async fn get_public_quiz_statistics(store: &Store, quiz_id: &str) -> Result<
         score_distribution_denominator,
         score_distribution,
         score_distribution_report_view,
+        question_provenance,
     })
 }
 
-pub async fn get_public_quiz(store: &Store, quiz_id: &str) -> Result<PublicQuizDetail> {
+pub async fn get_public_quiz(
+    store: &Store,
+    quiz_id: &str,
+    language: Option<&str>,
+) -> Result<PublicQuizDetail> {
     let row = sqlx::query(
         "SELECT q.id, q.owner_id, q.study_id, q.origin, q.active_version_id,
                 qv.title, COALESCE(s.description, '') AS description,
@@ -550,7 +630,7 @@ pub async fn get_public_quiz(store: &Store, quiz_id: &str) -> Result<PublicQuizD
 
     let active_vid: String = row.get("active_version_id");
     let tags = load_quiz_tags(store, quiz_id).await?;
-    let performance = get_public_quiz_statistics(store, quiz_id).await?;
+    let performance = get_public_quiz_statistics(store, quiz_id, language).await?;
 
     let q_rows = sqlx::query(
         "SELECT qu.id AS question_id, qu.origin, qver.id AS qv_id, qver.language, qver.couch_doc_id
@@ -720,7 +800,7 @@ pub async fn list_catalog(store: &Store, query: CatalogQuery) -> Result<CatalogP
         .bind(&active_vid)
         .fetch_one(&store.db)
         .await?;
-        let stats = get_public_quiz_statistics(store, &quiz_id).await?;
+        let stats = get_public_quiz_statistics(store, &quiz_id, None).await?;
 
         matched.push(CatalogQuizSummary {
             id: quiz_id,

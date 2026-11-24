@@ -160,9 +160,23 @@ async fn call(
     user: Option<&str>,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
+    call_with_language(app, method, uri, user, body, None).await
+}
+
+async fn call_with_language(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    user: Option<&str>,
+    body: Option<Value>,
+    language: Option<&str>,
+) -> (StatusCode, Value) {
     let mut req = Request::builder().method(method).uri(uri);
     if let Some(u) = user {
         req = req.header("x-uuid", u);
+    }
+    if let Some(language) = language {
+        req = req.header("accept-language", language);
     }
     if body.is_some() {
         req = req.header("content-type", "application/json");
@@ -302,6 +316,15 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     .await;
     assert_eq!(st, StatusCode::OK);
     let quiz_id = pub_quiz["id"].as_str().unwrap().to_string();
+    let membership_scope: String = sqlx::query_scalar(
+        "SELECT source_scope FROM quiz_version_questions qvq
+         JOIN quizzes q ON q.active_version_id = qvq.quiz_version_id WHERE q.id = $1",
+    )
+    .bind(&quiz_id)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(membership_scope, "unclassified");
 
     // Anonymous discovery & search work, with no answer-key or private filename leaks.
     let (st, cat) = call(
@@ -384,6 +407,72 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
         .unwrap();
     }
 
+    for (id, user, correct, total, started) in [
+        ("att-6", "learner-6", 99, 200, 600),  // 49.5%
+        ("att-7", "learner-7", 159, 200, 700), // 79.5%
+        ("att-8", "learner-8", 100, 200, 800), // 50%
+        ("att-9", "learner-9", 160, 200, 900), // 80%
+        ("att-10", "learner-10", 200, 200, 1000),
+        ("att-11", "learner-11", 0, 0, 1100), // undefined score is excluded
+        ("att-12", "learner-12", 0, 200, 1200), // 0%
+    ] {
+        sqlx::query(
+            "INSERT INTO attempts(id, owner_id, quiz_id, quiz_version_id, status, score_correct, score_total, started_at, completed_at)
+             VALUES($1, $2, $3, $4, 'completed', $5, $6, $7, $7 + 45)",
+        )
+        .bind(id)
+        .bind(user)
+        .bind(&quiz_id)
+        .bind(&qver_id)
+        .bind(correct)
+        .bind(total)
+        .bind(started)
+        .execute(&store.db)
+        .await
+        .unwrap();
+    }
+
+    let question_version_id: String = sqlx::query_scalar(
+        "SELECT question_version_id FROM quiz_version_questions WHERE quiz_version_id = $1",
+    )
+    .bind(&qver_id)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE quiz_version_questions SET source_scope = 'generated_from_current_selected_sources'
+         WHERE quiz_version_id = $1",
+    )
+    .bind(&qver_id)
+    .execute(&store.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO question_versions(id, question_id, version_num, language, schema_name, schema_version, couch_doc_id, created_at)
+         SELECT 'qver-extra', question_id, 2, language, schema_name, schema_version, couch_doc_id, created_at
+         FROM question_versions WHERE id = $1",
+    )
+    .bind(&question_version_id)
+    .execute(&store.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO quiz_version_questions(quiz_version_id, position, question_version_id, source_scope)
+         VALUES($1, 1, 'qver-extra', 'unclassified')",
+    )
+    .bind(&qver_id)
+    .execute(&store.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO attempt_answers(id, attempt_id, question_version_id, selected_option_id, is_correct, answered_at)
+         VALUES('answer-1', 'att-1', $1, 'a', 1, 145)",
+    )
+    .bind(&question_version_id)
+    .execute(&store.db)
+    .await
+    .unwrap();
+
     let (st, stats) = call(
         &app,
         "GET",
@@ -393,22 +482,145 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     )
     .await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(stats["completed_attempt_count"], 5);
-    assert_eq!(stats["distinct_participants"], 5);
-    assert_eq!(stats["average_score_pct"], 71.6);
-    assert_eq!(stats["average_score_denominator"], 5);
+    assert_eq!(stats["completed_attempt_count"], 12);
+    assert_eq!(
+        stats["question_provenance"]["generated_from_current_selected_sources"]["attempt_count"],
+        11
+    );
+    assert_eq!(
+        stats["question_provenance"]["generated_from_current_selected_sources"]["question_count"],
+        11
+    );
+    assert_eq!(
+        stats["question_provenance"]["generated_from_current_selected_sources"]["correct_question_count"],
+        1
+    );
+    assert_eq!(
+        stats["question_provenance"]["reused_public_question_version"]["question_count"],
+        0
+    );
+    assert_eq!(
+        stats["question_provenance"]["unclassified"]["question_count"],
+        11
+    );
+    assert_eq!(
+        stats["question_provenance"]["combined"]["attempt_count"],
+        11
+    );
+    assert_eq!(
+        stats["question_provenance"]["combined"]["question_count"],
+        22
+    );
+    assert_eq!(stats["distinct_participants"], 12);
+    assert!((stats["average_score_pct"].as_f64().unwrap() - 717.0 / 11.0).abs() < 1e-9);
+    assert_eq!(stats["average_score_denominator"], 11);
     assert_eq!(stats["typical_duration_sec"], 45);
-    assert_eq!(stats["duration_denominator"], 5);
-    assert_eq!(stats["score_distribution_denominator"], 5);
-    assert_eq!(stats["score_distribution"][0]["score_band"], "0-49%");
-    assert_eq!(stats["score_distribution"][0]["attempt_count"], 1);
-    assert_eq!(stats["score_distribution"][1]["score_band"], "50-79%");
-    assert_eq!(stats["score_distribution"][1]["attempt_count"], 2);
-    assert_eq!(stats["score_distribution"][2]["score_band"], "80-100%");
-    assert_eq!(stats["score_distribution"][2]["attempt_count"], 2);
+    assert_eq!(stats["duration_denominator"], 12);
+    assert_eq!(stats["score_distribution_denominator"], 11);
+    assert_eq!(stats["score_distribution"][0]["score_band"], "0% to <50%");
+    assert_eq!(stats["score_distribution"][0]["attempt_count"], 3);
+    assert_eq!(stats["score_distribution"][1]["score_band"], "50% to <80%");
+    assert_eq!(stats["score_distribution"][1]["attempt_count"], 4);
+    assert_eq!(stats["score_distribution"][2]["score_band"], "80% to 100%");
+    assert_eq!(stats["score_distribution"][2]["attempt_count"], 4);
     assert_eq!(
         stats["score_distribution_report_view"]["rows"][0]["score_band"],
-        "0-49%"
+        "0% to <50%"
+    );
+    assert_eq!(
+        stats["score_distribution_report_view"]["descriptor"]["meta"]["source"],
+        "Certifications API"
+    );
+    assert_eq!(
+        stats["score_distribution_report_view"]["descriptor"]["meta"]["sample_size"],
+        11
+    );
+    assert_eq!(
+        stats["score_distribution_report_view"]["descriptor"]["meta"]["sample_unit"],
+        "completed_attempts"
+    );
+
+    let (st, pt_stats) = call_with_language(
+        &app,
+        "GET",
+        &format!("/quizzes/{quiz_id}/statistics"),
+        None,
+        None,
+        Some("pt-BR,pt;q=0.9,en;q=0.8"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        pt_stats["score_distribution_report_view"]["descriptor"]["title"],
+        "Distribuição das pontuações do questionário"
+    );
+    assert_eq!(pt_stats["score_distribution"][0]["score_band"], "0% a <50%");
+    assert_eq!(
+        pt_stats["score_distribution_report_view"]["descriptor"]["meta"]["language"],
+        "pt-BR"
+    );
+    let (st, th_stats) = call_with_language(
+        &app,
+        "GET",
+        &format!("/quizzes/{quiz_id}/statistics"),
+        None,
+        None,
+        Some("th-TH,th;q=0.9"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        th_stats["score_distribution_report_view"]["descriptor"]["title"],
+        "การกระจายคะแนนแบบทดสอบ"
+    );
+    assert_eq!(
+        th_stats["score_distribution"][1]["score_band"],
+        "50% ถึงน้อยกว่า 80%"
+    );
+    let (st, th_detail) = call_with_language(
+        &app,
+        "GET",
+        &format!("/quizzes/{quiz_id}"),
+        None,
+        None,
+        Some("th-TH"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        th_detail["performance"]["score_distribution_report_view"]["descriptor"]["meta"]["language"],
+        "th"
+    );
+
+    sqlx::query(
+        "DELETE FROM attempts
+         WHERE quiz_id = $1 AND (
+             score_total = 0 OR
+             CASE WHEN score_total > 0 THEN score_correct * 100.0 / score_total END < 50 OR
+             CASE WHEN score_total > 0 THEN score_correct * 100.0 / score_total END >= 80
+         )",
+    )
+    .bind(&quiz_id)
+    .execute(&store.db)
+    .await
+    .unwrap();
+    let (st, sparse_stats) = call_with_language(
+        &app,
+        "GET",
+        &format!("/quizzes/{quiz_id}/statistics"),
+        None,
+        None,
+        Some("th-TH"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        sparse_stats["score_distribution"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        sparse_stats["score_distribution"][0]["score_band"],
+        "50% ถึงน้อยกว่า 80%"
     );
 
     sqlx::query("UPDATE quizzes SET visibility = 'private' WHERE id = $1")

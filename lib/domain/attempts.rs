@@ -8,6 +8,7 @@ use crate::{
         auth::{CallerIdentity, require_owner},
         authoring::{ORIGIN_CORTEX, ORIGIN_CREATOR},
         guardrail,
+        provenance::{QuestionProvenanceStats, question_provenance_stats},
     },
 };
 use serde::{Deserialize, Serialize};
@@ -47,9 +48,12 @@ pub struct AttemptHistoryItem {
     pub quiz_title: String,
     pub quiz_origin: String,
     pub quiz_version_id: String,
+    pub attempt_sequence: i64,
     pub status: String,
     pub score_correct: i64,
     pub score_total: i64,
+    pub previous_attempt_score_pct: Option<f64>,
+    pub score_change_percentage_points: Option<f64>,
     pub started_at: i64,
     pub completed_at: Option<i64>,
 }
@@ -82,6 +86,7 @@ pub struct PersonalStatistics {
     pub latest_attempt_per_quiz_score_denominator: i64,
     pub average_completion_time_seconds: Option<f64>,
     pub completion_time_denominator: i64,
+    pub question_provenance: QuestionProvenanceStats,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -389,10 +394,22 @@ pub async fn list_my_attempts(
     let limit = limit.clamp(1, 50);
     let offset = offset.max(0);
     let mut query = sqlx::QueryBuilder::<sqlx::Any>::new(
-        "SELECT a.id, a.quiz_id, qv.title AS quiz_title, q.origin AS quiz_origin, a.quiz_version_id, a.status, a.score_correct, a.score_total, a.started_at, a.completed_at
-         FROM attempts a JOIN quiz_versions qv ON qv.id = a.quiz_version_id JOIN quizzes q ON q.id = a.quiz_id WHERE a.owner_id = ",
+        "WITH sequenced AS (
+             SELECT a.*,
+                    ROW_NUMBER() OVER (PARTITION BY quiz_id ORDER BY started_at ASC, id ASC) AS attempt_sequence,
+                    LAG(CAST(CASE WHEN status = 'completed' AND score_total > 0 THEN score_correct * 100.0 / score_total END AS DOUBLE PRECISION))
+                        OVER (PARTITION BY quiz_id ORDER BY started_at ASC, id ASC) AS previous_attempt_score_pct
+             FROM attempts a WHERE a.owner_id = ",
     );
     query.push_bind(&caller.user_id);
+    query.push(
+        ")
+         SELECT a.id, a.quiz_id, qv.title AS quiz_title, q.origin AS quiz_origin, a.quiz_version_id,
+                a.attempt_sequence, a.status, a.score_correct, a.score_total,
+                a.previous_attempt_score_pct, a.started_at, a.completed_at
+         FROM sequenced a JOIN quiz_versions qv ON qv.id = a.quiz_version_id
+         JOIN quizzes q ON q.id = a.quiz_id WHERE 1 = 1",
+    );
     push_history_filters(&mut query, filter, search, quiz_id, tag);
     query
         .push(" ORDER BY a.started_at DESC, a.id DESC LIMIT ")
@@ -403,19 +420,37 @@ pub async fn list_my_attempts(
 
     let items = rows
         .into_iter()
-        .map(|r| AttemptHistoryItem {
-            id: r.get("id"),
-            quiz_id: r.get("quiz_id"),
-            quiz_title: r.get("quiz_title"),
-            quiz_origin: r.get("quiz_origin"),
-            quiz_version_id: r.get("quiz_version_id"),
-            status: r.get("status"),
-            score_correct: r.get("score_correct"),
-            score_total: r.get("score_total"),
-            started_at: r.get("started_at"),
-            completed_at: r.try_get("completed_at").ok(),
+        .map(|r| {
+            let status: String = r.try_get("status")?;
+            let score_correct: i64 = r.try_get("score_correct")?;
+            let score_total: i64 = r.try_get("score_total")?;
+            let current_score_pct = if status == "completed" && score_total > 0 {
+                Some(score_correct as f64 * 100.0 / score_total as f64)
+            } else {
+                None
+            };
+            let previous_attempt_score_pct: Option<f64> =
+                r.try_get("previous_attempt_score_pct")?;
+            let score_change_percentage_points = current_score_pct
+                .zip(previous_attempt_score_pct)
+                .map(|(current, previous)| current - previous);
+            Ok(AttemptHistoryItem {
+                id: r.try_get("id")?,
+                quiz_id: r.try_get("quiz_id")?,
+                quiz_title: r.try_get("quiz_title")?,
+                quiz_origin: r.try_get("quiz_origin")?,
+                quiz_version_id: r.try_get("quiz_version_id")?,
+                attempt_sequence: r.try_get("attempt_sequence")?,
+                status,
+                score_correct,
+                score_total,
+                previous_attempt_score_pct,
+                score_change_percentage_points,
+                started_at: r.try_get("started_at")?,
+                completed_at: r.try_get("completed_at")?,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     Ok(AttemptHistoryPage {
         items,
         total,
@@ -467,12 +502,12 @@ pub async fn personal_statistics(
     let row = sqlx::query(
         "SELECT COUNT(*) AS completed_attempt_count,
                 COUNT(DISTINCT quiz_id) AS distinct_quizzes_attempted,
-                AVG(CASE WHEN score_total > 0 THEN score_correct * 100.0 / score_total END) AS all_mean,
-                SUM(CASE WHEN score_total > 0 THEN 1 ELSE 0 END) AS all_n,
-                AVG(CASE WHEN latest_rank = 1 AND score_total > 0 THEN score_correct * 100.0 / score_total END) AS latest_mean,
-                SUM(CASE WHEN latest_rank = 1 AND score_total > 0 THEN 1 ELSE 0 END) AS latest_n,
-                AVG(CASE WHEN completed_at >= started_at THEN completed_at - started_at END) AS duration_mean,
-                SUM(CASE WHEN completed_at >= started_at THEN 1 ELSE 0 END) AS duration_n
+                AVG(CAST(CASE WHEN score_total > 0 THEN score_correct * 100.0 / score_total END AS DOUBLE PRECISION)) AS all_mean,
+                COALESCE(SUM(CASE WHEN score_total > 0 THEN 1 ELSE 0 END), 0) AS all_n,
+                AVG(CAST(CASE WHEN latest_rank = 1 AND score_total > 0 THEN score_correct * 100.0 / score_total END AS DOUBLE PRECISION)) AS latest_mean,
+                COALESCE(SUM(CASE WHEN latest_rank = 1 AND score_total > 0 THEN 1 ELSE 0 END), 0) AS latest_n,
+                AVG(CAST(CASE WHEN completed_at >= started_at THEN completed_at - started_at END AS DOUBLE PRECISION)) AS duration_mean,
+                COALESCE(SUM(CASE WHEN completed_at >= started_at THEN 1 ELSE 0 END), 0) AS duration_n
          FROM (
              SELECT a.*, ROW_NUMBER() OVER (
                  PARTITION BY quiz_id
@@ -486,14 +521,15 @@ pub async fn personal_statistics(
     .await?;
     Ok(PersonalStatistics {
         created_quiz_count,
-        completed_attempt_count: row.get("completed_attempt_count"),
-        distinct_quizzes_attempted: row.get("distinct_quizzes_attempted"),
-        all_attempt_mean_score_pct: row.try_get("all_mean").ok(),
-        all_attempt_score_denominator: row.try_get("all_n").unwrap_or(0),
-        latest_attempt_per_quiz_mean_score_pct: row.try_get("latest_mean").ok(),
-        latest_attempt_per_quiz_score_denominator: row.try_get("latest_n").unwrap_or(0),
-        average_completion_time_seconds: row.try_get("duration_mean").ok(),
-        completion_time_denominator: row.try_get("duration_n").unwrap_or(0),
+        completed_attempt_count: row.try_get("completed_attempt_count")?,
+        distinct_quizzes_attempted: row.try_get("distinct_quizzes_attempted")?,
+        all_attempt_mean_score_pct: row.try_get("all_mean")?,
+        all_attempt_score_denominator: row.try_get("all_n")?,
+        latest_attempt_per_quiz_mean_score_pct: row.try_get("latest_mean")?,
+        latest_attempt_per_quiz_score_denominator: row.try_get("latest_n")?,
+        average_completion_time_seconds: row.try_get("duration_mean")?,
+        completion_time_denominator: row.try_get("duration_n")?,
+        question_provenance: question_provenance_stats(store, "owner", &caller.user_id).await?,
     })
 }
 
