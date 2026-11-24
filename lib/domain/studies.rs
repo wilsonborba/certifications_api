@@ -133,23 +133,246 @@ fn default_text_mime() -> String {
     "text/plain".to_string()
 }
 
-fn validate_selection(kind: &str, spec: &str) -> Result<()> {
+const MAX_SELECTION_SPEC_BYTES: usize = 2000;
+const MAX_SELECTION_RANGES: usize = 64;
+
+fn parse_ascii_u64(s: &str) -> Option<u64> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse::<u64>().ok()
+}
+
+pub fn canonicalize_selection(
+    kind: &str,
+    spec: &str,
+    mime_type: Option<&str>,
+    max_pages: Option<u32>,
+    max_duration_ms: Option<u64>,
+) -> Result<String> {
     if !matches!(kind, "all" | "pages" | "passages" | "intervals") {
         return Err(Error::unprocessable(
             "invalid_selection: Selection kind must be all, pages, passages, or intervals",
         ));
     }
-    if kind != "all" && spec.trim().is_empty() {
+    let trimmed = spec.trim();
+    if trimmed.len() > MAX_SELECTION_SPEC_BYTES {
+        return Err(Error::unprocessable(
+            "invalid_selection: Selection spec exceeds 2000 bytes",
+        ));
+    }
+    if kind == "all" {
+        if !trimmed.is_empty() {
+            return Err(Error::unprocessable(
+                "invalid_selection: Selection spec must be empty when kind is all",
+            ));
+        }
+        return Ok(String::new());
+    }
+    if trimmed.is_empty() {
         return Err(Error::unprocessable(
             "invalid_selection: Selection spec is required when kind is not all",
         ));
     }
-    if spec.len() > 2000 {
-        return Err(Error::unprocessable(
-            "invalid_selection: Selection spec is too long",
-        ));
+
+    match kind {
+        "pages" => {
+            if let Some(mt) = mime_type
+                && !mt.trim().eq_ignore_ascii_case("application/pdf")
+            {
+                return Err(Error::unprocessable(
+                    "invalid_selection: pages selection requires application/pdf source",
+                ));
+            }
+            let parts: Vec<&str> = trimmed.split(',').collect();
+            if parts.len() > MAX_SELECTION_RANGES {
+                return Err(Error::unprocessable(
+                    "invalid_selection: Too many page ranges",
+                ));
+            }
+            let mut ranges: Vec<(u32, u32)> = Vec::with_capacity(parts.len());
+            for raw_part in parts {
+                let part = raw_part.trim();
+                if part.is_empty() {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: Empty page range segment",
+                    ));
+                }
+                let (s, e) = if let Some((a, b)) = part.split_once('-') {
+                    let sv = parse_ascii_u64(a)
+                        .and_then(|v| u32::try_from(v).ok())
+                        .ok_or_else(|| {
+                            Error::unprocessable("invalid_selection: Invalid page start")
+                        })?;
+                    let ev = parse_ascii_u64(b)
+                        .and_then(|v| u32::try_from(v).ok())
+                        .ok_or_else(|| {
+                            Error::unprocessable("invalid_selection: Invalid page end")
+                        })?;
+                    (sv, ev)
+                } else {
+                    let v = parse_ascii_u64(part)
+                        .and_then(|v| u32::try_from(v).ok())
+                        .ok_or_else(|| {
+                            Error::unprocessable("invalid_selection: Invalid page number")
+                        })?;
+                    (v, v)
+                };
+                if s == 0 || e < s || e > 100_000 {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: Page range must be 1-based with start <= end",
+                    ));
+                }
+                if let Some(limit) = max_pages
+                    && e > limit
+                {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: Page range exceeds PDF page_count",
+                    ));
+                }
+                if let Some(&(_, prev_end)) = ranges.last()
+                    && s <= prev_end
+                {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: Page ranges must be strictly increasing and disjoint",
+                    ));
+                }
+                ranges.push((s, e));
+            }
+            Ok(ranges
+                .into_iter()
+                .map(|(s, e)| {
+                    if s == e {
+                        s.to_string()
+                    } else {
+                        format!("{s}-{e}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(","))
+        }
+        "passages" => {
+            if let Some(mt) = mime_type {
+                let m = mt.trim().to_ascii_lowercase();
+                if !m.starts_with("text/")
+                    && m != "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: passages selection requires text or DOCX source",
+                    ));
+                }
+            }
+            let parts: Vec<&str> = trimmed.split(',').collect();
+            if parts.len() > MAX_SELECTION_RANGES {
+                return Err(Error::unprocessable(
+                    "invalid_selection: Too many passage ranges",
+                ));
+            }
+            let mut ranges: Vec<(u64, u64)> = Vec::with_capacity(parts.len());
+            for raw_part in parts {
+                let part = raw_part.trim();
+                let rest = part.strip_prefix("p1:").ok_or_else(|| {
+                    Error::unprocessable("invalid_selection: Passage range must use p1:start-end")
+                })?;
+                let (a, b) = rest.split_once('-').ok_or_else(|| {
+                    Error::unprocessable("invalid_selection: Passage range must use p1:start-end")
+                })?;
+                let s = parse_ascii_u64(a).ok_or_else(|| {
+                    Error::unprocessable("invalid_selection: Invalid passage start offset")
+                })?;
+                let e = parse_ascii_u64(b).ok_or_else(|| {
+                    Error::unprocessable("invalid_selection: Invalid passage end offset")
+                })?;
+                if e <= s {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: Passage range must be half-open with end > start",
+                    ));
+                }
+                if let Some(&(_, prev_end)) = ranges.last()
+                    && s < prev_end
+                {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: Passage ranges must be sorted and non-overlapping",
+                    ));
+                }
+                ranges.push((s, e));
+            }
+            Ok(ranges
+                .into_iter()
+                .map(|(s, e)| format!("p1:{s}-{e}"))
+                .collect::<Vec<_>>()
+                .join(","))
+        }
+        "intervals" => {
+            if let Some(mt) = mime_type
+                && !mt.trim().to_ascii_lowercase().starts_with("audio/")
+            {
+                return Err(Error::unprocessable(
+                    "invalid_selection: intervals selection requires an audio source",
+                ));
+            }
+            let body = trimmed.strip_prefix("ms:").ok_or_else(|| {
+                Error::unprocessable("invalid_selection: Intervals spec must start with ms:")
+            })?;
+            if body.is_empty() {
+                return Err(Error::unprocessable(
+                    "invalid_selection: Intervals spec requires at least one start-end range",
+                ));
+            }
+            let parts: Vec<&str> = body.split(',').collect();
+            if parts.len() > MAX_SELECTION_RANGES {
+                return Err(Error::unprocessable(
+                    "invalid_selection: Too many audio intervals",
+                ));
+            }
+            let mut ranges: Vec<(u64, u64)> = Vec::with_capacity(parts.len());
+            for raw_part in parts {
+                let part = raw_part.trim();
+                let (a, b) = part.split_once('-').ok_or_else(|| {
+                    Error::unprocessable(
+                        "invalid_selection: Each interval must be integer milliseconds start-end",
+                    )
+                })?;
+                let s = parse_ascii_u64(a).ok_or_else(|| {
+                    Error::unprocessable("invalid_selection: Invalid interval start milliseconds")
+                })?;
+                let e = parse_ascii_u64(b).ok_or_else(|| {
+                    Error::unprocessable("invalid_selection: Invalid interval end milliseconds")
+                })?;
+                if e <= s {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: Interval must be half-open with end > start",
+                    ));
+                }
+                if let Some(dur) = max_duration_ms
+                    && e > dur
+                {
+                    return Err(Error::unprocessable(
+                        "invalid_selection: Interval exceeds known audio duration",
+                    ));
+                }
+                if let Some(last) = ranges.last_mut() {
+                    if s < last.1 {
+                        return Err(Error::unprocessable(
+                            "invalid_selection: Intervals must be sorted and disjoint",
+                        ));
+                    }
+                    if s == last.1 {
+                        last.1 = e;
+                        continue;
+                    }
+                }
+                ranges.push((s, e));
+            }
+            let joined = ranges
+                .into_iter()
+                .map(|(s, e)| format!("{s}-{e}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            Ok(format!("ms:{joined}"))
+        }
+        _ => unreachable!(),
     }
-    Ok(())
 }
 
 async fn load_owned_study(
@@ -406,15 +629,23 @@ pub async fn create_prepared_study(
         ));
     }
     let mut verified_sizes = Vec::with_capacity(input.sources.len());
+    let mut canonical_specs = Vec::with_capacity(input.sources.len());
     for s in &input.sources {
         if s.fsm_ref.trim().is_empty() || s.filename.trim().is_empty() || s.size_bytes < 0 {
             return Err(Error::unprocessable(
                 "invalid_source: Prepared source requires filename, fsm_ref, and non-negative size",
             ));
         }
-        validate_selection(&s.selection_kind, &s.selection_spec)?;
+        let canon = canonicalize_selection(
+            &s.selection_kind,
+            &s.selection_spec,
+            Some(&s.mime_type),
+            None,
+            None,
+        )?;
         let verified_size = authorize_fsm_ref(store, caller, &s.fsm_ref, trusted_service).await?;
         verified_sizes.push(verified_size.unwrap_or(s.size_bytes));
+        canonical_specs.push(canon);
     }
 
     let study_id = new_id();
@@ -438,7 +669,12 @@ pub async fn create_prepared_study(
     } else {
         "owned_ref"
     };
-    for (s, effective_size) in input.sources.into_iter().zip(verified_sizes) {
+    for ((s, effective_size), canon_spec) in input
+        .sources
+        .into_iter()
+        .zip(verified_sizes)
+        .zip(canonical_specs)
+    {
         let source_id = new_id();
         sqlx::query(
             "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, source_provenance, created_at, updated_at)
@@ -453,7 +689,7 @@ pub async fn create_prepared_study(
         .bind(s.sha256.trim())
         .bind(s.fsm_ref.trim())
         .bind(s.selection_kind)
-        .bind(s.selection_spec.trim())
+        .bind(canon_spec)
         .bind(provenance)
         .bind(ts)
         .execute(&mut *tx)
@@ -1096,14 +1332,40 @@ pub async fn update_selection(
     source_id: &str,
     input: SelectionInput,
 ) -> Result<SourceSummary> {
-    validate_selection(&input.kind, &input.spec)?;
-    let _ = get_source(store, caller, study_id, source_id).await?;
+    let src = get_source(store, caller, study_id, source_id).await?;
+    let mut max_pages = None;
+    let mut max_duration_ms = None;
+    if !src.fsm_ref.trim().is_empty()
+        && src.status == "ready"
+        && matches!(input.kind.as_str(), "pages" | "intervals")
+        && ensure_source_blob_readable(store, caller, study_id, &src)
+            .await
+            .is_ok()
+        && let Ok(bytes) = store
+            .fsm
+            .get_bytes_bounded(&src.fsm_ref, 16 * 1024 * 1024)
+            .await
+    {
+        if input.kind == "pages" && src.mime_type.eq_ignore_ascii_case("application/pdf") {
+            max_pages = extract_pdf_page_count(&bytes);
+        } else if input.kind == "intervals" {
+            max_duration_ms =
+                cheap_wav_duration_seconds(&bytes).map(|secs| (secs * 1000.0).round() as u64);
+        }
+    }
+    let canon = canonicalize_selection(
+        &input.kind,
+        &input.spec,
+        Some(&src.mime_type),
+        max_pages,
+        max_duration_ms,
+    )?;
     let ts = now();
     sqlx::query(
         "UPDATE sources SET selection_kind = $1, selection_spec = $2, updated_at = $3 WHERE id = $4 AND study_id = $5",
     )
     .bind(&input.kind)
-    .bind(input.spec.trim())
+    .bind(&canon)
     .bind(ts)
     .bind(source_id)
     .bind(study_id)
