@@ -334,6 +334,21 @@ async fn ensure_source_blob_readable(
             "fsm_ref_forbidden: Caller does not own referenced blob",
         ));
     }
+    let row_provenance: Option<String> =
+        sqlx::query("SELECT source_provenance FROM sources WHERE id = $1 AND owner_id = $2")
+            .bind(&src.id)
+            .bind(&caller.user_id)
+            .fetch_optional(&store.db)
+            .await?
+            .map(|r| r.get("source_provenance"));
+    if !matches!(
+        row_provenance.as_deref(),
+        Some("upload" | "prepared_service" | "owned_ref")
+    ) {
+        return Err(Error::forbidden(
+            "fsm_ref_forbidden: Source row lacks verified server-only authorization provenance",
+        ));
+    }
     let proven = match src.source_kind.as_str() {
         "upload" => {
             let expected_prefix = format!("certifications/{}/", caller.user_id);
@@ -418,11 +433,16 @@ pub async fn create_prepared_study(
     .execute(&mut *tx)
     .await?;
 
+    let provenance = if trusted_service {
+        "prepared_service"
+    } else {
+        "owned_ref"
+    };
     for (s, effective_size) in input.sources.into_iter().zip(verified_sizes) {
         let source_id = new_id();
         sqlx::query(
-            "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, created_at, updated_at)
-             VALUES($1, $2, $3, $4, $5, $6, $7, $8, 'fsm_ref', 'ready', $9, $10, 0, '', $11, $11)",
+            "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, source_provenance, created_at, updated_at)
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8, 'fsm_ref', 'ready', $9, $10, 0, '', $11, $12, $12)",
         )
         .bind(&source_id)
         .bind(&caller.user_id)
@@ -434,6 +454,7 @@ pub async fn create_prepared_study(
         .bind(s.fsm_ref.trim())
         .bind(s.selection_kind)
         .bind(s.selection_spec.trim())
+        .bind(provenance)
         .bind(ts)
         .execute(&mut *tx)
         .await?;
@@ -663,7 +684,7 @@ pub async fn add_source_upload(
     quotas::commit_ledger(store, &ledger_id).await?;
     let done_ts = now();
     sqlx::query(
-        "UPDATE sources SET sha256 = $1, fsm_ref = $2, status = 'ready', updated_at = $3 WHERE id = $4",
+        "UPDATE sources SET sha256 = $1, fsm_ref = $2, status = 'ready', source_provenance = 'upload', updated_at = $3 WHERE id = $4",
     )
     .bind(&hash)
     .bind(&fsm_key)
@@ -729,9 +750,14 @@ pub async fn add_source_reference(
     let source_id = new_id();
     let ts = now();
     let restricted = i32::from(is_restricted);
+    let provenance = if input.kind == "fsm_ref" {
+        "owned_ref"
+    } else {
+        "unknown"
+    };
     sqlx::query(
-        "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, created_at, updated_at)
-         VALUES($1, $2, $3, $4, $5, $6, '', $7, $8, 'ready', 'all', '', $9, $10, $11, $11)",
+        "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, source_provenance, created_at, updated_at)
+         VALUES($1, $2, $3, $4, $5, $6, '', $7, $8, 'ready', 'all', '', $9, $10, $11, $12, $12)",
     )
     .bind(&source_id)
     .bind(&caller.user_id)
@@ -743,6 +769,7 @@ pub async fn add_source_reference(
     .bind(&input.kind)
     .bind(restricted)
     .bind(input.external_ref.trim())
+    .bind(provenance)
     .bind(ts)
     .execute(&store.db)
     .await?;
