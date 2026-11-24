@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(certifications)* Add provenance to attempt statistics ([`8a568fc`](https://github.com/wilsonborba/certifications_api/commit/8a568fc0a1f0a8f8671678771cff2770668cffff))
 - *(certifications)* Validate reuse lifecycle and bound public search ([`19a0491`](https://github.com/wilsonborba/certifications_api/commit/19a04913c13e82114e41bec24f645909e39f62b3))
 - *(certifications)* Hide private citation in reused quiz results ([`b596ba7`](https://github.com/wilsonborba/certifications_api/commit/b596ba7be2b1cc0301a89cda050b0597afa3be4a))
+- *(catalog)* Retain rebuild cursor on batch failure (#49) ([`33890b0`](https://github.com/wilsonborba/certifications_api/commit/33890b094951e7821aa054ce2d8b9dea0d1bb443))
 
 ### 💼 Other Changes
 
@@ -83,6 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(release)* Sync release/v1.0.0 back to feature/main ([`b014731`](https://github.com/wilsonborba/certifications_api/commit/b014731f5f5218f649958c424d281d595b21f826))
 - *(security)* Add app-owned ClamAV runtime without system service (#47) ([`17ff9bc`](https://github.com/wilsonborba/certifications_api/commit/17ff9bcf9633f7eecdbf1d723d31d24d9b8d0f66))
 - Remove ignored docs artifact from public branch ([`c44b9cb`](https://github.com/wilsonborba/certifications_api/commit/c44b9cb866d2546e93a4fe59c311cb1d3fd679ef))
+- Refresh unreleased changelog ([`71844ee`](https://github.com/wilsonborba/certifications_api/commit/71844ee70b5cfc6bf2ddc4f26b9289b254136fe4))
 ## [1.0.0] - 2026-09-08
 
 ### 🚀 Features
