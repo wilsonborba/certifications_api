@@ -102,15 +102,73 @@ async fn create(
     Ok((StatusCode::CREATED, Json(json!(study))))
 }
 
+const MAX_METADATA_BYTES: usize = 64 * 1024;
+const MAX_FIELD_FILENAME_BYTES: usize = 512;
+const MAX_FIELD_MIME_BYTES: usize = 256;
+
+fn has_valid_service_key(headers: &HeaderMap, configured: &str) -> bool {
+    let expected = configured.trim().as_bytes();
+    if expected.is_empty() {
+        return false;
+    }
+    let Some(provided) = headers
+        .get("x-service-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().as_bytes())
+    else {
+        return false;
+    };
+    if expected.len() != provided.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&a, &b) in expected.iter().zip(provided.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+async fn read_bounded_text_field(
+    field: &mut axum::extract::multipart::Field<'_>,
+    max_bytes: usize,
+    label: &str,
+) -> Result<String> {
+    let mut buf = Vec::new();
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|_| Error::unprocessable(format!("invalid_multipart: Invalid {label}")))?
+    {
+        if buf.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(Error::unprocessable(format!(
+                "invalid_multipart: {label} exceeds maximum length"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    let s = String::from_utf8(buf)
+        .map_err(|_| Error::unprocessable(format!("invalid_multipart: Non-UTF8 {label}")))?;
+    if s.chars().any(char::is_control) {
+        return Err(Error::unprocessable(format!(
+            "invalid_multipart: {label} contains control characters"
+        )));
+    }
+    Ok(s)
+}
+
 async fn create_prepared(
     State(app): State<App>,
     SessionUser(caller): SessionUser,
+    headers: HeaderMap,
     Json(raw): Json<Value>,
 ) -> Result<(StatusCode, Json<Value>)> {
     reject_caller_authority_fields(&raw)?;
     let input: PreparedStudyInput =
         serde_json::from_value(raw).map_err(|_| Error::unprocessable("invalid_body"))?;
-    let detail = studies::create_prepared_study(&app.store, &caller, input, &app.quotas).await?;
+    let trusted_service = has_valid_service_key(&headers, &app.settings.certifications_service_key);
+    let detail =
+        studies::create_prepared_study(&app.store, &caller, input, &app.quotas, trusted_service)
+            .await?;
     Ok((StatusCode::CREATED, Json(json!(detail))))
 }
 
@@ -153,44 +211,109 @@ async fn add_source(
     Path(study_id): Path<String>,
     req: Request,
 ) -> Result<(StatusCode, Json<Value>)> {
+    let max_file_bytes = app.quotas.get().max_file_bytes.max(0) as usize;
+    let max_total_bytes = max_file_bytes.saturating_add(MAX_METADATA_BYTES);
+
+    if let Some(cl) = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        && cl > max_total_bytes
+    {
+        return Err(Error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "quota_exceeded: Request body exceeds configured upload limit".into(),
+        ));
+    }
+
     let is_multipart = req
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.to_ascii_lowercase().starts_with("multipart/form-data"));
 
+    let (parts, body) = req.into_parts();
+    let limited_req = Request::from_parts(
+        parts,
+        Body::new(http_body_util::Limited::new(body, max_total_bytes)),
+    );
+
     if is_multipart {
         let _ = studies::get_study(&app.store, &caller, &study_id, &app.quotas).await?;
-        let mut multipart = Multipart::from_request(req, &app)
+        let mut multipart = Multipart::from_request(limited_req, &app)
             .await
             .map_err(|_| Error::unprocessable("invalid_multipart: Malformed multipart body"))?;
-        let max_file_bytes = app.quotas.get().max_file_bytes.max(0) as usize;
         let mut filename: Option<String> = None;
+        let mut filename_field_seen = false;
         let mut mime_type: Option<String> = None;
+        let mut mime_field_seen = false;
         let mut file_bytes: Option<Vec<u8>> = None;
 
-        while let Some(mut field) = multipart.next_field().await.map_err(|_| {
-            Error::unprocessable("invalid_multipart: Failed reading multipart field")
+        while let Some(mut field) = multipart.next_field().await.map_err(|err| {
+            if err.status() == StatusCode::PAYLOAD_TOO_LARGE
+                || err
+                    .body_text()
+                    .to_ascii_lowercase()
+                    .contains("length limit")
+            {
+                Error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "quota_exceeded: Multipart upload exceeds configured limit".into(),
+                )
+            } else {
+                Error::unprocessable("invalid_multipart: Failed reading multipart field")
+            }
         })? {
             match field.name() {
                 Some("file") => {
+                    if file_bytes.is_some() {
+                        return Err(Error::unprocessable(
+                            "invalid_multipart: Duplicate file field is not allowed",
+                        ));
+                    }
                     if filename.is_none()
                         && let Some(name) = field.file_name()
                     {
+                        if name.len() > MAX_FIELD_FILENAME_BYTES
+                            || name.chars().any(char::is_control)
+                        {
+                            return Err(Error::unprocessable(
+                                "invalid_multipart: Invalid filename metadata",
+                            ));
+                        }
                         filename = Some(name.to_string());
                     }
                     if mime_type.is_none()
                         && let Some(ct) = field.content_type()
                     {
+                        if ct.len() > MAX_FIELD_MIME_BYTES || ct.chars().any(char::is_control) {
+                            return Err(Error::unprocessable(
+                                "invalid_multipart: Invalid mime_type metadata",
+                            ));
+                        }
                         mime_type = Some(ct.to_string());
                     }
                     let mut buf = Vec::new();
-                    while let Some(chunk) = field.chunk().await.map_err(|_| {
-                        Error::unprocessable("invalid_multipart: Truncated file upload")
+                    while let Some(chunk) = field.chunk().await.map_err(|err| {
+                        if err.status() == StatusCode::PAYLOAD_TOO_LARGE
+                            || err
+                                .body_text()
+                                .to_ascii_lowercase()
+                                .contains("length limit")
+                        {
+                            Error(
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "quota_exceeded: Multipart upload exceeds configured limit".into(),
+                            )
+                        } else {
+                            Error::unprocessable("invalid_multipart: Truncated file upload")
+                        }
                     })? {
                         if buf.len().saturating_add(chunk.len()) > max_file_bytes {
-                            return Err(Error::unprocessable(
-                                "quota_exceeded: File size exceeds study quota",
+                            return Err(Error(
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "quota_exceeded: File size exceeds study quota".into(),
                             ));
                         }
                         buf.extend_from_slice(&chunk);
@@ -198,23 +321,45 @@ async fn add_source(
                     file_bytes = Some(buf);
                 }
                 Some("filename") => {
-                    let val = field
-                        .text()
-                        .await
-                        .map_err(|_| Error::unprocessable("invalid_multipart: Invalid filename"))?;
+                    if filename_field_seen {
+                        return Err(Error::unprocessable(
+                            "invalid_multipart: Duplicate filename field",
+                        ));
+                    }
+                    filename_field_seen = true;
+                    let val =
+                        read_bounded_text_field(&mut field, MAX_FIELD_FILENAME_BYTES, "filename")
+                            .await?;
                     if !val.trim().is_empty() {
                         filename = Some(val);
                     }
                 }
                 Some("mime_type") => {
-                    let val = field.text().await.map_err(|_| {
-                        Error::unprocessable("invalid_multipart: Invalid mime_type")
-                    })?;
+                    if mime_field_seen {
+                        return Err(Error::unprocessable(
+                            "invalid_multipart: Duplicate mime_type field",
+                        ));
+                    }
+                    mime_field_seen = true;
+                    let val =
+                        read_bounded_text_field(&mut field, MAX_FIELD_MIME_BYTES, "mime_type")
+                            .await?;
                     if !val.trim().is_empty() {
                         mime_type = Some(val);
                     }
                 }
-                _ => {}
+                Some(
+                    forbidden @ ("owner_id" | "user_id" | "access_level" | "is_admin" | "role"),
+                ) => {
+                    return Err(Error::unprocessable(format!(
+                        "authority_field_forbidden: Caller payload cannot set '{forbidden}'"
+                    )));
+                }
+                _ => {
+                    return Err(Error::unprocessable(
+                        "invalid_multipart: Unsupported multipart field",
+                    ));
+                }
             }
         }
 
@@ -235,9 +380,14 @@ async fn add_source(
         return Ok((StatusCode::CREATED, Json(json!(src))));
     }
 
-    let raw_bytes = axum::body::Bytes::from_request(req, &app)
+    let raw_bytes = axum::body::to_bytes(limited_req.into_body(), max_total_bytes)
         .await
-        .map_err(|_| Error::unprocessable("invalid_body"))?;
+        .map_err(|_| {
+            Error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "quota_exceeded: JSON source payload exceeds configured upload limit".into(),
+            )
+        })?;
     let raw: Value =
         serde_json::from_slice(&raw_bytes).map_err(|_| Error::unprocessable("invalid_body"))?;
     reject_caller_authority_fields(&raw)?;
@@ -294,8 +444,9 @@ async fn content_source(
     Path((study_id, source_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response> {
+    let max_bytes = app.quotas.get().max_file_bytes.max(0) as usize;
     let (src, bytes) =
-        studies::get_source_content(&app.store, &caller, &study_id, &source_id).await?;
+        studies::get_source_content(&app.store, &caller, &study_id, &source_id, max_bytes).await?;
     let total = bytes.len();
     let content_type = header::HeaderValue::from_str(&src.mime_type)
         .unwrap_or_else(|_| header::HeaderValue::from_static("application/octet-stream"));
@@ -336,7 +487,8 @@ async fn preview_source(
     SessionUser(caller): SessionUser,
     Path((study_id, source_id)): Path<(String, String)>,
 ) -> Result<Json<Value>> {
-    let p = studies::preview_source(&app.store, &caller, &study_id, &source_id).await?;
+    let max_bytes = app.quotas.get().max_file_bytes.max(0) as usize;
+    let p = studies::preview_source(&app.store, &caller, &study_id, &source_id, max_bytes).await?;
     Ok(Json(p))
 }
 

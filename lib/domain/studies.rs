@@ -269,11 +269,69 @@ pub async fn create_study(
     })
 }
 
+async fn authorize_fsm_ref(
+    store: &Store,
+    caller: &CallerIdentity,
+    fsm_ref: &str,
+    trusted_service: bool,
+) -> Result<Option<i64>> {
+    let trimmed = fsm_ref.trim();
+    if trimmed.is_empty() {
+        return Err(Error::unprocessable("invalid_source: fsm_ref is required"));
+    }
+    let existing = sqlx::query(
+        "SELECT owner_id, size_bytes, status FROM sources WHERE fsm_ref = $1 AND status <> 'deleted' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(trimmed)
+    .fetch_optional(&store.db)
+    .await?;
+
+    if let Some(row) = existing {
+        let owner_id: String = row.get("owner_id");
+        let size_bytes: i64 = row.get("size_bytes");
+        let status: String = row.get("status");
+        if owner_id != caller.user_id || status != "ready" {
+            return Err(Error::forbidden(
+                "fsm_ref_forbidden: Caller is not authorized to reference this file",
+            ));
+        }
+        return Ok(Some(size_bytes));
+    }
+
+    if trusted_service {
+        return Ok(None);
+    }
+    Err(Error::forbidden(
+        "fsm_ref_forbidden: Reference is not an authorized owned file",
+    ))
+}
+
+async fn ensure_source_blob_readable(
+    store: &Store,
+    caller: &CallerIdentity,
+    src: &SourceSummary,
+) -> Result<()> {
+    let conflict = sqlx::query(
+        "SELECT owner_id FROM sources WHERE fsm_ref = $1 AND status <> 'deleted' AND owner_id <> $2 LIMIT 1",
+    )
+    .bind(src.fsm_ref.trim())
+    .bind(&caller.user_id)
+    .fetch_optional(&store.db)
+    .await?;
+    if conflict.is_some() {
+        return Err(Error::forbidden(
+            "fsm_ref_forbidden: Caller does not own referenced blob",
+        ));
+    }
+    Ok(())
+}
+
 pub async fn create_prepared_study(
     store: &Store,
     caller: &CallerIdentity,
     input: PreparedStudyInput,
     quotas: &QuotaCache,
+    trusted_service: bool,
 ) -> Result<StudyDetail> {
     let title = input.title.trim();
     if title.is_empty() || title.chars().count() > 200 {
@@ -286,6 +344,7 @@ pub async fn create_prepared_study(
             "invalid_sources: Prepared study requires 1 to 20 sources",
         ));
     }
+    let mut verified_sizes = Vec::with_capacity(input.sources.len());
     for s in &input.sources {
         if s.fsm_ref.trim().is_empty() || s.filename.trim().is_empty() || s.size_bytes < 0 {
             return Err(Error::unprocessable(
@@ -293,6 +352,8 @@ pub async fn create_prepared_study(
             ));
         }
         validate_selection(&s.selection_kind, &s.selection_spec)?;
+        let verified_size = authorize_fsm_ref(store, caller, &s.fsm_ref, trusted_service).await?;
+        verified_sizes.push(verified_size.unwrap_or(s.size_bytes));
     }
 
     let study_id = new_id();
@@ -311,7 +372,7 @@ pub async fn create_prepared_study(
     .execute(&mut *tx)
     .await?;
 
-    for s in input.sources {
+    for (s, effective_size) in input.sources.into_iter().zip(verified_sizes) {
         let source_id = new_id();
         sqlx::query(
             "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, created_at, updated_at)
@@ -322,7 +383,7 @@ pub async fn create_prepared_study(
         .bind(&study_id)
         .bind(s.filename.trim())
         .bind(s.mime_type.trim())
-        .bind(s.size_bytes)
+        .bind(effective_size)
         .bind(s.sha256.trim())
         .bind(s.fsm_ref.trim())
         .bind(s.selection_kind)
@@ -596,7 +657,13 @@ pub async fn add_source_reference(
         ));
     }
     let mut is_restricted = input.is_restricted;
-    if input.kind == "report" {
+    let mut effective_size = input.size_bytes.max(0);
+    if input.kind == "fsm_ref" {
+        if let Some(verified_size) = authorize_fsm_ref(store, caller, &input.fsm_ref, false).await?
+        {
+            effective_size = verified_size;
+        }
+    } else if input.kind == "report" {
         let (project, report) = input
             .external_ref
             .trim()
@@ -625,7 +692,7 @@ pub async fn add_source_reference(
     .bind(study_id)
     .bind(input.filename.trim())
     .bind(input.mime_type.trim())
-    .bind(input.size_bytes.max(0))
+    .bind(effective_size)
     .bind(input.fsm_ref.trim())
     .bind(&input.kind)
     .bind(restricted)
@@ -638,7 +705,7 @@ pub async fn add_source_reference(
         id: source_id,
         filename: input.filename.trim().to_string(),
         mime_type: input.mime_type.trim().to_string(),
-        size_bytes: input.size_bytes.max(0),
+        size_bytes: effective_size,
         sha256: String::new(),
         fsm_ref: input.fsm_ref.trim().to_string(),
         source_kind: input.kind,
@@ -666,29 +733,136 @@ pub async fn get_source(
         .ok_or_else(Error::missing)
 }
 
-pub fn cheap_pdf_page_count(bytes: &[u8]) -> Option<u32> {
+fn strip_pdf_comments_and_streams(bytes: &[u8]) -> Option<String> {
+    let mut out = Vec::with_capacity(bytes.len().min(512 * 1024));
+    let mut i = 0usize;
+    let mut paren_depth = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if paren_depth > 0 {
+            if b == b'\\' && i + 1 < bytes.len() {
+                out.push(b' ');
+                i += 2;
+                continue;
+            }
+            if b == b'(' {
+                paren_depth += 1;
+            } else if b == b')' {
+                paren_depth -= 1;
+            }
+            out.push(b' ');
+            i += 1;
+            continue;
+        }
+        if b == b'(' {
+            paren_depth = 1;
+            out.push(b' ');
+            i += 1;
+            continue;
+        }
+        if b == b'%' {
+            while i < bytes.len() && bytes[i] != b'\n' && bytes[i] != b'\r' {
+                i += 1;
+            }
+            out.push(b' ');
+            continue;
+        }
+        if bytes[i..].starts_with(b"stream")
+            && (i == 0 || bytes[i - 1].is_ascii_whitespace() || bytes[i - 1] == b'>')
+            && bytes.get(i + 6).is_some_and(|c| *c == b'\r' || *c == b'\n')
+        {
+            if let Some(rel) = bytes[i + 6..].windows(9).position(|w| w == b"endstream") {
+                out.extend_from_slice(b" ");
+                i = i + 6 + rel + 9;
+                continue;
+            }
+            return None;
+        }
+        out.push(b);
+        i += 1;
+    }
+    Some(String::from_utf8_lossy(&out).into_owned())
+}
+
+fn parse_pdf_ref(dict: &str, key: &str) -> Option<(u32, u16)> {
+    let mut pos = 0usize;
+    while let Some(idx) = dict[pos..].find(key) {
+        let after = &dict[pos + idx + key.len()..];
+        let next = after.chars().next();
+        if next.is_none_or(|c| c.is_ascii_whitespace() || c == '<' || c == '/') {
+            let mut parts = after
+                .split(|c: char| {
+                    c.is_ascii_whitespace() || matches!(c, '<' | '>' | '[' | ']' | '/')
+                })
+                .filter(|s| !s.is_empty());
+            if let (Some(o), Some(g), Some("R")) = (parts.next(), parts.next(), parts.next())
+                && let (Ok(obj), Ok(gen_num)) = (o.parse::<u32>(), g.parse::<u16>())
+            {
+                return Some((obj, gen_num));
+            }
+        }
+        pos += idx + key.len();
+    }
+    None
+}
+
+fn parse_pdf_int(dict: &str, key: &str) -> Option<u32> {
+    let mut pos = 0usize;
+    while let Some(idx) = dict[pos..].find(key) {
+        let after = &dict[pos + idx + key.len()..];
+        let next = after.chars().next();
+        if next.is_none_or(|c| c.is_ascii_whitespace()) {
+            let tok = after
+                .split(|c: char| {
+                    c.is_ascii_whitespace() || matches!(c, '<' | '>' | '[' | ']' | '/')
+                })
+                .find(|s| !s.is_empty())?;
+            if let Ok(val) = tok.parse::<u32>() {
+                return Some(val);
+            }
+        }
+        pos += idx + key.len();
+    }
+    None
+}
+
+fn find_pdf_object_body(cleaned: &str, obj: u32, gen_num: u16) -> Option<&str> {
+    let needle = format!("{obj} {gen_num} obj");
+    let mut pos = 0usize;
+    while let Some(idx) = cleaned[pos..].find(&needle) {
+        let start = pos + idx;
+        let boundary_ok = start == 0 || cleaned.as_bytes()[start - 1].is_ascii_whitespace();
+        let after_idx = start + needle.len();
+        let after_ok = cleaned
+            .as_bytes()
+            .get(after_idx)
+            .is_some_and(|b| b.is_ascii_whitespace() || *b == b'<' || *b == b'[');
+        if boundary_ok && after_ok {
+            let rest = &cleaned[after_idx..];
+            let end = rest.find("endobj")?;
+            return Some(&rest[..end]);
+        }
+        pos = after_idx;
+    }
+    None
+}
+
+pub fn extract_pdf_page_count(bytes: &[u8]) -> Option<u32> {
     if !bytes.starts_with(b"%PDF-") || bytes.len() > 16 * 1024 * 1024 {
         return None;
     }
-    let hay = String::from_utf8_lossy(bytes);
-    // Count `/Type /Page` objects excluding `/Type /Pages`.
-    let mut count: u32 = 0;
-    let mut pos = 0;
-    while let Some(idx) = hay[pos..].find("/Type") {
-        let rest = &hay[pos + idx + 5..];
-        let trimmed = rest.trim_start();
-        if let Some(after_page) = trimmed.strip_prefix("/Page")
-            && !after_page.starts_with('s')
-            && !after_page
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphanumeric())
-        {
-            count = count.saturating_add(1);
-        }
-        pos += idx + 5;
+    let cleaned = strip_pdf_comments_and_streams(bytes)?;
+    if cleaned.contains("/ObjStm") || cleaned.contains("/Encrypt") {
+        return None;
     }
-    (count > 0).then_some(count)
+    let trailer_idx = cleaned.rfind("trailer")?;
+    let trailer = &cleaned[trailer_idx..];
+    let (root_obj, root_gen) = parse_pdf_ref(trailer, "/Root")?;
+    let catalog = find_pdf_object_body(&cleaned, root_obj, root_gen)?;
+    let (pages_obj, pages_gen) = parse_pdf_ref(catalog, "/Pages")?;
+    let pages_dict = find_pdf_object_body(&cleaned, pages_obj, pages_gen)?;
+    let count = parse_pdf_int(pages_dict, "/Count")?;
+    (1..=100_000).contains(&count).then_some(count)
 }
 
 pub fn cheap_wav_duration_seconds(bytes: &[u8]) -> Option<f64> {
@@ -771,6 +945,7 @@ pub async fn get_source_content(
     caller: &CallerIdentity,
     study_id: &str,
     source_id: &str,
+    max_bytes: usize,
 ) -> Result<(SourceSummary, Vec<u8>)> {
     let src = get_source(store, caller, study_id, source_id).await?;
     if src.status != "ready" {
@@ -781,7 +956,8 @@ pub async fn get_source_content(
     if src.fsm_ref.trim().is_empty() {
         return Err(Error::missing());
     }
-    let bytes = store.fsm.get_bytes(&src.fsm_ref).await?;
+    ensure_source_blob_readable(store, caller, &src).await?;
+    let bytes = store.fsm.get_bytes_bounded(&src.fsm_ref, max_bytes).await?;
     Ok((src, bytes))
 }
 
@@ -790,6 +966,7 @@ pub async fn preview_source(
     caller: &CallerIdentity,
     study_id: &str,
     source_id: &str,
+    max_bytes: usize,
 ) -> Result<serde_json::Value> {
     let src = get_source(store, caller, study_id, source_id).await?;
     if src.status != "ready" {
@@ -803,18 +980,20 @@ pub async fn preview_source(
     let mut duration_seconds: Option<f64> = None;
 
     if has_fsm {
+        ensure_source_blob_readable(store, caller, &src).await?;
         let needs_bytes = src.mime_type.starts_with("text/")
             || src.mime_type == "application/pdf"
             || matches!(
                 src.mime_type.as_str(),
                 "audio/wav" | "audio/x-wav" | "audio/wave"
             );
-        if needs_bytes && let Ok(bytes) = store.fsm.get_bytes(&src.fsm_ref).await {
+        if needs_bytes && let Ok(bytes) = store.fsm.get_bytes_bounded(&src.fsm_ref, max_bytes).await
+        {
             if src.mime_type.starts_with("text/") {
                 let text = String::from_utf8_lossy(&bytes);
                 preview_text = text.chars().take(1000).collect::<String>();
             } else if src.mime_type == "application/pdf" {
-                page_count = cheap_pdf_page_count(&bytes);
+                page_count = extract_pdf_page_count(&bytes);
             } else {
                 duration_seconds = cheap_wav_duration_seconds(&bytes);
             }
