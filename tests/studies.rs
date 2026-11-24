@@ -1197,4 +1197,81 @@ fn selection_grammar_validates_pages_passages_and_ms_intervals() {
         )
         .is_err()
     );
+
+    // Cross-service Cortex#136 alignment:
+    // 1. Canonical noncontiguous multi-audio fixture (`ms:0-100,200-300`)
+    assert_eq!(
+        canonicalize_selection(
+            "intervals",
+            "ms:0-100, 200-300",
+            Some("audio/wav; rate=16000"),
+            None,
+            None
+        )
+        .unwrap(),
+        "ms:0-100,200-300"
+    );
+    // 2. PDF total selected pages <= 100 (single & multi-range boundary + overflow) and MIME parameter normalization
+    assert_eq!(
+        canonicalize_selection(
+            "pages",
+            "1-50,51-100",
+            Some("application/pdf; charset=binary"),
+            None,
+            None
+        )
+        .unwrap(),
+        "1-50,51-100"
+    );
+    assert!(canonicalize_selection("pages", "1-101", Some("application/pdf"), None, None).is_err());
+    assert!(
+        canonicalize_selection("pages", "1-50,51-101", Some("application/pdf"), None, None)
+            .is_err()
+    );
+    assert!(
+        canonicalize_selection("pages", "1-5,5-10", Some("application/pdf"), None, None).is_err()
+    );
+    // 3. Passages requires text/* (with optional MIME params); DOCX allows `all` only, not `passages`
+    assert_eq!(
+        canonicalize_selection(
+            "passages",
+            "p1:0-10,p1:10-20",
+            Some("text/plain; charset=utf-8"),
+            None,
+            None
+        )
+        .unwrap(),
+        "p1:0-10,p1:10-20"
+    );
+    assert!(
+        canonicalize_selection(
+            "passages",
+            "p1:0-10,p1:5-15",
+            Some("text/plain"),
+            None,
+            None
+        )
+        .is_err()
+    );
+    assert!(
+        canonicalize_selection(
+            "passages",
+            "p1:0-10",
+            Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            None,
+            None
+        )
+        .is_err()
+    );
+    assert_eq!(
+        canonicalize_selection(
+            "all",
+            "",
+            Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            None,
+            None
+        )
+        .unwrap(),
+        ""
+    );
 }
