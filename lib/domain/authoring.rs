@@ -3,7 +3,7 @@ use crate::{
     dal::{Store, new_id},
     domain::{
         auth::{CallerIdentity, require_owner},
-        catalog::public_question_version_sources_in_tx,
+        catalog::{self, public_question_version_sources_in_tx},
         generations::{QUESTION_SCHEMA_NAME, QUESTION_SCHEMA_VERSION},
         guardrail,
         provenance::{REUSED_PUBLIC_VERSION, UNCLASSIFIED},
@@ -391,12 +391,13 @@ async fn write_new_quiz_version(
     items: &[QuizQuestionMembership],
 ) -> Result<String> {
     let mut tx = store.db.begin().await?;
-    let qver_id = write_new_quiz_version_in_tx(&mut tx, quiz_id, items).await?;
+    let qver_id = write_new_quiz_version_in_tx(store, &mut tx, quiz_id, items).await?;
     tx.commit().await?;
     Ok(qver_id)
 }
 
 async fn write_new_quiz_version_in_tx(
+    store: &Store,
     tx: &mut sqlx::Transaction<'_, sqlx::Any>,
     quiz_id: &str,
     items: &[QuizQuestionMembership],
@@ -440,6 +441,7 @@ async fn write_new_quiz_version_in_tx(
         .bind(quiz_id)
         .execute(&mut **tx)
         .await?;
+    catalog::refresh_public_question_search_in_tx(store, tx, quiz_id).await?;
     Ok(qver_id)
 }
 
@@ -489,7 +491,6 @@ pub async fn reuse_public_question_versions(
         ));
     }
 
-    let (owner_id, existing_quiz_id) = load_owned_study_quiz(store, caller, study_id).await?;
     let selected_ids: Vec<String> = question_version_ids
         .iter()
         .cloned()
@@ -497,6 +498,52 @@ pub async fn reuse_public_question_versions(
         .into_iter()
         .collect();
     let mut tx = store.db.begin().await?;
+    let lifecycle_query = if store.postgres() {
+        "SELECT owner_id, quiz_id, status, expires_at FROM studies WHERE id = $1 FOR UPDATE"
+    } else {
+        "SELECT owner_id, quiz_id, status, expires_at FROM studies WHERE id = $1"
+    };
+    let lifecycle = sqlx::query(lifecycle_query)
+        .bind(study_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(Error::missing)?;
+    let owner_id: String = lifecycle.get("owner_id");
+    require_owner(caller, &owner_id)?;
+    let status: String = lifecycle.get("status");
+    let expires_at: Option<i64> = lifecycle.get("expires_at");
+    if status == "draft" && expires_at.is_some_and(|expires| now() > expires) {
+        sqlx::query("UPDATE studies SET status = 'expired' WHERE id = $1 AND status = 'draft'")
+            .bind(study_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        return Err(Error(
+            axum::http::StatusCode::GONE,
+            "study_expired: Abandoned pre-generation study draft expired".into(),
+        ));
+    }
+    if status == "expired" {
+        return Err(Error(
+            axum::http::StatusCode::GONE,
+            "study_expired: Abandoned pre-generation study draft expired".into(),
+        ));
+    }
+    let running: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM generation_jobs WHERE study_id = $1 AND status IN ('queued', 'running')",
+    )
+    .bind(study_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if running > 0 {
+        return Err(Error::conflict(
+            "generation_in_progress: Public questions cannot be reused while study generation is queued or running",
+        ));
+    }
+    let existing_quiz_id: Option<String> = lifecycle
+        .try_get("quiz_id")
+        .ok()
+        .filter(|id: &String| !id.is_empty());
     let sources = public_question_version_sources_in_tx(&mut tx, Some(&selected_ids)).await?;
     let mut source_by_version = std::collections::HashMap::new();
     for source in sources {
@@ -580,7 +627,8 @@ pub async fn reuse_public_question_versions(
     } else {
         quiz_id
     };
-    let quiz_version_id = write_new_quiz_version_in_tx(&mut tx, &quiz_id, &memberships).await?;
+    let quiz_version_id =
+        write_new_quiz_version_in_tx(store, &mut tx, &quiz_id, &memberships).await?;
     tx.commit().await?;
     Ok(ReuseQuestionsResult {
         quiz_id,

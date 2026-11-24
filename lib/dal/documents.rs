@@ -5,7 +5,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -19,6 +19,7 @@ pub enum Documents {
 pub struct MemoryDocs {
     docs: Mutex<HashMap<String, Value>>,
     pub fail_delete: AtomicBool,
+    read_count: AtomicUsize,
 }
 
 impl MemoryDocs {
@@ -30,6 +31,21 @@ impl MemoryDocs {
     }
     pub fn contains(&self, doc_id: &str) -> bool {
         self.docs.lock().unwrap().contains_key(doc_id)
+    }
+    pub fn read_count(&self) -> usize {
+        self.read_count.load(Ordering::SeqCst)
+    }
+    pub fn reset_read_count(&self) {
+        self.read_count.store(0, Ordering::SeqCst);
+    }
+    fn get(&self, doc_id: &str) -> Result<Value> {
+        self.read_count.fetch_add(1, Ordering::SeqCst);
+        self.docs
+            .lock()
+            .unwrap()
+            .get(doc_id)
+            .cloned()
+            .ok_or_else(Error::missing)
     }
 }
 
@@ -100,13 +116,7 @@ impl Documents {
 
     pub async fn get(&self, doc_id: &str) -> Result<Value> {
         match self {
-            Self::Memory(mem) => mem
-                .docs
-                .lock()
-                .unwrap()
-                .get(doc_id)
-                .cloned()
-                .ok_or_else(Error::missing),
+            Self::Memory(mem) => mem.get(doc_id),
             Self::Remote(remote) => {
                 if remote.base_url.is_empty() {
                     return Err(Error::unavailable());

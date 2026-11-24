@@ -8,6 +8,7 @@ use certifications_api::{
     dal::{
         Store,
         fsm::MemoryFsm,
+        memory_docs, new_id,
         reports::{BoxFuture, RenderedVisual, ReportPickerItem, ReportsClient},
         schemas::{self, DraftSchema, SchemaField},
     },
@@ -350,6 +351,113 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     .unwrap();
     assert_eq!(membership_scope, "unclassified");
 
+    // A matching public prompt after more than fifty nonmatching source rows
+    // remains discoverable through database matching rather than a scan cutoff.
+    for index in 0..51 {
+        let quiz_id = new_id();
+        let quiz_version_id = new_id();
+        let question_id = new_id();
+        let question_version_id = new_id();
+        let couch_doc_id = new_id();
+        let prompt = if index == 50 {
+            "Needle beyond fifty source rows".to_string()
+        } else {
+            format!("Synthetic source question {index}")
+        };
+        store
+            .docs
+            .put_immutable(
+                &couch_doc_id,
+                &json!({
+                    "prompt": prompt,
+                    "alternatives": [{"id":"a","text":"A"},{"id":"b","text":"B"}],
+                    "correct_id":"a",
+                    "explanation":"private explanation"
+                }),
+            )
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO questions(id, owner_id, origin, created_at) VALUES($1, 'catalog-fixture', 'supplied_by_creator', $2)",
+        )
+        .bind(&question_id)
+        .bind(10_000 + index as i64)
+        .execute(&store.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO question_versions(id, question_id, version_num, language, schema_name, schema_version, couch_doc_id, created_at)
+             VALUES($1, $2, 1, 'en', $3, $4, $5, $6)",
+        )
+        .bind(&question_version_id)
+        .bind(&question_id)
+        .bind(QUESTION_SCHEMA_NAME)
+        .bind(QUESTION_SCHEMA_VERSION)
+        .bind(&couch_doc_id)
+        .bind(10_000 + index as i64)
+        .execute(&store.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO quizzes(id, owner_id, study_id, visibility, active_version_id, created_at, updated_at)
+             VALUES($1, 'catalog-fixture', NULL, 'public', '', $2, $2)",
+        )
+        .bind(&quiz_id)
+        .bind(10_000 + index as i64)
+        .execute(&store.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO quiz_versions(id, quiz_id, version_num, title, created_at) VALUES($1, $2, 1, $3, $4)",
+        )
+        .bind(&quiz_version_id)
+        .bind(&quiz_id)
+        .bind(format!("Synthetic quiz {index}"))
+        .bind(10_000 + index as i64)
+        .execute(&store.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO quiz_version_questions(quiz_version_id, position, question_version_id) VALUES($1, 0, $2)",
+        )
+        .bind(&quiz_version_id)
+        .bind(&question_version_id)
+        .execute(&store.db)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE quizzes SET active_version_id = $1 WHERE id = $2")
+            .bind(&quiz_version_id)
+            .bind(&quiz_id)
+            .execute(&store.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO public_question_search(question_version_id, quiz_id, normalized_prompt, normalized_title, normalized_tags)
+             VALUES($1, $2, $3, $4, '')",
+        )
+        .bind(&question_version_id)
+        .bind(&quiz_id)
+        .bind(prompt.to_lowercase())
+        .bind(format!("synthetic quiz {index}"))
+        .execute(&store.db)
+        .await
+        .unwrap();
+    }
+    let doc_store = memory_docs(&store.docs).unwrap();
+    doc_store.reset_read_count();
+    let (st, late_prompt) = call(
+        &app,
+        "GET",
+        "/catalog/questions?q=Needle%20beyond%20fifty",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(late_prompt["items"].as_array().unwrap().len(), 1);
+    assert_eq!(late_prompt["has_more"], false);
+    assert_eq!(doc_store.read_count(), 1);
+
     // Anonymous discovery & search work, with no answer-key or private filename leaks.
     let (st, cat) = call(
         &app,
@@ -493,6 +601,83 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
         .as_str()
         .unwrap()
         .to_string();
+
+    let (st, expired_study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("reuse-author"),
+        Some(json!({"title":"Expired reuse target"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let expired_study_id = expired_study["id"].as_str().unwrap();
+    sqlx::query("UPDATE studies SET expires_at = 0 WHERE id = $1")
+        .bind(expired_study_id)
+        .execute(&store.db)
+        .await
+        .unwrap();
+    let (st, expired_reuse) = call(
+        &app,
+        "POST",
+        &format!("/studies/{expired_study_id}/questions/reuse"),
+        Some("reuse-author"),
+        Some(json!({"question_version_ids":[question_version_id]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::GONE, "{expired_reuse}");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM studies WHERE id = $1")
+            .bind(expired_study_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap(),
+        "expired"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM quizzes WHERE study_id = $1")
+            .bind(expired_study_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap(),
+        0
+    );
+
+    let (st, generating_study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("reuse-author"),
+        Some(json!({"title":"Generating reuse target"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let generating_study_id = generating_study["id"].as_str().unwrap();
+    sqlx::query(
+        "INSERT INTO generation_jobs(id, owner_id, study_id, status, language, requested_count, queued_at)
+         VALUES('queued-reuse-test', 'reuse-author', $1, 'queued', 'en', 1, 1)",
+    )
+    .bind(generating_study_id)
+    .execute(&store.db)
+    .await
+    .unwrap();
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{generating_study_id}/questions/reuse"),
+        Some("reuse-author"),
+        Some(json!({"question_version_ids":[question_version_id]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM quizzes WHERE study_id = $1")
+            .bind(generating_study_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap(),
+        0
+    );
 
     let (st, _) = call(
         &app,
@@ -995,11 +1180,90 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
         "50% ถึงน้อยกว่า 80%"
     );
 
+    let updated_question_id: String =
+        sqlx::query_scalar("SELECT question_id FROM question_versions WHERE id = $1")
+            .bind(&question_version_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap();
+    let (st, _) = call(
+        &app,
+        "PATCH",
+        &format!("/studies/{sid}/questions/{updated_question_id}"),
+        Some("author-1"),
+        Some(json!({"prompt":"Which structure directs 100% of ventricular blood into the aorta (cœur)?"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, stale_prompt) = call(
+        &app,
+        "GET",
+        "/catalog/questions?q=pumps%20oxygenated",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        stale_prompt["items"].as_array().unwrap().len(),
+        1,
+        "{stale_prompt}"
+    );
+    assert_eq!(
+        stale_prompt["items"][0]["source_quiz_title"],
+        "Reusable public questions"
+    );
+    let (st, current_prompt) = call(
+        &app,
+        "GET",
+        "/catalog/questions?q=directs%20100%25",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(current_prompt["items"].as_array().unwrap().len(), 1);
+    let (st, unicode_prompt) =
+        call(&app, "GET", "/catalog/questions?q=C%C5%92UR", None, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(unicode_prompt["items"].as_array().unwrap().len(), 1);
+    let (st, literal_percent) = call(&app, "GET", "/catalog/questions?q=%25", None, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(literal_percent["items"].as_array().unwrap().len(), 1);
+    let (st, literal_underscore) = call(&app, "GET", "/catalog/questions?q=_", None, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(literal_underscore["items"].as_array().unwrap().len(), 0);
+
     sqlx::query("UPDATE quizzes SET visibility = 'private' WHERE id = $1")
         .bind(&quiz_id)
         .execute(&store.db)
         .await
         .unwrap();
+    let (st, revoked_question) = call(
+        &app,
+        "GET",
+        "/catalog/questions?q=pumps%20oxygenated",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(revoked_question["items"].as_array().unwrap().len(), 1);
+    sqlx::query("UPDATE quizzes SET visibility = 'private' WHERE id = $1")
+        .bind(&target_quiz_id)
+        .execute(&store.db)
+        .await
+        .unwrap();
+    let (st, fully_revoked_question) = call(
+        &app,
+        "GET",
+        "/catalog/questions?q=pumps%20oxygenated",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(fully_revoked_question["items"].as_array().unwrap().len(), 0);
     let (st, private_stats) = call(
         &app,
         "GET",

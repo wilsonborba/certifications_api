@@ -235,10 +235,6 @@ pub(crate) struct PublicQuestionVersionSource {
     pub source_scope: String,
     pub origin_quiz_id: Option<String>,
     pub origin_quiz_version_id: Option<String>,
-    pub couch_doc_id: String,
-    pub language: String,
-    pub question_origin: String,
-    pub source_quiz_title: String,
 }
 
 pub fn normalize_tag(raw: &str) -> Option<(String, String)> {
@@ -520,6 +516,7 @@ pub async fn publish_study_quiz(
         .bind(&quiz_id)
         .execute(&mut *tx)
         .await?;
+    refresh_public_question_search_in_tx(store, &mut tx, &quiz_id).await?;
     tx.commit().await?;
 
     get_public_quiz(store, &quiz_id, language).await
@@ -870,30 +867,6 @@ pub async fn list_catalog(store: &Store, query: CatalogQuery) -> Result<CatalogP
     })
 }
 
-pub(crate) async fn public_question_version_sources(
-    store: &Store,
-    question_version_ids: Option<&[String]>,
-) -> Result<Vec<PublicQuestionVersionSource>> {
-    let mut query = public_question_version_sources_query(question_version_ids)?;
-    let rows = query.build().fetch_all(&store.db).await?;
-    Ok(rows
-        .into_iter()
-        .map(|row| PublicQuestionVersionSource {
-            question_id: row.get("question_id"),
-            question_version_id: row.get("question_version_id"),
-            source_quiz_id: row.get("source_quiz_id"),
-            source_quiz_version_id: row.get("source_quiz_version_id"),
-            source_scope: row.get("source_scope"),
-            origin_quiz_id: row.get("origin_quiz_id"),
-            origin_quiz_version_id: row.get("origin_quiz_version_id"),
-            couch_doc_id: row.get("couch_doc_id"),
-            language: row.get("language"),
-            question_origin: row.get("question_origin"),
-            source_quiz_title: row.get("source_quiz_title"),
-        })
-        .collect())
-}
-
 pub(crate) async fn public_question_version_sources_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Any>,
     question_version_ids: Option<&[String]>,
@@ -910,10 +883,6 @@ pub(crate) async fn public_question_version_sources_in_tx(
             source_scope: row.get("source_scope"),
             origin_quiz_id: row.get("origin_quiz_id"),
             origin_quiz_version_id: row.get("origin_quiz_version_id"),
-            couch_doc_id: row.get("couch_doc_id"),
-            language: row.get("language"),
-            question_origin: row.get("question_origin"),
-            source_quiz_title: row.get("source_quiz_title"),
         })
         .collect())
 }
@@ -995,81 +964,172 @@ async fn public_quiz_tags(
     Ok(tags)
 }
 
+pub(crate) async fn refresh_public_question_search_in_tx(
+    store: &Store,
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    quiz_id: &str,
+) -> Result<()> {
+    sqlx::query("DELETE FROM public_question_search WHERE quiz_id = $1")
+        .bind(quiz_id)
+        .execute(&mut **tx)
+        .await?;
+    let quiz = sqlx::query("SELECT visibility, active_version_id FROM quizzes WHERE id = $1")
+        .bind(quiz_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    let Some(quiz) = quiz else {
+        return Ok(());
+    };
+    if quiz.get::<String, _>("visibility") != "public" {
+        return Ok(());
+    }
+    let active_version_id: String = quiz.get("active_version_id");
+    if active_version_id.is_empty() {
+        return Ok(());
+    }
+    let title: String = sqlx::query_scalar("SELECT title FROM quiz_versions WHERE id = $1")
+        .bind(&active_version_id)
+        .fetch_one(&mut **tx)
+        .await?;
+    let tag_rows = sqlx::query(
+        "SELECT t.label FROM quiz_tags qt JOIN tags t ON t.id = qt.tag_id
+         WHERE qt.quiz_id = $1 ORDER BY t.label",
+    )
+    .bind(quiz_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let normalized_tags = tag_rows
+        .iter()
+        .map(|row| row.get::<String, _>("label").to_lowercase())
+        .collect::<Vec<_>>()
+        .join("\u{1f}");
+    let question_rows = sqlx::query(
+        "SELECT qv.id AS question_version_id, qv.couch_doc_id
+         FROM quiz_version_questions qvq JOIN question_versions qv ON qv.id = qvq.question_version_id
+         WHERE qvq.quiz_version_id = $1 ORDER BY qvq.position, qv.id",
+    )
+    .bind(&active_version_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for row in question_rows {
+        let question_version_id: String = row.get("question_version_id");
+        let doc_id: String = row.get("couch_doc_id");
+        let doc = store.docs.get(&doc_id).await?;
+        let prompt = doc["prompt"].as_str().ok_or_else(Error::unavailable)?;
+        sqlx::query(
+            "INSERT INTO public_question_search
+             (question_version_id, quiz_id, normalized_prompt, normalized_title, normalized_tags)
+             VALUES($1, $2, $3, $4, $5)",
+        )
+        .bind(question_version_id)
+        .bind(quiz_id)
+        .bind(prompt.to_lowercase())
+        .bind(title.to_lowercase())
+        .bind(&normalized_tags)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
 pub async fn list_catalog_questions(
     store: &Store,
     query: CatalogQuestionQuery,
 ) -> Result<PublicQuestionPage> {
-    let sources = public_question_version_sources(store, None).await?;
-    let quiz_ids: Vec<String> = sources
-        .iter()
-        .map(|source| source.source_quiz_id.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let tags_by_quiz = public_quiz_tags(store, &quiz_ids).await?;
     let q_filter = query
         .q
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(str::to_lowercase);
+        .map(|s| {
+            let escaped = s
+                .to_lowercase()
+                .replace('!', "!!")
+                .replace('%', "!%")
+                .replace('_', "!_");
+            format!("%{escaped}%")
+        });
     let limit = query.limit.unwrap_or(20).clamp(1, 50) as usize;
     let offset = query.offset.unwrap_or(0).max(0) as usize;
-    let mut items = Vec::new();
-    let mut matched = 0usize;
-    let mut seen_versions = HashSet::new();
-
-    for source in sources {
-        if let Some(ref language) = query.language
-            && &source.language != language
-        {
-            continue;
-        }
-        if let Some(ref origin) = query.origin
-            && &source.question_origin != origin
-        {
-            continue;
-        }
-        let source_tags = tags_by_quiz
-            .get(&source.source_quiz_id)
-            .cloned()
-            .unwrap_or_default();
-        if let Ok(doc) = store.docs.get(&source.couch_doc_id).await {
-            let prompt = doc["prompt"].as_str().unwrap_or("").to_string();
-            if let Some(ref qf) = q_filter
-                && !prompt.to_lowercase().contains(qf)
-                && !source.source_quiz_title.to_lowercase().contains(qf)
-                && !source_tags
-                    .iter()
-                    .any(|tag| tag.to_lowercase().contains(qf))
-            {
-                continue;
-            }
-            if !seen_versions.insert(source.question_version_id.clone()) {
-                continue;
-            }
-            matched += 1;
-            if matched <= offset {
-                continue;
-            }
-            items.push(CatalogQuestionPreview {
-                id: source.question_id,
-                question_version_id: source.question_version_id,
-                source_quiz_title: source.source_quiz_title,
-                source_quiz_tags: source_tags,
-                language: source.language,
-                origin: source.question_origin,
-                prompt,
-                alternatives: doc["alternatives"].clone(),
-            });
-            if items.len() > limit {
-                break;
-            }
-        }
+    let mut sql = sqlx::QueryBuilder::<sqlx::Any>::new(
+        "WITH matching_origins AS (
+           SELECT q.id AS source_quiz_id, q.active_version_id AS source_quiz_version_id,
+                  qv.title AS source_quiz_title, qvq.question_version_id,
+                  qquestion.question_id, qquestion.language, qquestion.couch_doc_id,
+                  qquestion.created_at AS question_created_at, question.origin AS question_origin,
+                  ROW_NUMBER() OVER (PARTITION BY qvq.question_version_id
+                                     ORDER BY qquestion.created_at DESC, q.id ASC) AS origin_rank
+           FROM quizzes q
+           JOIN quiz_versions qv ON qv.id = q.active_version_id
+           JOIN quiz_version_questions qvq ON qvq.quiz_version_id = qv.id
+           JOIN question_versions qquestion ON qquestion.id = qvq.question_version_id
+           JOIN questions question ON question.id = qquestion.question_id
+           WHERE q.visibility = 'public'
+             AND (qvq.source_scope <> 'reused_public_question_version'
+                  OR (qvq.origin_quiz_id IS NOT NULL AND qvq.origin_quiz_version_id IS NOT NULL
+                      AND EXISTS (SELECT 1 FROM quiz_versions ov
+                                  JOIN quiz_version_questions om ON om.quiz_version_id = ov.id
+                                  WHERE ov.id = qvq.origin_quiz_version_id
+                                    AND ov.quiz_id = qvq.origin_quiz_id
+                                    AND om.question_version_id = qvq.question_version_id)))",
+    );
+    if let Some(language) = query.language.as_deref() {
+        sql.push(" AND qquestion.language = ");
+        sql.push_bind(language.to_string());
     }
-
-    let has_more = items.len() > limit;
-    items.truncate(limit);
+    if let Some(origin) = query.origin.as_deref() {
+        sql.push(" AND question.origin = ");
+        sql.push_bind(origin.to_string());
+    }
+    if let Some(ref q) = q_filter {
+        sql.push(
+            " AND EXISTS (SELECT 1 FROM public_question_search pqs
+                               WHERE pqs.question_version_id = qquestion.id
+                                 AND pqs.quiz_id = q.id
+                                 AND (pqs.normalized_prompt LIKE ",
+        );
+        sql.push_bind(q.clone());
+        sql.push(" ESCAPE '!' OR pqs.normalized_title LIKE ");
+        sql.push_bind(q.clone());
+        sql.push(" ESCAPE '!' OR pqs.normalized_tags LIKE ");
+        sql.push_bind(q.clone());
+        sql.push(" ESCAPE '!'))");
+    }
+    sql.push(
+        ") SELECT source_quiz_id, source_quiz_version_id, source_quiz_title,
+                 question_version_id, question_id, language, couch_doc_id, question_origin
+          FROM matching_origins WHERE origin_rank = 1
+          ORDER BY question_created_at DESC, question_version_id ASC LIMIT ",
+    );
+    sql.push_bind((limit + 1) as i64);
+    sql.push(" OFFSET ");
+    sql.push_bind(offset as i64);
+    let rows = sql.build().fetch_all(&store.db).await?;
+    let has_more = rows.len() > limit;
+    let page_rows = rows.into_iter().take(limit).collect::<Vec<_>>();
+    let quiz_ids = page_rows
+        .iter()
+        .map(|row| row.get::<String, _>("source_quiz_id"))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let tags_by_quiz = public_quiz_tags(store, &quiz_ids).await?;
+    let mut items = Vec::with_capacity(page_rows.len());
+    for row in page_rows {
+        let quiz_id: String = row.get("source_quiz_id");
+        let doc_id: String = row.get("couch_doc_id");
+        let doc = store.docs.get(&doc_id).await?;
+        items.push(CatalogQuestionPreview {
+            id: row.get("question_id"),
+            question_version_id: row.get("question_version_id"),
+            source_quiz_title: row.get("source_quiz_title"),
+            source_quiz_tags: tags_by_quiz.get(&quiz_id).cloned().unwrap_or_default(),
+            language: row.get("language"),
+            origin: row.get("question_origin"),
+            prompt: doc["prompt"].as_str().unwrap_or("").to_string(),
+            alternatives: doc["alternatives"].clone(),
+        });
+    }
     Ok(PublicQuestionPage {
         items,
         limit: limit as i64,
