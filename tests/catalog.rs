@@ -1169,6 +1169,9 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
         report_view["descriptor"]["meta"]["source"],
         "Certifications API"
     );
+    assert_eq!(report_view["descriptor"]["data_tier"], "real");
+    assert_eq!(report_view["descriptor"]["meta"]["tier"], "real");
+    assert_eq!(report_view["descriptor"]["meta"]["freshness_mode"], "live");
     assert_eq!(report_view["descriptor"]["meta"]["sample_size"], 11);
     assert_eq!(
         report_view["descriptor"]["meta"]["sample_unit"],
@@ -1454,6 +1457,18 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     expected_private_stats["score_distribution_report_view"]["descriptor"]["visibility"] =
         json!("restricted");
     assert_eq!(private_owner_stats, expected_private_stats);
+    assert_eq!(
+        private_owner_stats["score_distribution_report_view"]["descriptor"]["data_tier"],
+        "real"
+    );
+    assert_eq!(
+        private_owner_stats["score_distribution_report_view"]["descriptor"]["meta"]["tier"],
+        "real"
+    );
+    assert_eq!(
+        private_owner_stats["score_distribution_report_view"]["descriptor"]["meta"]["freshness_mode"],
+        "live"
+    );
     let private_stats_text = private_owner_stats.to_string();
     for forbidden in [
         "correct_id",
