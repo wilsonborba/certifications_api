@@ -74,8 +74,15 @@ validate_prepared() {
      "$(stat -c '%a' "$DEPLOY_DIR/artifacts.sha256")" == 644 ]] || {
     printf 'Prepared package file permissions are invalid. Run install_service.sh --prepare again.\n' >&2; return 1;
   }
-  (cd "$DEPLOY_DIR" && sha256sum --check --status artifacts.sha256) || {
-    printf 'Prepared artifacts failed checksum validation. Run install_service.sh --prepare again.\n' >&2; return 1;
+  local expected_artifact_manifest actual_artifact_manifest
+  expected_artifact_manifest=$(cd "$DEPLOY_DIR" && sha256sum certifications-api "$SERVICE_NAME.service") || {
+    printf 'Could not hash every required prepared artifact.\n' >&2; return 1;
+  }
+  actual_artifact_manifest=$(<"$DEPLOY_DIR/artifacts.sha256") || {
+    printf 'Could not read the prepared artifact manifest.\n' >&2; return 1;
+  }
+  [[ "$actual_artifact_manifest" == "$expected_artifact_manifest" ]] || {
+    printf 'Prepared artifact manifest must cover exactly the Rust binary and service unit. Run install_service.sh --prepare again.\n' >&2; return 1;
   }
   grep -Fxq "WorkingDirectory=$PROJECT_DIR" "$DEPLOY_DIR/$SERVICE_NAME.service" || {
     printf 'Prepared service unit belongs to another checkout. Prepare in this checkout.\n' >&2; return 1;
@@ -92,7 +99,7 @@ if [[ "$MODE" == --dry-run ]]; then
   source_hash >/dev/null || {
     printf 'Could not hash all Rust release inputs. Check the checkout and file readability.\n' >&2; exit 1;
   }
-  if [[ -d "$DEPLOY_DIR" ]]; then
+  if [[ -e "$DEPLOY_DIR" || -L "$DEPLOY_DIR" ]]; then
     validate_prepared
     printf 'Dry run: prepared Rust binary and unit passed read-only validation.\n'
     printf 'Plan: install %s and %s; reload systemd; enable and start %s.\n' \

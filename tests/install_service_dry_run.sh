@@ -117,9 +117,29 @@ chmod 775 "$fixture/var/deploy/certifications-api"
 expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --check
 chmod 755 "$fixture/var/deploy/certifications-api"
 
+# A manifest containing only the service checksum used to pass even after the
+# Rust executable was changed. The manifest must name both expected files and
+# no others before any checksum content is accepted.
+printf 'changed Rust executable while keeping mode 755\n' > "$fixture/var/deploy/certifications-api"
+chmod 755 "$fixture/var/deploy/certifications-api"
+(cd "$fixture/var/deploy" && sha256sum certifications-api.service > artifacts.sha256)
+expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --check
+cp "$target/release/certifications-api" "$fixture/var/deploy/certifications-api"
+(cd "$fixture/var/deploy" && sha256sum certifications-api certifications-api.service > artifacts.sha256)
+cp "$fixture/var/deploy/artifacts.sha256" "$tmp/duplicate-manifest-entries"
+cat "$tmp/duplicate-manifest-entries" >> "$fixture/var/deploy/artifacts.sha256"
+expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --check
+cp "$tmp/duplicate-manifest-entries" "$fixture/var/deploy/artifacts.sha256"
+printf '%064d  foreign-artifact\n' 0 >> "$fixture/var/deploy/artifacts.sha256"
+expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --check
+cp "$tmp/duplicate-manifest-entries" "$fixture/var/deploy/artifacts.sha256"
+printf '%064d  ../outside-artifact\n' 0 >> "$fixture/var/deploy/artifacts.sha256"
+expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --check
+cp "$tmp/duplicate-manifest-entries" "$fixture/var/deploy/artifacts.sha256"
+
 rm -rf "$fixture/var/deploy"
 mv "$fixture/var/deploy.lock" "$tmp/deploy.lock"
-ln -s "$tmp" "$fixture/var/deploy"
+ln -s "$tmp/nonexistent-target" "$fixture/var/deploy"
 expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --dry-run
 rm "$fixture/var/deploy"
 mv "$tmp/deploy.lock" "$fixture/var/deploy.lock"
