@@ -179,26 +179,28 @@ async fn affected_dynamic_queries_work_with_sqlite_any() {
 }
 
 #[tokio::test]
-#[ignore = "requires the isolated codex-impl-3 PostgreSQL fixture"]
+#[ignore = "requires the isolated PostgreSQL test fixture"]
 async fn affected_dynamic_queries_work_with_postgres_any() {
-    let url = std::env::var("MANAGER_TEST_DATABASE_URL")
-        .expect("MANAGER_TEST_DATABASE_URL must point at the isolated fixture");
+    let url = std::env::var("CERTIFICATIONS_TEST_DATABASE_URL")
+        .expect("CERTIFICATIONS_TEST_DATABASE_URL must point at the isolated fixture");
+    let socket_dir = std::env::var("CERTIFICATIONS_TEST_SOCKET_DIR")
+        .expect("CERTIFICATIONS_TEST_SOCKET_DIR must name the fixture socket directory");
+    let socket_path = std::path::Path::new(&socket_dir);
+    assert!(socket_path.is_absolute());
+    assert!(socket_path.is_dir());
     let options = url.parse::<sqlx::any::AnyConnectOptions>().unwrap();
     let parsed = &options.database_url;
     assert_eq!(parsed.scheme(), "postgresql");
-    assert_eq!(parsed.username(), "cortex_api_app");
+    assert_eq!(parsed.username(), "certifications_api_app");
     assert!(parsed.password().is_none());
-    assert_eq!(parsed.path(), "/cortex_api_test");
+    assert_eq!(parsed.path(), "/certifications_api_test");
     assert_eq!(parsed.host_str(), Some("localhost"));
-    let socket = parsed
+    let dsn_socket = parsed
         .query_pairs()
         .find(|(key, _)| key == "host")
         .map(|(_, value)| value.into_owned())
         .expect("test DSN must use its private Unix socket");
-    assert_eq!(
-        socket,
-        "/home/main-server/.cache/codex-impl-3/pg-any-fixture/socket"
-    );
+    assert_eq!(dsn_socket, socket_dir);
     sqlx::any::install_default_drivers();
     let pool = AnyPoolOptions::new()
         .max_connections(1)

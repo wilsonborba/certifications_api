@@ -61,6 +61,7 @@ impl AnyQuery {
 mod tests {
     use super::AnyQuery;
     use sqlx::{AnyPool, Row, any::AnyPoolOptions};
+    use std::{env, path::Path};
 
     async fn verify_dynamic_filters(pool: &AnyPool) {
         sqlx::raw_sql(
@@ -108,6 +109,43 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
+        verify_dynamic_filters(&pool).await;
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the isolated PostgreSQL test fixture"]
+    async fn numbered_placeholders_work_with_postgres_any() {
+        let url = env::var("CERTIFICATIONS_TEST_DATABASE_URL")
+            .expect("CERTIFICATIONS_TEST_DATABASE_URL must point to the isolated fixture");
+        let socket_dir = env::var("CERTIFICATIONS_TEST_SOCKET_DIR")
+            .expect("CERTIFICATIONS_TEST_SOCKET_DIR must name the fixture socket directory");
+        let socket_path = Path::new(&socket_dir);
+        assert!(socket_path.is_absolute());
+        assert!(socket_path.is_dir());
+
+        let options = url
+            .parse::<sqlx::any::AnyConnectOptions>()
+            .expect("test database URL must be valid");
+        let parsed = &options.database_url;
+        assert_eq!(parsed.scheme(), "postgresql");
+        assert_eq!(parsed.username(), "certifications_api_app");
+        assert!(parsed.password().is_none());
+        assert_eq!(parsed.path(), "/certifications_api_test");
+        assert_eq!(parsed.host_str(), Some("localhost"));
+        let dsn_socket = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "host")
+            .map(|(_, value)| value.into_owned())
+            .expect("test database URL must use its Unix socket");
+        assert_eq!(dsn_socket, socket_dir);
+
+        sqlx::any::install_default_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to the isolated PostgreSQL fixture");
         verify_dynamic_filters(&pool).await;
         pool.close().await;
     }
