@@ -146,6 +146,40 @@ fn decode_qr_from_pdf(pdf_bytes: &[u8]) -> Result<String, String> {
     String::from_utf8(buf).map_err(|e| e.to_string())
 }
 
+fn decode_qr_from_svg_raster(svg_bytes: &[u8]) -> Result<String, String> {
+    use std::io::Write;
+    let mut temp_svg = tempfile::Builder::new()
+        .suffix(".svg")
+        .tempfile()
+        .map_err(|e| e.to_string())?;
+    temp_svg.write_all(svg_bytes).map_err(|e| e.to_string())?;
+    let svg_path = temp_svg.path().to_str().unwrap().to_string();
+
+    let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let png_path = temp_dir.path().join("out.png");
+
+    let status = std::process::Command::new("rsvg-convert")
+        .args(["-o", png_path.to_str().unwrap(), &svg_path])
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("rsvg-convert execution failed".into());
+    }
+
+    let img = image::open(&png_path).map_err(|e| format!("image::open error: {e:?}"))?;
+    let gray = img.into_luma8();
+    let mut prepared = rqrr::PreparedImage::prepare(gray);
+    let grids = prepared.detect_grids();
+    if grids.is_empty() {
+        return Err("rqrr detected 0 grids in rasterized svg image".into());
+    }
+    let mut buf = Vec::new();
+    grids[0]
+        .decode_to(&mut buf)
+        .map_err(|e| format!("decode error: {e:?}"))?;
+    String::from_utf8(buf).map_err(|e| e.to_string())
+}
+
 fn extract_pdf_text(pdf_bytes: &[u8]) -> String {
     use std::io::Write;
     let mut child = std::process::Command::new("pdftotext")
@@ -924,4 +958,112 @@ async fn certificate_deterministic_language_labels() {
     let th_text = String::from_utf8_lossy(&th_svg);
     assert!(th_text.contains("ใบรับรองการสำเร็จการศึกษา Asodya"));
     assert!(th_text.contains("ผู้รับใบรับรอง:"));
+}
+
+#[tokio::test]
+async fn certificate_wide_unbroken_text_measured_layout_and_raster_qr_decodable() {
+    let holder = "W".repeat(120);
+    let title = "W".repeat(120);
+    let code = "ASODYA-TEST-LONG-120";
+    let ts = 1795600000;
+
+    let pdf = certifications_api::domain::certificates::render_certificate_pdf(
+        &holder,
+        &title,
+        100,
+        100,
+        code,
+        ts,
+        Some("en"),
+    );
+    let svg = certifications_api::domain::certificates::render_certificate_svg(
+        &holder,
+        &title,
+        100,
+        100,
+        code,
+        ts,
+        Some("en"),
+    );
+
+    assert!(pdf.starts_with(b"%PDF-"));
+    let expected_url = format!("https://certifications.asodya.com/certificates/{code}");
+
+    // Both real rasterized PDF (pdftoppm) and real rasterized SVG (rsvg-convert)
+    // must successfully detect and decode the QR code without text overpainting.
+    let pdf_qr = decode_qr_from_pdf(&pdf).expect("pdf qr decoded via pdftoppm");
+    assert_eq!(pdf_qr, expected_url);
+
+    let svg_qr = decode_qr_from_svg_raster(&svg).expect("svg qr decoded via rsvg-convert");
+    assert_eq!(svg_qr, expected_url);
+
+    // Verify SVG does not place any text past max_text_width
+    let svg_str = String::from_utf8_lossy(&svg);
+    for line in svg_str.lines() {
+        if line.contains("<text") && line.contains("WWWW") {
+            // No individual line contains more than 35 consecutive W characters
+            assert!(!line.contains(&"W".repeat(36)));
+        }
+    }
+
+    // Full 120 W characters must be preserved without truncation
+    let pdf_text = extract_pdf_text(&pdf);
+    let holder_w_count = pdf_text.chars().filter(|c| *c == 'W').count();
+    // 120 Ws in holder + 120 Ws in quiz = 240 Ws
+    assert_eq!(holder_w_count, 240);
+}
+
+#[tokio::test]
+async fn certificate_multilingual_portuguese_thai_mixed_raster_qr_decodable() {
+    let code = "ASODYA-TEST-MULTI-9999";
+    let ts = 1795600000;
+    let expected_url = format!("https://certifications.asodya.com/certificates/{code}");
+
+    // Portuguese with accented characters
+    let pt_holder = "João Carlos Mendonça de Alcântara e Silva dos Santos";
+    let pt_title = "Avaliação de Proficiência em Gestão e Coordenação Técnica Especializada 2026";
+    let pt_pdf = certifications_api::domain::certificates::render_certificate_pdf(
+        pt_holder,
+        pt_title,
+        98,
+        100,
+        code,
+        ts,
+        Some("pt-BR"),
+    );
+    let pt_svg = certifications_api::domain::certificates::render_certificate_svg(
+        pt_holder,
+        pt_title,
+        98,
+        100,
+        code,
+        ts,
+        Some("pt-BR"),
+    );
+    assert_eq!(decode_qr_from_pdf(&pt_pdf).unwrap(), expected_url);
+    assert_eq!(decode_qr_from_svg_raster(&pt_svg).unwrap(), expected_url);
+
+    // Mixed English / Thai / Numbers
+    let mix_holder = "Dr. Somsak สมศักดิ์ (DevOps & Platform Engineering)";
+    let mix_title = "Kubernetes Certified Administrator & Cloud Architecture หลักสูตรเข้มข้น 2026";
+    let mix_pdf = certifications_api::domain::certificates::render_certificate_pdf(
+        mix_holder,
+        mix_title,
+        100,
+        100,
+        code,
+        ts,
+        Some("th"),
+    );
+    let mix_svg = certifications_api::domain::certificates::render_certificate_svg(
+        mix_holder,
+        mix_title,
+        100,
+        100,
+        code,
+        ts,
+        Some("th"),
+    );
+    assert_eq!(decode_qr_from_pdf(&mix_pdf).unwrap(), expected_url);
+    assert_eq!(decode_qr_from_svg_raster(&mix_svg).unwrap(), expected_url);
 }

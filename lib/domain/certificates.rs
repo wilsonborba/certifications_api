@@ -239,31 +239,99 @@ fn resolve_labels(language: Option<&str>) -> CertLabels {
     }
 }
 
-fn break_lines(text: &str, max_width: f32, approx_char_width: f32) -> Vec<String> {
-    let segmenter = LineSegmenter::new_auto(Default::default());
+fn measure_str_width(face: &ttf_parser::Face<'_>, text: &str, font_size: f32) -> f32 {
+    let upem = face.units_per_em() as f32;
+    let mut total_advance = 0.0f32;
+    for c in text.chars() {
+        let adv = face
+            .glyph_index(c)
+            .and_then(|gid| face.glyph_hor_advance(gid))
+            .unwrap_or(face.units_per_em() / 2) as f32;
+        total_advance += adv;
+    }
+    (total_advance / upem) * font_size
+}
+
+fn break_lines(
+    text: &str,
+    max_width: f32,
+    font_bytes: &[u8],
+    font_size: f32,
+    max_lines: usize,
+) -> Vec<String> {
+    let face = ttf_parser::Face::parse(font_bytes, 0).expect("valid font bytes");
+    let line_segmenter = LineSegmenter::new_auto(Default::default());
+    let grapheme_segmenter = icu_segmenter::GraphemeClusterSegmenter::new();
+
     let mut lines = Vec::new();
     for para in text.split('\n') {
-        let breaks: Vec<usize> = segmenter.segment_str(para).collect();
+        let breaks: Vec<usize> = line_segmenter.segment_str(para).collect();
         let mut current = String::new();
+        let mut current_width = 0.0f32;
         let mut prev = 0usize;
+
         for &b in &breaks {
             if b <= prev {
                 continue;
             }
             let seg = &para[prev..b];
-            let next_w = (current.chars().count() + seg.chars().count()) as f32 * approx_char_width;
-            if !current.is_empty() && next_w > max_width {
-                lines.push(current.trim_end().to_string());
-                current = seg.to_string();
-            } else {
+            let seg_width = measure_str_width(&face, seg, font_size);
+
+            if current_width + seg_width <= max_width {
                 current.push_str(seg);
+                current_width += seg_width;
+            } else if seg_width <= max_width {
+                let trimmed = current.trim_end();
+                if !trimmed.is_empty() {
+                    lines.push(trimmed.to_string());
+                }
+                current = seg.to_string();
+                current_width = seg_width;
+            } else {
+                // Emergency grapheme-aware wrap for long unbroken runs:
+                let g_breaks: Vec<usize> = grapheme_segmenter.segment_str(seg).collect();
+                let mut g_prev = 0usize;
+                for &gb in &g_breaks {
+                    if gb <= g_prev {
+                        continue;
+                    }
+                    let grapheme = &seg[g_prev..gb];
+                    let g_width = measure_str_width(&face, grapheme, font_size);
+                    if !current.is_empty() && current_width + g_width > max_width {
+                        let trimmed = current.trim_end();
+                        if !trimmed.is_empty() {
+                            lines.push(trimmed.to_string());
+                        }
+                        current.clear();
+                        current_width = 0.0;
+                    }
+                    current.push_str(grapheme);
+                    current_width += g_width;
+                    g_prev = gb;
+                }
             }
             prev = b;
         }
-        if !current.is_empty() || para.is_empty() {
-            lines.push(current.trim_end().to_string());
+
+        let trimmed = current.trim_end();
+        if !trimmed.is_empty() || (para.is_empty() && lines.is_empty()) {
+            lines.push(trimmed.to_string());
         }
     }
+
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        if let Some(last) = lines.last_mut() {
+            let ellipsis = "…";
+            let ell_w = measure_str_width(&face, ellipsis, font_size);
+            while !last.is_empty() && measure_str_width(&face, last, font_size) + ell_w > max_width
+            {
+                last.pop();
+            }
+            last.push_str(ellipsis);
+        }
+    }
+
     lines
 }
 
@@ -347,37 +415,58 @@ pub fn render_certificate_pdf(
     );
 
     let mut current_y = 115.0f32;
+    let max_usable_y = 465.0f32;
+    let line_height = 22.0f32;
 
-    let draw_field =
-        |surface: &mut krilla::surface::Surface<'_>, label: &str, value: &str, y: &mut f32| {
-            let full_text = format!("{label}: {value}");
-            let lines = break_lines(&full_text, max_text_width, 16.0 * 0.50);
-            for line in lines {
-                surface.set_fill(Some(Fill {
-                    paint: rgb::Color::new(55, 65, 81).into(),
-                    ..Default::default()
-                }));
-                surface.set_stroke(None);
-                surface.draw_text(
-                    Point::from_xy(left_x, *y),
-                    regular_font.clone(),
-                    16.0,
-                    &line,
-                    false,
-                    TextDirection::Auto,
-                );
-                *y += 24.0;
+    let draw_field = |surface: &mut krilla::surface::Surface<'_>,
+                      label: &str,
+                      value: &str,
+                      y: &mut f32,
+                      max_lines: usize| {
+        let full_text = format!("{label}: {value}");
+        let lines = break_lines(
+            &full_text,
+            max_text_width,
+            REGULAR_FONT_BYTES,
+            16.0,
+            max_lines,
+        );
+        for line in lines {
+            if *y > max_usable_y {
+                break;
             }
-            *y += 6.0;
-        };
+            surface.set_fill(Some(Fill {
+                paint: rgb::Color::new(55, 65, 81).into(),
+                ..Default::default()
+            }));
+            surface.set_stroke(None);
+            surface.draw_text(
+                Point::from_xy(left_x, *y),
+                regular_font.clone(),
+                16.0,
+                &line,
+                false,
+                TextDirection::Auto,
+            );
+            *y += line_height;
+        }
+        *y += 6.0;
+    };
 
     draw_field(
         &mut surface,
         labels.holder_prefix,
         holder_name,
         &mut current_y,
+        4,
     );
-    draw_field(&mut surface, labels.quiz_prefix, quiz_title, &mut current_y);
+    draw_field(
+        &mut surface,
+        labels.quiz_prefix,
+        quiz_title,
+        &mut current_y,
+        4,
+    );
 
     let score_str = format!("{score_correct}/{score_total}");
     draw_field(
@@ -385,43 +474,57 @@ pub fn render_certificate_pdf(
         labels.result_prefix,
         &score_str,
         &mut current_y,
+        1,
     );
-    draw_field(&mut surface, labels.date_prefix, &date_str, &mut current_y);
-
-    current_y += 6.0;
-    let code_line = format!("{}: {code}", labels.code_prefix);
-    surface.set_fill(Some(Fill {
-        paint: rgb::Color::new(31, 41, 55).into(),
-        ..Default::default()
-    }));
-    surface.set_stroke(None);
-    surface.draw_text(
-        Point::from_xy(left_x, current_y),
-        bold_font.clone(),
-        14.0,
-        &code_line,
-        false,
-        TextDirection::Auto,
+    draw_field(
+        &mut surface,
+        labels.date_prefix,
+        &date_str,
+        &mut current_y,
+        1,
     );
-    current_y += 22.0;
 
-    let url_line = format!("{}: {verification_url}", labels.verify_prefix);
-    let url_lines = break_lines(&url_line, max_text_width, 12.0 * 0.52);
-    for uline in url_lines {
+    if current_y <= max_usable_y {
+        current_y += 6.0;
+        let code_line = format!("{}: {code}", labels.code_prefix);
         surface.set_fill(Some(Fill {
-            paint: rgb::Color::new(107, 114, 128).into(),
+            paint: rgb::Color::new(31, 41, 55).into(),
             ..Default::default()
         }));
         surface.set_stroke(None);
         surface.draw_text(
             Point::from_xy(left_x, current_y),
-            regular_font.clone(),
-            12.0,
-            &uline,
+            bold_font.clone(),
+            14.0,
+            &code_line,
             false,
             TextDirection::Auto,
         );
-        current_y += 18.0;
+        current_y += 20.0;
+    }
+
+    if current_y <= max_usable_y {
+        let url_line = format!("{}: {verification_url}", labels.verify_prefix);
+        let url_lines = break_lines(&url_line, max_text_width, REGULAR_FONT_BYTES, 12.0, 2);
+        for uline in url_lines {
+            if current_y > max_usable_y {
+                break;
+            }
+            surface.set_fill(Some(Fill {
+                paint: rgb::Color::new(107, 114, 128).into(),
+                ..Default::default()
+            }));
+            surface.set_stroke(None);
+            surface.draw_text(
+                Point::from_xy(left_x, current_y),
+                regular_font.clone(),
+                12.0,
+                &uline,
+                false,
+                TextDirection::Auto,
+            );
+            current_y += 16.0;
+        }
     }
 
     // QR Code on the right half (x = 550, y = 110)
@@ -517,41 +620,60 @@ pub fn render_certificate_svg(
     ));
 
     let mut current_y = 115.0f32;
-    let mut add_field = |label: &str, value: &str, y: &mut f32| {
+    let max_usable_y = 465.0f32;
+    let line_height = 22.0f32;
+
+    let mut add_field = |label: &str, value: &str, y: &mut f32, max_lines: usize| {
         let full_text = format!("{label}: {value}");
-        let lines = break_lines(&full_text, max_text_width, 16.0 * 0.50);
+        let lines = break_lines(
+            &full_text,
+            max_text_width,
+            REGULAR_FONT_BYTES,
+            16.0,
+            max_lines,
+        );
         for line in lines {
+            if *y > max_usable_y {
+                break;
+            }
             text_elements.push_str(&format!(
                 "<text x=\"{left_x}\" y=\"{:.1}\" font-size=\"16\" font-family=\"'IBMPlexSansThai', 'Liberation Sans', sans-serif\" fill=\"#374151\">{}</text>\n",
                 *y, escape_xml(&line)
             ));
-            *y += 24.0;
+            *y += line_height;
         }
         *y += 6.0;
     };
 
-    add_field(labels.holder_prefix, holder_name, &mut current_y);
-    add_field(labels.quiz_prefix, quiz_title, &mut current_y);
+    add_field(labels.holder_prefix, holder_name, &mut current_y, 4);
+    add_field(labels.quiz_prefix, quiz_title, &mut current_y, 4);
     let score_str = format!("{score_correct}/{score_total}");
-    add_field(labels.result_prefix, &score_str, &mut current_y);
-    add_field(labels.date_prefix, &date_str, &mut current_y);
+    add_field(labels.result_prefix, &score_str, &mut current_y, 1);
+    add_field(labels.date_prefix, &date_str, &mut current_y, 1);
 
-    current_y += 6.0;
-    let code_line = format!("{}: {code}", labels.code_prefix);
-    text_elements.push_str(&format!(
-        "<text x=\"{left_x}\" y=\"{:.1}\" font-size=\"14\" font-family=\"monospace\" font-weight=\"bold\" fill=\"#1f2937\">{}</text>\n",
-        current_y, escape_xml(&code_line)
-    ));
-    current_y += 22.0;
-
-    let url_line = format!("{}: {verification_url}", labels.verify_prefix);
-    let url_lines = break_lines(&url_line, max_text_width, 12.0 * 0.52);
-    for uline in url_lines {
+    if current_y <= max_usable_y {
+        current_y += 6.0;
+        let code_line = format!("{}: {code}", labels.code_prefix);
         text_elements.push_str(&format!(
-            "<text x=\"{left_x}\" y=\"{:.1}\" font-size=\"12\" font-family=\"monospace\" fill=\"#6b7280\">{}</text>\n",
-            current_y, escape_xml(&uline)
+            "<text x=\"{left_x}\" y=\"{:.1}\" font-size=\"14\" font-family=\"'IBMPlexSansThai', monospace\" font-weight=\"bold\" fill=\"#1f2937\">{}</text>\n",
+            current_y, escape_xml(&code_line)
         ));
-        current_y += 18.0;
+        current_y += 20.0;
+    }
+
+    if current_y <= max_usable_y {
+        let url_line = format!("{}: {verification_url}", labels.verify_prefix);
+        let url_lines = break_lines(&url_line, max_text_width, REGULAR_FONT_BYTES, 12.0, 2);
+        for uline in url_lines {
+            if current_y > max_usable_y {
+                break;
+            }
+            text_elements.push_str(&format!(
+                "<text x=\"{left_x}\" y=\"{:.1}\" font-size=\"12\" font-family=\"'IBMPlexSansThai', monospace\" fill=\"#6b7280\">{}</text>\n",
+                current_y, escape_xml(&uline)
+            ));
+            current_y += 16.0;
+        }
     }
 
     // QR modules

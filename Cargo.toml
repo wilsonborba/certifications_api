@@ -32,6 +32,7 @@ uuid = { version = "1", features = ["v4"] }
 qrcode = { version = "=0.14.1", default-features = false }
 krilla = "=0.7.0"
 icu_segmenter = "=2.4.0"
+ttf-parser = "=0.25.1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
