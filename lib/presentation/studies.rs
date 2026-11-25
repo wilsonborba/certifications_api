@@ -24,6 +24,13 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 pub struct ListParams {
     pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    pub q: Option<String>,
+    pub created_from: Option<i64>,
+    pub created_to: Option<i64>,
+    pub status: Option<String>,
+    pub quiz_id: Option<String>,
+    pub tag: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -86,8 +93,22 @@ async fn list(
     SessionUser(caller): SessionUser,
     Query(q): Query<ListParams>,
 ) -> Result<Json<Value>> {
-    let items = studies::list_studies(&app.store, &caller, q.limit.unwrap_or(20)).await?;
-    Ok(Json(json!({ "items": items })))
+    let page = studies::list_studies(
+        &app.store,
+        &caller,
+        &studies::StudyHistoryFilter {
+            search: q.q,
+            created_from: q.created_from,
+            created_to: q.created_to,
+            status: q.status,
+            quiz_id: q.quiz_id,
+            tag: q.tag,
+        },
+        q.limit.unwrap_or(20),
+        q.offset.unwrap_or(0),
+    )
+    .await?;
+    Ok(Json(json!(page)))
 }
 
 async fn create(
