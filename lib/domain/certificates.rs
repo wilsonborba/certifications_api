@@ -163,14 +163,52 @@ fn render_certificate_pdf(
     score_correct: i64,
     score_total: i64,
     code: &str,
+    issued_at: i64,
 ) -> Vec<u8> {
+    let date_str = chrono::DateTime::from_timestamp(issued_at, 0)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "2026-11-25".to_string());
+    let verification_url = format!("https://certifications.asodya.com/certificates/{code}");
+
     let line1 = escape_pdf_text(&format!("Asodya Completion Certificate ({code})"));
     let line2 = escape_pdf_text(&format!("Holder: {holder_name}"));
     let line3 = escape_pdf_text(&format!("Quiz: {quiz_title}"));
     let line4 = escape_pdf_text(&format!("Score: {score_correct}/{score_total}"));
-    let stream = format!(
-        "BT /F1 14 Tf 50 740 Td ({line1}) Tj 0 -24 Td ({line2}) Tj 0 -24 Td ({line3}) Tj 0 -24 Td ({line4}) Tj ET"
+    let line5 = escape_pdf_text(&format!("Date: {date_str}"));
+    let line6 = escape_pdf_text(&format!("Verify: {verification_url}"));
+
+    let mut stream = format!(
+        "BT /F1 14 Tf 50 740 Td ({line1}) Tj 0 -24 Td ({line2}) Tj 0 -24 Td ({line3}) Tj 0 -24 Td ({line4}) Tj 0 -24 Td ({line5}) Tj 0 -24 Td ({line6}) Tj ET\n"
     );
+
+    if let Ok(qr) = qrcode::QrCode::new(verification_url.as_bytes()) {
+        let width = qr.width();
+        let colors = qr.to_colors();
+        let module_size = 3.0f64;
+        let qr_x = 420.0f64;
+        let qr_bottom_y = 560.0f64;
+        let quiet = 4;
+        let total_size = ((width + quiet * 2) as f64) * module_size;
+
+        stream.push_str(&format!(
+            "q 1 1 1 rg {qr_x:.1} {qr_bottom_y:.1} {total_size:.1} {total_size:.1} re f Q\n\
+             q 0 0 0 rg\n\
+             % QR_START\n"
+        ));
+        for y in 0..width {
+            let my = qr_bottom_y + (((width - 1 - y) + quiet) as f64) * module_size;
+            for x in 0..width {
+                if colors[y * width + x] == qrcode::Color::Dark {
+                    let mx = qr_x + ((x + quiet) as f64) * module_size;
+                    stream.push_str(&format!(
+                        "{mx:.1} {my:.1} {module_size:.1} {module_size:.1} re f\n"
+                    ));
+                }
+            }
+        }
+        stream.push_str("% QR_END\nQ\n");
+    }
+
     let pdf = format!(
         "%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
          2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
@@ -189,26 +227,68 @@ fn render_certificate_svg(
     score_correct: i64,
     score_total: i64,
     code: &str,
+    issued_at: i64,
 ) -> Vec<u8> {
     let escape_xml = |s: &str| {
         s.replace('&', "&amp;")
             .replace('<', "&lt;")
             .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;")
     };
+    let date_str = chrono::DateTime::from_timestamp(issued_at, 0)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "2026-11-25".to_string());
+    let verification_url = format!("https://certifications.asodya.com/certificates/{code}");
+
+    let mut qr_modules = String::new();
+    if let Ok(qr) = qrcode::QrCode::new(verification_url.as_bytes()) {
+        let width = qr.width();
+        let colors = qr.to_colors();
+        let module_size = 4;
+        let qr_x = 540;
+        let qr_y = 60;
+        let quiet = 4;
+        let total_size = (width + quiet * 2) * module_size;
+        qr_modules.push_str(&format!(
+            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#ffffff\" stroke=\"#e5e7eb\" stroke-width=\"1\"/>\n",
+            qr_x, qr_y, total_size, total_size
+        ));
+        qr_modules.push_str("<g id=\"qr-code\">\n");
+        for y in 0..width {
+            for x in 0..width {
+                if colors[y * width + x] == qrcode::Color::Dark {
+                    let px = qr_x + (x + quiet) * module_size;
+                    let py = qr_y + (y + quiet) * module_size;
+                    qr_modules.push_str(&format!(
+                        "<rect x=\"{px}\" y=\"{py}\" width=\"{module_size}\" height=\"{module_size}\" fill=\"#000000\"/>\n"
+                    ));
+                }
+            }
+        }
+        qr_modules.push_str("</g>\n");
+    }
+
     let svg = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"800\" height=\"500\">\
-         <rect width=\"800\" height=\"500\" fill=\"#ffffff\" stroke=\"#1f2937\" stroke-width=\"4\"/>\
-         <text x=\"40\" y=\"70\" font-size=\"28\" font-family=\"sans-serif\">Asodya Completion Certificate</text>\
-         <text x=\"40\" y=\"130\" font-size=\"22\" font-family=\"sans-serif\">Holder: {}</text>\
-         <text x=\"40\" y=\"180\" font-size=\"20\" font-family=\"sans-serif\">Quiz: {}</text>\
-         <text x=\"40\" y=\"230\" font-size=\"20\" font-family=\"sans-serif\">Result: {}/{}</text>\
-         <text x=\"40\" y=\"280\" font-size=\"16\" font-family=\"monospace\">Verification Code: {}</text>\
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"800\" height=\"500\">\n\
+         <rect width=\"800\" height=\"500\" fill=\"#ffffff\" stroke=\"#1f2937\" stroke-width=\"4\"/>\n\
+         <text x=\"40\" y=\"70\" font-size=\"26\" font-family=\"sans-serif\" font-weight=\"bold\" fill=\"#111827\">Asodya Completion Certificate</text>\n\
+         <text x=\"40\" y=\"130\" font-size=\"20\" font-family=\"sans-serif\" fill=\"#374151\">Holder: {}</text>\n\
+         <text x=\"40\" y=\"180\" font-size=\"20\" font-family=\"sans-serif\" fill=\"#374151\">Quiz: {}</text>\n\
+         <text x=\"40\" y=\"230\" font-size=\"20\" font-family=\"sans-serif\" fill=\"#374151\">Result: {}/{}</text>\n\
+         <text x=\"40\" y=\"280\" font-size=\"16\" font-family=\"sans-serif\" fill=\"#374151\">Date: {}</text>\n\
+         <text x=\"40\" y=\"330\" font-size=\"15\" font-family=\"monospace\" fill=\"#1f2937\">Verification Code: {}</text>\n\
+         <text x=\"40\" y=\"365\" font-size=\"12\" font-family=\"monospace\" fill=\"#6b7280\">{}</text>\n\
+         {}\
          </svg>",
         escape_xml(holder_name),
         escape_xml(quiz_title),
         score_correct,
         score_total,
-        escape_xml(code)
+        date_str,
+        escape_xml(code),
+        escape_xml(&verification_url),
+        qr_modules
     );
     svg.into_bytes()
 }
@@ -307,10 +387,23 @@ pub async fn issue_or_get_certificate(
 
     let cert_id = new_id();
     let code = format!("ASODYA-{}", &new_id()[..12].to_uppercase());
-    let pdf_bytes =
-        render_certificate_pdf(&holder_name, &quiz_title, score_correct, score_total, &code);
-    let img_bytes =
-        render_certificate_svg(&holder_name, &quiz_title, score_correct, score_total, &code);
+    let ts = now();
+    let pdf_bytes = render_certificate_pdf(
+        &holder_name,
+        &quiz_title,
+        score_correct,
+        score_total,
+        &code,
+        ts,
+    );
+    let img_bytes = render_certificate_svg(
+        &holder_name,
+        &quiz_title,
+        score_correct,
+        score_total,
+        &code,
+        ts,
+    );
 
     let pdf_ref = store
         .fsm
@@ -321,7 +414,6 @@ pub async fn issue_or_get_certificate(
         .put_bytes(&format!("certificates/{cert_id}.svg"), &img_bytes)
         .await?;
 
-    let ts = now();
     sqlx::query(
         "INSERT INTO certificates(
             id, holder_id, quiz_id, attempt_id, verification_code, status, issued_at,

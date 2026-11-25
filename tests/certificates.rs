@@ -21,6 +21,167 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+fn decode_qr_from_svg(svg_bytes: &[u8]) -> Result<String, String> {
+    let s = std::str::from_utf8(svg_bytes).map_err(|e| e.to_string())?;
+    let start_tag = "<g id=\"qr-code\">";
+    let end_tag = "</g>";
+    let start = s.find(start_tag).ok_or("no qr-code group in svg")? + start_tag.len();
+    let end = s[start..].find(end_tag).ok_or("no qr-code end in svg")? + start;
+    let group = &s[start..end];
+
+    let mut rects = Vec::new();
+    for line in group.lines() {
+        if line.contains("<rect")
+            && line.contains("fill=\"#000000\"")
+            && let (Some(x_pos), Some(y_pos)) = (line.find("x=\""), line.find("y=\""))
+        {
+            let x_str = &line[x_pos + 3..];
+            let x_end = x_str.find('"').unwrap();
+            let x: f64 = x_str[..x_end].parse().unwrap();
+
+            let y_str = &line[y_pos + 3..];
+            let y_end = y_str.find('"').unwrap();
+            let y: f64 = y_str[..y_end].parse().unwrap();
+            rects.push((x, y));
+        }
+    }
+    if rects.is_empty() {
+        return Err("no qr rects found in svg".into());
+    }
+
+    let min_x = rects.iter().map(|(x, _)| *x).fold(f64::INFINITY, f64::min);
+    let min_y = rects.iter().map(|(_, y)| *y).fold(f64::INFINITY, f64::min);
+    let max_x = rects
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let max_y = rects
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    let mut xs: Vec<f64> = rects.iter().map(|(x, _)| *x).collect();
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    xs.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+    let mut step = f64::INFINITY;
+    for i in 1..xs.len() {
+        let diff = xs[i] - xs[i - 1];
+        if diff > 0.1 && diff < step {
+            step = diff;
+        }
+    }
+    let grid_w = ((max_x - min_x) / step).round() as usize + 1;
+    let grid_h = ((max_y - min_y) / step).round() as usize + 1;
+    assert_eq!(grid_w, grid_h);
+
+    let quiet = 4;
+    let scale = 4;
+    let total_w = (grid_w + quiet * 2) * scale;
+    let mut gray =
+        image::GrayImage::from_pixel(total_w as u32, total_w as u32, image::Luma([255u8]));
+
+    for (x, y) in rects {
+        let col = ((x - min_x) / step).round() as usize;
+        let row = ((y - min_y) / step).round() as usize;
+        for dy in 0..scale {
+            for dx in 0..scale {
+                let px = (col + quiet) * scale + dx;
+                let py = (row + quiet) * scale + dy;
+                gray.put_pixel(px as u32, py as u32, image::Luma([0u8]));
+            }
+        }
+    }
+
+    let mut prepared = rqrr::PreparedImage::prepare(gray);
+    let grids = prepared.detect_grids();
+    if grids.is_empty() {
+        return Err("rqrr detected 0 grids in svg qr".into());
+    }
+    let mut buf = Vec::new();
+    grids[0]
+        .decode_to(&mut buf)
+        .map_err(|e| format!("decode error: {e:?}"))?;
+    String::from_utf8(buf).map_err(|e| e.to_string())
+}
+
+fn decode_qr_from_pdf(pdf_bytes: &[u8]) -> Result<String, String> {
+    let s = String::from_utf8_lossy(pdf_bytes);
+    let start_tag = "% QR_START\n";
+    let end_tag = "% QR_END";
+    let start = s.find(start_tag).ok_or("no % QR_START in pdf")? + start_tag.len();
+    let end = s[start..].find(end_tag).ok_or("no % QR_END in pdf")? + start;
+    let section = &s[start..end];
+
+    let mut rects = Vec::new();
+    for line in section.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() == 6
+            && parts[4] == "re"
+            && parts[5] == "f"
+            && let (Ok(x), Ok(y)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>())
+        {
+            rects.push((x, y));
+        }
+    }
+    if rects.is_empty() {
+        return Err("no qr rects found in pdf".into());
+    }
+
+    let min_x = rects.iter().map(|(x, _)| *x).fold(f64::INFINITY, f64::min);
+    let min_y = rects.iter().map(|(_, y)| *y).fold(f64::INFINITY, f64::min);
+    let max_x = rects
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let max_y = rects
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    let mut xs: Vec<f64> = rects.iter().map(|(x, _)| *x).collect();
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    xs.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+    let mut step = f64::INFINITY;
+    for i in 1..xs.len() {
+        let diff = xs[i] - xs[i - 1];
+        if diff > 0.1 && diff < step {
+            step = diff;
+        }
+    }
+    let grid_w = ((max_x - min_x) / step).round() as usize + 1;
+    let grid_h = ((max_y - min_y) / step).round() as usize + 1;
+    assert_eq!(grid_w, grid_h);
+
+    let quiet = 4;
+    let scale = 4;
+    let total_w = (grid_w + quiet * 2) * scale;
+    let mut gray =
+        image::GrayImage::from_pixel(total_w as u32, total_w as u32, image::Luma([255u8]));
+
+    for (x, y) in rects {
+        let col = ((x - min_x) / step).round() as usize;
+        let row = ((max_y - y) / step).round() as usize;
+        for dy in 0..scale {
+            for dx in 0..scale {
+                let px = (col + quiet) * scale + dx;
+                let py = (row + quiet) * scale + dy;
+                gray.put_pixel(px as u32, py as u32, image::Luma([0u8]));
+            }
+        }
+    }
+
+    let mut prepared = rqrr::PreparedImage::prepare(gray);
+    let grids = prepared.detect_grids();
+    if grids.is_empty() {
+        return Err("rqrr detected 0 grids in pdf qr".into());
+    }
+    let mut buf = Vec::new();
+    grids[0]
+        .decode_to(&mut buf)
+        .map_err(|e| format!("decode error: {e:?}"))?;
+    String::from_utf8(buf).map_err(|e| e.to_string())
+}
+
 fn test_settings() -> Settings {
     Settings {
         host: "127.0.0.1".into(),
@@ -374,6 +535,33 @@ async fn certificate_identity_idempotent_issuance_snapshot_files_and_revocation(
     assert_eq!(st, StatusCode::OK);
     assert!(String::from_utf8_lossy(&img_bytes).contains("<svg"));
 
+    // Verify QR payloads decode from both rendered artifacts
+    let expected_url = format!("https://certifications.asodya.com/certificates/{code}");
+    let decoded_svg_qr = decode_qr_from_svg(&img_bytes).expect("SVG QR decode failed");
+    assert_eq!(decoded_svg_qr, expected_url);
+
+    let decoded_pdf_qr = decode_qr_from_pdf(&pdf_bytes).expect("PDF QR decode failed");
+    assert_eq!(decoded_pdf_qr, expected_url);
+
+    // Readable text in SVG and PDF
+    let svg_str = String::from_utf8_lossy(&img_bytes);
+    assert!(svg_str.contains("Asodya Completion Certificate"));
+    assert!(svg_str.contains("Holder: Ana Silva"));
+    assert!(svg_str.contains("Quiz: Cert Quiz"));
+    assert!(svg_str.contains("Result: 0/1"));
+    assert!(svg_str.contains("Date:"));
+    assert!(!svg_str.contains("page_hidden"));
+    assert!(!svg_str.contains("Yes is right"));
+
+    let pdf_str = String::from_utf8_lossy(&pdf_bytes);
+    assert!(pdf_str.contains("Asodya Completion Certificate"));
+    assert!(pdf_str.contains("Holder: Ana Silva"));
+    assert!(pdf_str.contains("Quiz: Cert Quiz"));
+    assert!(pdf_str.contains("Score: 0/1"));
+    assert!(pdf_str.contains("Date:"));
+    assert!(!pdf_str.contains("page_hidden"));
+    assert!(!pdf_str.contains("Yes is right"));
+
     // Admin revocation is reflected on public verification.
     let (st, _) = call(
         &app,
@@ -398,4 +586,263 @@ async fn certificate_identity_idempotent_issuance_snapshot_files_and_revocation(
     assert_eq!(st, StatusCode::OK);
     assert_eq!(ver_after["status"], "revoked");
     assert_eq!(ver_after["revocation_reason"], "Issued in error");
+}
+
+#[tokio::test]
+async fn certificate_qr_and_multilingual_unicode_rendering_en_pt_th() {
+    let app = setup_app().await;
+
+    // 1. Portuguese quiz and holder with accents
+    let (_, pt_study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("instructor-pt"),
+        None,
+        Some(json!({ "title": "Programação Básica em Rust" })),
+    )
+    .await;
+    let pt_sid = pt_study["id"].as_str().unwrap().to_string();
+
+    call(
+        &app,
+        "POST",
+        &format!("/studies/{pt_sid}/questions"),
+        Some("instructor-pt"),
+        None,
+        Some(json!({
+            "language": "pt-BR",
+            "prompt": "Qual é a saída principal?",
+            "alternatives": [
+                { "id": "a", "text": "Correto" },
+                { "id": "b", "text": "Incorreto" }
+            ],
+            "correct_id": "a",
+            "explanation": "Explicação detalhada"
+        })),
+    )
+    .await;
+
+    let (_, pt_pub) = call(
+        &app,
+        "POST",
+        &format!("/studies/{pt_sid}/publication"),
+        Some("instructor-pt"),
+        None,
+        Some(json!({ "tags": ["pt-test"] })),
+    )
+    .await;
+    let pt_quiz_id = pt_pub["id"].as_str().unwrap().to_string();
+
+    // Confirm Portuguese learner identity
+    let (st, _) = call(
+        &app,
+        "PUT",
+        "/me/identity",
+        Some("learner-pt"),
+        None,
+        Some(json!({ "display_name": "João da Silva Oliveira" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    // Attempt and submit
+    let (_, pt_att) = call(
+        &app,
+        "POST",
+        &format!("/quizzes/{pt_quiz_id}/attempts"),
+        Some("learner-pt"),
+        None,
+        None,
+    )
+    .await;
+    let pt_att_id = pt_att["id"].as_str().unwrap().to_string();
+    call(
+        &app,
+        "POST",
+        &format!("/attempts/{pt_att_id}/submit"),
+        Some("learner-pt"),
+        None,
+        None,
+    )
+    .await;
+
+    // Issue certificate
+    let (st, pt_cert) = call(
+        &app,
+        "POST",
+        &format!("/attempts/{pt_att_id}/certificate"),
+        Some("learner-pt"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let pt_code = pt_cert["verification_code"].as_str().unwrap().to_string();
+    let pt_expected_url = format!("https://certifications.asodya.com/certificates/{pt_code}");
+
+    // Download PT files
+    let (st, pt_pdf) = call_raw(
+        &app,
+        "GET",
+        &format!("/certificates/{pt_code}/files/pdf"),
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    let (st, pt_svg) = call_raw(
+        &app,
+        "GET",
+        &format!("/certificates/{pt_code}/files/image"),
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    // Verify PT QR decodes
+    assert_eq!(decode_qr_from_svg(&pt_svg).unwrap(), pt_expected_url);
+    assert_eq!(decode_qr_from_pdf(&pt_pdf).unwrap(), pt_expected_url);
+
+    // Verify PT readable text
+    let pt_svg_str = String::from_utf8_lossy(&pt_svg);
+    assert!(pt_svg_str.contains("João da Silva Oliveira"));
+    assert!(pt_svg_str.contains("Programação Básica em Rust"));
+    assert!(!pt_svg_str.contains("Explicação"));
+
+    let pt_pdf_str = String::from_utf8_lossy(&pt_pdf);
+    assert!(pt_pdf_str.contains("João da Silva Oliveira"));
+    assert!(pt_pdf_str.contains("Programação Básica em Rust"));
+    assert!(!pt_pdf_str.contains("Explicação"));
+
+    // 2. Thai quiz and holder
+    let (_, th_study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("instructor-th"),
+        None,
+        Some(json!({ "title": "แบบทดสอบความรู้พื้นฐาน" })),
+    )
+    .await;
+    let th_sid = th_study["id"].as_str().unwrap().to_string();
+
+    call(
+        &app,
+        "POST",
+        &format!("/studies/{th_sid}/questions"),
+        Some("instructor-th"),
+        None,
+        Some(json!({
+            "language": "th",
+            "prompt": "คำถามแรกคืออะไร?",
+            "alternatives": [
+                { "id": "a", "text": "ถูกต้อง" },
+                { "id": "b", "text": "ไม่ถูกต้อง" }
+            ],
+            "correct_id": "a",
+            "explanation": "คำอธิบายที่ถูกต้อง"
+        })),
+    )
+    .await;
+
+    let (_, th_pub) = call(
+        &app,
+        "POST",
+        &format!("/studies/{th_sid}/publication"),
+        Some("instructor-th"),
+        None,
+        Some(json!({ "tags": ["th-test"] })),
+    )
+    .await;
+    let th_quiz_id = th_pub["id"].as_str().unwrap().to_string();
+
+    // Confirm Thai learner identity
+    let (st, _) = call(
+        &app,
+        "PUT",
+        "/me/identity",
+        Some("learner-th"),
+        None,
+        Some(json!({ "display_name": "สมชาย ใจดี" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    // Attempt and submit
+    let (_, th_att) = call(
+        &app,
+        "POST",
+        &format!("/quizzes/{th_quiz_id}/attempts"),
+        Some("learner-th"),
+        None,
+        None,
+    )
+    .await;
+    let th_att_id = th_att["id"].as_str().unwrap().to_string();
+    call(
+        &app,
+        "POST",
+        &format!("/attempts/{th_att_id}/submit"),
+        Some("learner-th"),
+        None,
+        None,
+    )
+    .await;
+
+    // Issue certificate
+    let (st, th_cert) = call(
+        &app,
+        "POST",
+        &format!("/attempts/{th_att_id}/certificate"),
+        Some("learner-th"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let th_code = th_cert["verification_code"].as_str().unwrap().to_string();
+    let th_expected_url = format!("https://certifications.asodya.com/certificates/{th_code}");
+
+    // Download Thai files
+    let (st, th_pdf) = call_raw(
+        &app,
+        "GET",
+        &format!("/certificates/{th_code}/files/pdf"),
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    let (st, th_svg) = call_raw(
+        &app,
+        "GET",
+        &format!("/certificates/{th_code}/files/image"),
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    // Verify Thai QR decodes
+    assert_eq!(decode_qr_from_svg(&th_svg).unwrap(), th_expected_url);
+    assert_eq!(decode_qr_from_pdf(&th_pdf).unwrap(), th_expected_url);
+
+    // Verify Thai readable text
+    let th_svg_str = String::from_utf8_lossy(&th_svg);
+    assert!(th_svg_str.contains("สมชาย ใจดี"));
+    assert!(th_svg_str.contains("แบบทดสอบความรู้พื้นฐาน"));
+    assert!(!th_svg_str.contains("คำอธิบาย"));
+
+    let th_pdf_str = String::from_utf8_lossy(&th_pdf);
+    assert!(th_pdf_str.contains("สมชาย ใจดี"));
+    assert!(th_pdf_str.contains("แบบทดสอบความรู้พื้นฐาน"));
+    assert!(!th_pdf_str.contains("คำอธิบาย"));
 }
