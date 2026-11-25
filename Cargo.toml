@@ -27,7 +27,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-unicode-normalization = "0.1"
+unicode-normalization = "=0.1.26"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
