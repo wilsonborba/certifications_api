@@ -64,6 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(installer)* Fingerprint tracked assets ([`e23075c`](https://github.com/wilsonborba/certifications_api/commit/e23075cf8a7a2b7b0547b95c9033937fafcad456))
 - Emit real data tier for quiz statistics reports ([`9a7b7f6`](https://github.com/wilsonborba/certifications_api/commit/9a7b7f6bd9ee47be08b7fa1a6a2b40a0276aa9d8))
 - *(statistics)* Integrate canonical Reports data tier ([`3c0934e`](https://github.com/wilsonborba/certifications_api/commit/3c0934ed58e2fd0fecd31a00129f372cd97f9642))
+- Localize statistics measure axis label ([`aa4d12a`](https://github.com/wilsonborba/certifications_api/commit/aa4d12a5c6fa0ed2df50f30f310e1c90550a9b5c))
+- *(statistics)* Integrate dimensionless localized attempt counts ([`61972f9`](https://github.com/wilsonborba/certifications_api/commit/61972f96a6a62d751eeb92a52c07570ec7c66d60))
 
 ### 💼 Other Changes
 
@@ -107,6 +109,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(changelog)* Record public question reuse integration ([`433e4e1`](https://github.com/wilsonborba/certifications_api/commit/433e4e1b1033682ae8c8549af61643df48d4524e))
 - *(changelog)* Record prepared settings and PostgreSQL history fixes ([`b10e505`](https://github.com/wilsonborba/certifications_api/commit/b10e505ac35ac8f2f6b0fb10ef98fc1e5691cadb))
 - *(changelog)* Record verified Rust service preparation ([`f7afd15`](https://github.com/wilsonborba/certifications_api/commit/f7afd1516a0a5968d2e947544fca773855bcef25))
+- *(changelog)* Record real aggregate Reports metadata ([`a95ef10`](https://github.com/wilsonborba/certifications_api/commit/a95ef10dfe0cce5ed8e8601ca21b36efbedf85d2))
 
 ### 🎨 Styling
 
