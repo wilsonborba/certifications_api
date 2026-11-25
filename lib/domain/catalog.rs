@@ -129,12 +129,12 @@ fn score_distribution_page(
                 {"name":"attempt_count", "label":attempts_label, "type":"integer", "role":"measure", "unit":"attempts"}
             ],
             "filters": [],
-            "data_tier": "live",
+            "data_tier": "real",
             "can_view": true,
             "visibility": visibility,
             "meta": {
                 "source":"Certifications API",
-                "tier":"live",
+                "tier":"real",
                 "freshness_mode":"live",
                 "language":language,
                 "sample_size":sample_size,
