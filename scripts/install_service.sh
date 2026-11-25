@@ -1,56 +1,153 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Must run as root
-if [ "$(id -u)" -ne 0 ]; then
-  echo "⚠️ Please run this script with sudo or as root"
-  exit 1
-fi
-
-# Service name
 SERVICE_NAME="certifications-api"
-UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-
-# Paths
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
-EXEC_START="${PROJECT_DIR}/scripts/app_prod_run.sh"
-LOG_FILE="/var/log/${SERVICE_NAME}.log"
+DEPLOY_DIR="$PROJECT_DIR/var/deploy"
+MODE=${1:---prepare}
 
-# Ensure the launcher exists
-if [ ! -x "$EXEC_START" ]; then
-  echo "⚠️ Launcher not found or not executable: $EXEC_START"
+case "$MODE" in
+  --prepare|--check|--activate|--dry-run) ;;
+  *) printf 'Usage: %s [--prepare|--check|--activate|--dry-run]\n' "${0##*/}" >&2; exit 2 ;;
+esac
+
+source_hash() {
+  git -C "$PROJECT_DIR" ls-files -co --exclude-standard -z -- \
+    Cargo.toml Cargo.lock build.rs .cargo lib scripts/install_service.sh |
+    LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d ' ' -f1
+}
+
+validate_inputs() {
+  local missing=0
+  for path in Cargo.toml Cargo.lock lib/main.rs scripts/install_service.sh; do
+    if [[ ! -f "$PROJECT_DIR/$path" ]]; then
+      printf 'Missing Rust release input: %s\n' "$path" >&2
+      missing=1
+    fi
+  done
+  return "$missing"
+}
+
+validate_prepared() {
+  [[ -f "$DEPLOY_DIR/certifications-api" ]] || {
+    printf 'No prepared Rust binary. Run install_service.sh --prepare first.\n' >&2; return 1;
+  }
+  [[ -x "$DEPLOY_DIR/certifications-api" ]] || {
+    printf 'Prepared Rust binary is not executable. Run install_service.sh --prepare again.\n' >&2; return 1;
+  }
+  [[ -f "$DEPLOY_DIR/certifications-api.service" && -f "$DEPLOY_DIR/source.sha256" && -f "$DEPLOY_DIR/artifacts.sha256" ]] || {
+    printf 'Prepared Rust package is incomplete. Run install_service.sh --prepare again.\n' >&2; return 1;
+  }
+  [[ "$(source_hash)" == "$(<"$DEPLOY_DIR/source.sha256")" ]] || {
+    printf 'Rust sources changed since prepare. Run install_service.sh --prepare again.\n' >&2; return 1;
+  }
+  (cd "$DEPLOY_DIR" && sha256sum --check --status artifacts.sha256) || {
+    printf 'Prepared artifacts failed checksum validation. Run install_service.sh --prepare again.\n' >&2; return 1;
+  }
+  grep -Fxq "WorkingDirectory=$PROJECT_DIR" "$DEPLOY_DIR/$SERVICE_NAME.service" || {
+    printf 'Prepared service unit belongs to another checkout. Prepare in this checkout.\n' >&2; return 1;
+  }
+  grep -Fxq "ExecStart=$DEPLOY_DIR/certifications-api" "$DEPLOY_DIR/$SERVICE_NAME.service" || {
+    printf 'Prepared service unit does not launch the Rust binary. Run install_service.sh --prepare again.\n' >&2; return 1;
+  }
+}
+
+# This branch is deliberately before locks, mkdir, cargo, install, or service
+# commands. It only reads the checkout and reports the package/activation plan.
+if [[ "$MODE" == --dry-run ]]; then
+  validate_inputs
+  if [[ -d "$DEPLOY_DIR" ]]; then
+    validate_prepared
+    printf 'Dry run: prepared Rust binary and unit passed read-only validation.\n'
+    printf 'Plan: install %s and %s; reload systemd; enable and start %s.\n' \
+      "$DEPLOY_DIR/certifications-api" "/etc/systemd/system/$SERVICE_NAME.service" "$SERVICE_NAME"
+  else
+    printf 'Dry run: no prepared package exists; Rust release inputs are present.\n'
+    printf 'Plan: cargo build --release; prepare %s/certifications-api and its service unit.\n' "$DEPLOY_DIR"
+    printf 'Plan: activation would install the binary and unit, reload systemd, enable and start %s.\n' "$SERVICE_NAME"
+  fi
+  printf 'Dry run complete. No files, services, databases, caches, or FSM objects were changed.\n'
+  exit 0
+fi
+
+if [[ "$MODE" == --activate && "$(id -u)" != 0 ]]; then
+  printf 'Administrator rights are required to activate %s.\n' "$SERVICE_NAME" >&2
   exit 1
 fi
 
-# Create (or truncate) the log file and set permissions
-touch "$LOG_FILE"
-chown root:root "$LOG_FILE"
-chmod 644 "$LOG_FILE"
-
-# Write the systemd unit (overwrites if already there)
-cat > "$UNIT_FILE" <<EOF
+if [[ "$MODE" == --prepare ]]; then
+  validate_inputs
+  mkdir -p "$PROJECT_DIR/var"
+  exec 9>"$PROJECT_DIR/var/deploy.lock"
+  flock -n 9 || { printf 'Another deployment is in progress.\n' >&2; exit 1; }
+  before=$(source_hash)
+  cargo build --release --locked --bin certifications-api
+  [[ "$before" == "$(source_hash)" ]] || {
+    printf 'Rust source changed during the build. Prepare again.\n' >&2; exit 1;
+  }
+  BINARY="$PROJECT_DIR/target/release/certifications-api"
+  [[ -s "$BINARY" && -x "$BINARY" ]] || {
+    printf 'Cargo did not produce an executable Rust binary at %s.\n' "$BINARY" >&2; exit 1;
+  }
+  stage=$(mktemp -d "$PROJECT_DIR/var/deploy.XXXXXX")
+  trap 'rm -rf "$stage"' EXIT
+  install -m 755 "$BINARY" "$stage/certifications-api"
+  cat > "$stage/$SERVICE_NAME.service" <<UNIT
 [Unit]
-Description=Certifications API Service
-After=network.target
+Description=Certifications Rust API
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=${PROJECT_DIR}
-ExecStart=${EXEC_START}
-Restart=always
+WorkingDirectory=$PROJECT_DIR
+EnvironmentFile=$PROJECT_DIR/.env
+ExecStart=$DEPLOY_DIR/certifications-api
+Restart=on-failure
 RestartSec=5
-StandardOutput=append:${LOG_FILE}
-StandardError=append:${LOG_FILE}
+NoNewPrivileges=yes
+PrivateTmp=yes
+UMask=027
 
 [Install]
 WantedBy=multi-user.target
-EOF
+UNIT
+  source_hash > "$stage/source.sha256"
+  (cd "$stage" && sha256sum certifications-api "$SERVICE_NAME.service" > artifacts.sha256)
+  rm -rf "$DEPLOY_DIR"
+  mv "$stage" "$DEPLOY_DIR"
+  trap - EXIT
+  printf 'Rust binary and service unit prepared in var/deploy. No service changed.\n'
+  exit 0
+fi
 
-# Reload systemd, enable & start the service
+validate_prepared
+if [[ "$MODE" == --check ]]; then
+  printf 'Prepared Rust package verified. No service changed.\n'
+  exit 0
+fi
+
+# --activate is the only mode that installs files or changes systemd state.
+install -D -m 755 "$DEPLOY_DIR/certifications-api" "$DEPLOY_DIR/certifications-api.new"
+mv -f "$DEPLOY_DIR/certifications-api.new" "$DEPLOY_DIR/certifications-api"
+install -D -m 644 "$DEPLOY_DIR/$SERVICE_NAME.service" "/etc/systemd/system/$SERVICE_NAME.service"
 systemctl daemon-reload
-systemctl enable "${SERVICE_NAME}"
-systemctl start "${SERVICE_NAME}"
+systemctl enable "$SERVICE_NAME.service"
+systemctl restart "$SERVICE_NAME.service"
 
-echo "✅ ${SERVICE_NAME} installed, enabled, and started."
-echo "   Logs are at: ${LOG_FILE}"
+expected=$(sha256sum "$DEPLOY_DIR/certifications-api" | cut -d ' ' -f1)
+matched=false
+for _ in {1..30}; do
+  pid=$(systemctl show "$SERVICE_NAME.service" --property=MainPID --value)
+  if systemctl is-active --quiet "$SERVICE_NAME.service" && [[ "$pid" != 0 ]] &&
+     [[ "$(sha256sum "/proc/$pid/exe" 2>/dev/null | cut -d ' ' -f1)" == "$expected" ]]; then
+    matched=true
+    break
+  fi
+  sleep 0.2
+done
+[[ "$matched" == true ]] || {
+  printf 'Running Rust binary verification failed for %s.\n' "$SERVICE_NAME.service" >&2; exit 1;
+}
+printf '%s is active and running the prepared Rust binary.\n' "$SERVICE_NAME.service"
