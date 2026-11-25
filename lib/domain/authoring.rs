@@ -3,8 +3,10 @@ use crate::{
     dal::{Store, new_id},
     domain::{
         auth::{CallerIdentity, require_owner},
+        catalog::{self, public_question_version_sources_in_tx},
         generations::{QUESTION_SCHEMA_NAME, QUESTION_SCHEMA_VERSION},
         guardrail,
+        provenance::{REUSED_PUBLIC_VERSION, UNCLASSIFIED},
     },
 };
 use serde::{Deserialize, Serialize};
@@ -36,12 +38,30 @@ pub struct AuthorQuestion {
     pub version_num: i64,
     pub language: String,
     pub origin: String,
+    pub source_scope: String,
+    pub origin_quiz_id: Option<String>,
+    pub origin_quiz_version_id: Option<String>,
     pub prompt: String,
     pub alternatives: Value,
     pub correct_id: String,
     pub explanation: String,
     pub citation_ref: String,
     pub visuals: Vec<QuestionVisual>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReuseQuestionsInput {
+    pub question_version_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ReuseQuestionsResult {
+    pub quiz_id: String,
+    pub quiz_version_id: Option<String>,
+    pub added_count: i64,
+    pub already_present_count: i64,
+    pub total_question_count: i64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -202,6 +222,33 @@ async fn ensure_study_quiz(
     Ok(qid)
 }
 
+async fn ensure_study_quiz_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    owner_id: &str,
+    study_id: &str,
+) -> Result<String> {
+    let qid = new_id();
+    let ts = now();
+    sqlx::query(
+        "INSERT INTO quizzes(id, owner_id, study_id, visibility, origin, active_version_id, created_at, updated_at)
+         VALUES($1, $2, $3, 'private', $4, '', $5, $5)",
+    )
+    .bind(&qid)
+    .bind(owner_id)
+    .bind(study_id)
+    .bind(ORIGIN_CREATOR)
+    .bind(ts)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("UPDATE studies SET quiz_id = $1, updated_at = $2 WHERE id = $3")
+        .bind(&qid)
+        .bind(ts)
+        .bind(study_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(qid)
+}
+
 async fn load_visuals(store: &Store, qv_id: &str) -> Result<Vec<QuestionVisual>> {
     let rows = sqlx::query(
         "SELECT id, fsm_ref, mime_type, created_at FROM question_visuals WHERE question_version_id = $1 ORDER BY created_at",
@@ -245,6 +292,9 @@ async fn load_question_detail(
         version_num: row.get("version_num"),
         language: row.get("language"),
         origin: row.get("origin"),
+        source_scope: UNCLASSIFIED.into(),
+        origin_quiz_id: None,
+        origin_quiz_version_id: None,
         prompt: doc["prompt"].as_str().unwrap_or("").to_string(),
         alternatives: doc["alternatives"].clone(),
         correct_id: doc["correct_id"].as_str().unwrap_or("").to_string(),
@@ -299,8 +349,56 @@ async fn current_quiz_version_questions(
     Ok((Some(active_vid), items))
 }
 
+async fn current_quiz_version_questions_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    quiz_id: &str,
+) -> Result<(Option<String>, Vec<QuizQuestionMembership>)> {
+    let active_vid: String =
+        sqlx::query_scalar("SELECT active_version_id FROM quizzes WHERE id = $1")
+            .bind(quiz_id)
+            .fetch_one(&mut **tx)
+            .await?;
+    if active_vid.is_empty() {
+        return Ok((None, Vec::new()));
+    }
+    let rows = sqlx::query(
+        "SELECT qv.question_id, qvq.question_version_id, qvq.source_scope,
+                qvq.origin_quiz_id, qvq.origin_quiz_version_id
+         FROM quiz_version_questions qvq
+         JOIN question_versions qv ON qv.id = qvq.question_version_id
+         WHERE qvq.quiz_version_id = $1
+         ORDER BY qvq.position",
+    )
+    .bind(&active_vid)
+    .fetch_all(&mut **tx)
+    .await?;
+    let items = rows
+        .into_iter()
+        .map(|r| QuizQuestionMembership {
+            question_id: r.get("question_id"),
+            question_version_id: r.get("question_version_id"),
+            source_scope: r.get("source_scope"),
+            origin_quiz_id: r.get("origin_quiz_id"),
+            origin_quiz_version_id: r.get("origin_quiz_version_id"),
+        })
+        .collect();
+    Ok((Some(active_vid), items))
+}
+
 async fn write_new_quiz_version(
     store: &Store,
+    quiz_id: &str,
+    items: &[QuizQuestionMembership],
+) -> Result<String> {
+    let mut tx = store.db.begin().await?;
+    let qver_id = write_new_quiz_version_in_tx(store, &mut tx, quiz_id, items).await?;
+    tx.commit().await?;
+    Ok(qver_id)
+}
+
+async fn write_new_quiz_version_in_tx(
+    store: &Store,
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
     quiz_id: &str,
     items: &[QuizQuestionMembership],
 ) -> Result<String> {
@@ -308,11 +406,10 @@ async fn write_new_quiz_version(
         "SELECT COALESCE(MAX(version_num), 0) + 1 FROM quiz_versions WHERE quiz_id = $1",
     )
     .bind(quiz_id)
-    .fetch_one(&store.db)
+    .fetch_one(&mut **tx)
     .await?;
     let qver_id = new_id();
     let ts = now();
-    let mut tx = store.db.begin().await?;
     sqlx::query(
         "INSERT INTO quiz_versions(id, quiz_id, version_num, title, created_at) VALUES($1, $2, $3, $4, $5)",
     )
@@ -321,7 +418,7 @@ async fn write_new_quiz_version(
     .bind(next_ver)
     .bind(format!("Study Quiz v{next_ver}"))
     .bind(ts)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     for (pos, item) in items.iter().enumerate() {
         sqlx::query(
@@ -335,16 +432,16 @@ async fn write_new_quiz_version(
         .bind(&item.source_scope)
         .bind(&item.origin_quiz_id)
         .bind(&item.origin_quiz_version_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
     sqlx::query("UPDATE quizzes SET active_version_id = $1, updated_at = $2 WHERE id = $3")
         .bind(&qver_id)
         .bind(ts)
         .bind(quiz_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
+    catalog::refresh_public_question_search_in_tx(store, tx, quiz_id).await?;
     Ok(qver_id)
 }
 
@@ -360,9 +457,186 @@ pub async fn list_study_questions(
     let (_vid, items) = current_quiz_version_questions(store, &qid).await?;
     let mut out = Vec::with_capacity(items.len());
     for item in items {
-        out.push(load_question_detail(store, &item.question_id, &item.question_version_id).await?);
+        let mut question =
+            load_question_detail(store, &item.question_id, &item.question_version_id).await?;
+        question.source_scope = item.source_scope.clone();
+        question.origin_quiz_id = item.origin_quiz_id.clone();
+        question.origin_quiz_version_id = item.origin_quiz_version_id.clone();
+        if item.source_scope == REUSED_PUBLIC_VERSION {
+            // Source citations and visual storage references remain attached to the
+            // canonical version but are not shared through the target study API.
+            question.citation_ref.clear();
+            question.visuals.clear();
+        }
+        out.push(question);
     }
     Ok(out)
+}
+
+pub async fn reuse_public_question_versions(
+    store: &Store,
+    caller: &CallerIdentity,
+    study_id: &str,
+    question_version_ids: &[String],
+) -> Result<ReuseQuestionsResult> {
+    const MAX_SELECTION: usize = 50;
+    if question_version_ids.is_empty() || question_version_ids.len() > MAX_SELECTION {
+        return Err(Error::unprocessable(
+            "invalid_question_selection: Select between 1 and 50 public question versions",
+        ));
+    }
+    if question_version_ids.iter().any(|id| id.trim().is_empty()) {
+        return Err(Error::unprocessable(
+            "invalid_question_selection: Question version IDs must be non-empty",
+        ));
+    }
+
+    let selected_ids: Vec<String> = question_version_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut tx = store.db.begin().await?;
+    let lifecycle_query = if store.postgres() {
+        "SELECT owner_id, quiz_id, status, expires_at FROM studies WHERE id = $1 FOR UPDATE"
+    } else {
+        "SELECT owner_id, quiz_id, status, expires_at FROM studies WHERE id = $1"
+    };
+    let lifecycle = sqlx::query(lifecycle_query)
+        .bind(study_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(Error::missing)?;
+    let owner_id: String = lifecycle.get("owner_id");
+    require_owner(caller, &owner_id)?;
+    let status: String = lifecycle.get("status");
+    let expires_at: Option<i64> = lifecycle.get("expires_at");
+    if status == "draft" && expires_at.is_some_and(|expires| now() > expires) {
+        sqlx::query("UPDATE studies SET status = 'expired' WHERE id = $1 AND status = 'draft'")
+            .bind(study_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        return Err(Error(
+            axum::http::StatusCode::GONE,
+            "study_expired: Abandoned pre-generation study draft expired".into(),
+        ));
+    }
+    if status == "expired" {
+        return Err(Error(
+            axum::http::StatusCode::GONE,
+            "study_expired: Abandoned pre-generation study draft expired".into(),
+        ));
+    }
+    let running: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM generation_jobs WHERE study_id = $1 AND status IN ('queued', 'running')",
+    )
+    .bind(study_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if running > 0 {
+        return Err(Error::conflict(
+            "generation_in_progress: Public questions cannot be reused while study generation is queued or running",
+        ));
+    }
+    let existing_quiz_id: Option<String> = lifecycle
+        .try_get("quiz_id")
+        .ok()
+        .filter(|id: &String| !id.is_empty());
+    let sources = public_question_version_sources_in_tx(&mut tx, Some(&selected_ids)).await?;
+    let mut source_by_version = std::collections::HashMap::new();
+    for source in sources {
+        source_by_version
+            .entry(source.question_version_id.clone())
+            .or_insert(source);
+    }
+    if source_by_version.len() != selected_ids.len() {
+        return Err(Error::unprocessable(
+            "question_not_reusable: One or more selected question versions are not currently eligible for public reuse",
+        ));
+    }
+
+    let (quiz_id, current_version_id, mut memberships) = if let Some(quiz_id) = existing_quiz_id {
+        let (version_id, items) = current_quiz_version_questions_in_tx(&mut tx, &quiz_id).await?;
+        (quiz_id, version_id, items)
+    } else {
+        (String::new(), None, Vec::new())
+    };
+    let mut existing_question_ids: HashSet<String> = memberships
+        .iter()
+        .map(|membership| membership.question_id.clone())
+        .collect();
+    let mut requested_ids = HashSet::new();
+    let mut already_present_count = 0i64;
+    let mut added_count = 0i64;
+    for question_version_id in question_version_ids {
+        let Some(source) = source_by_version.get(question_version_id) else {
+            return Err(Error::unprocessable(
+                "question_not_reusable: One or more selected question versions are not currently eligible for public reuse",
+            ));
+        };
+        if !requested_ids.insert(question_version_id.clone())
+            || !existing_question_ids.insert(source.question_id.clone())
+        {
+            already_present_count += 1;
+            continue;
+        }
+        let (origin_quiz_id, origin_quiz_version_id) = if source.source_scope
+            == REUSED_PUBLIC_VERSION
+        {
+            match (
+                source.origin_quiz_id.clone(),
+                source.origin_quiz_version_id.clone(),
+            ) {
+                (Some(origin_id), Some(origin_version_id)) => (origin_id, origin_version_id),
+                _ => {
+                    return Err(Error::unprocessable(
+                        "question_not_reusable: One or more selected question versions lack verifiable origin evidence",
+                    ));
+                }
+            }
+        } else {
+            (
+                source.source_quiz_id.clone(),
+                source.source_quiz_version_id.clone(),
+            )
+        };
+        memberships.push(QuizQuestionMembership {
+            question_id: source.question_id.clone(),
+            question_version_id: source.question_version_id.clone(),
+            source_scope: REUSED_PUBLIC_VERSION.into(),
+            origin_quiz_id: Some(origin_quiz_id),
+            origin_quiz_version_id: Some(origin_quiz_version_id),
+        });
+        added_count += 1;
+    }
+
+    if added_count == 0 {
+        tx.commit().await?;
+        return Ok(ReuseQuestionsResult {
+            quiz_id,
+            quiz_version_id: current_version_id,
+            added_count,
+            already_present_count,
+            total_question_count: memberships.len() as i64,
+        });
+    }
+    let quiz_id = if quiz_id.is_empty() {
+        ensure_study_quiz_in_tx(&mut tx, &owner_id, study_id).await?
+    } else {
+        quiz_id
+    };
+    let quiz_version_id =
+        write_new_quiz_version_in_tx(store, &mut tx, &quiz_id, &memberships).await?;
+    tx.commit().await?;
+    Ok(ReuseQuestionsResult {
+        quiz_id,
+        quiz_version_id: Some(quiz_version_id),
+        added_count,
+        already_present_count,
+        total_question_count: memberships.len() as i64,
+    })
 }
 
 pub async fn create_question(
@@ -501,11 +775,17 @@ pub async fn update_question(
     let (_owner_id, existing_quiz) = load_owned_study_quiz(store, caller, study_id).await?;
     let quiz_id = existing_quiz.ok_or_else(Error::missing)?;
     let (_, items) = current_quiz_version_questions(store, &quiz_id).await?;
-    let current_qv_id = items
+    let current_membership = items
         .iter()
         .find(|item| item.question_id == question_id)
-        .map(|item| item.question_version_id.clone())
+        .cloned()
         .ok_or_else(Error::missing)?;
+    if current_membership.source_scope == REUSED_PUBLIC_VERSION {
+        return Err(Error::conflict(
+            "reused_question_immutable: Publicly reused question versions cannot be edited in this quiz",
+        ));
+    }
+    let current_qv_id = current_membership.question_version_id.clone();
 
     let current = load_question_detail(store, question_id, &current_qv_id).await?;
     let language = input.language.unwrap_or(current.language);
@@ -597,7 +877,11 @@ pub async fn update_question(
         })
         .collect();
     write_new_quiz_version(store, &quiz_id, &new_items).await?;
-    load_question_detail(store, question_id, &new_qv_id).await
+    let mut updated = load_question_detail(store, question_id, &new_qv_id).await?;
+    updated.source_scope = current_membership.source_scope;
+    updated.origin_quiz_id = current_membership.origin_quiz_id;
+    updated.origin_quiz_version_id = current_membership.origin_quiz_version_id;
+    Ok(updated)
 }
 
 pub async fn remove_question(
@@ -772,11 +1056,16 @@ pub async fn render_question_visual(
     let (_owner_id, existing_quiz) = load_owned_study_quiz(store, caller, study_id).await?;
     let quiz_id = existing_quiz.ok_or_else(Error::missing)?;
     let (_, items) = current_quiz_version_questions(store, &quiz_id).await?;
-    let qv_id = items
+    let item = items
         .iter()
         .find(|item| item.question_id == question_id)
-        .map(|item| item.question_version_id.clone())
         .ok_or_else(Error::missing)?;
+    if item.source_scope == REUSED_PUBLIC_VERSION {
+        return Err(Error::conflict(
+            "reused_question_immutable: Visuals cannot be added to a publicly reused question version",
+        ));
+    }
+    let qv_id = item.question_version_id.clone();
     let detail = load_question_detail(store, question_id, &qv_id).await?;
 
     let rendered = store

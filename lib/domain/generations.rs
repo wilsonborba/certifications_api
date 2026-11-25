@@ -8,6 +8,7 @@ use crate::{
     domain::{
         auth::CallerIdentity,
         auth::require_owner,
+        catalog,
         estimates::{self, StepMeasurement},
         guardrail,
     },
@@ -615,12 +616,15 @@ pub async fn process_job(
     }
 
     let done = now();
+    let mut publication_tx = store.db.begin().await?;
     sqlx::query("UPDATE quizzes SET active_version_id = $1, updated_at = $2 WHERE id = $3")
         .bind(&quiz_version_id)
         .bind(done)
         .bind(&quiz_id)
-        .execute(&store.db)
+        .execute(&mut *publication_tx)
         .await?;
+    catalog::refresh_public_question_search_in_tx(store, &mut publication_tx, &quiz_id).await?;
+    publication_tx.commit().await?;
     sqlx::query(
         "UPDATE studies SET status = 'active', quiz_id = $1, updated_at = $2 WHERE id = $3",
     )

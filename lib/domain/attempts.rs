@@ -8,7 +8,7 @@ use crate::{
         auth::{CallerIdentity, require_owner},
         authoring::{ORIGIN_CORTEX, ORIGIN_CREATOR},
         guardrail,
-        provenance::{QuestionProvenanceStats, question_provenance_stats},
+        provenance::{QuestionProvenanceStats, REUSED_PUBLIC_VERSION, question_provenance_stats},
     },
 };
 use serde::{Deserialize, Serialize};
@@ -874,6 +874,7 @@ pub async fn get_results(
     let quiz_version_id: String = row.get("quiz_version_id");
     let q_rows = sqlx::query(
         "SELECT qu.id AS question_id, qver.id AS qv_id, qver.language, qu.origin, qver.couch_doc_id,
+                qvq.source_scope,
                 aa.selected_option_id, aa.is_correct
          FROM quiz_version_questions qvq
          JOIN question_versions qver ON qver.id = qvq.question_version_id
@@ -896,6 +897,7 @@ pub async fn get_results(
     for r in q_rows {
         let doc_id: String = r.get("couch_doc_id");
         let origin: String = r.get("origin");
+        let source_scope: String = r.get("source_scope");
         let selected: Option<String> = r.try_get("selected_option_id").ok();
         let doc = store.docs.get(&doc_id).await?;
         let correct_id = doc["correct_id"].as_str().unwrap_or("").to_string();
@@ -924,7 +926,11 @@ pub async fn get_results(
             correct_id,
             is_correct,
             explanation: doc["explanation"].as_str().unwrap_or("").to_string(),
-            citation_ref: doc["citation_ref"].as_str().unwrap_or("").to_string(),
+            citation_ref: if source_scope == REUSED_PUBLIC_VERSION {
+                String::new()
+            } else {
+                doc["citation_ref"].as_str().unwrap_or("").to_string()
+            },
         });
     }
 

@@ -34,12 +34,13 @@ const TABLES: [&str; 22] = [
     "owner_activity",
 ];
 
-const EXTRA_TABLES: [&str; 5] = [
+const EXTRA_TABLES: [&str; 6] = [
     "attempt_statistics",
     "estimation_statistics",
     "certificate_holders",
     "certificates",
     "cleanup_tasks",
+    "public_question_search",
 ];
 
 #[tokio::test]

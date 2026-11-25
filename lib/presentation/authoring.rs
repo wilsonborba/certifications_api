@@ -2,7 +2,7 @@ use crate::{
     core::{Error, Result},
     domain::{
         App,
-        authoring::{self, CreateQuestionInput, UpdateQuestionInput},
+        authoring::{self, CreateQuestionInput, ReuseQuestionsInput, UpdateQuestionInput},
     },
     presentation::auth::SessionUser,
 };
@@ -34,6 +34,7 @@ pub fn routes() -> Router<App> {
             "/studies/{study_id}/questions",
             get(list_questions).post(create_question),
         )
+        .route("/studies/{study_id}/questions/reuse", post(reuse_questions))
         .route(
             "/studies/{study_id}/questions/import",
             post(import_questions),
@@ -65,6 +66,22 @@ async fn create_question(
 ) -> Result<(StatusCode, Json<Value>)> {
     let q = authoring::create_question(&app.store, &caller, &study_id, body).await?;
     Ok((StatusCode::CREATED, Json(json!(q))))
+}
+
+async fn reuse_questions(
+    State(app): State<App>,
+    SessionUser(caller): SessionUser,
+    Path(study_id): Path<String>,
+    Json(body): Json<ReuseQuestionsInput>,
+) -> Result<Json<Value>> {
+    let result = authoring::reuse_public_question_versions(
+        &app.store,
+        &caller,
+        &study_id,
+        &body.question_version_ids,
+    )
+    .await?;
+    Ok(Json(json!(result)))
 }
 
 async fn update_question(
