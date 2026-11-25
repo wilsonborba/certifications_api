@@ -62,6 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Require complete Rust artifact manifest ([`6068fb2`](https://github.com/wilsonborba/certifications_api/commit/6068fb2254d11d8222220da5ab5bf94e824c448e))
 - *(installer)* Include assets/fonts in source fingerprinting ([`3015308`](https://github.com/wilsonborba/certifications_api/commit/30153089f46a6136dec80180dfe70e5d13016300))
 - *(installer)* Fingerprint tracked assets ([`e23075c`](https://github.com/wilsonborba/certifications_api/commit/e23075cf8a7a2b7b0547b95c9033937fafcad456))
+- Emit real data tier for quiz statistics reports ([`9a7b7f6`](https://github.com/wilsonborba/certifications_api/commit/9a7b7f6bd9ee47be08b7fa1a6a2b40a0276aa9d8))
+- *(statistics)* Integrate canonical Reports data tier ([`3c0934e`](https://github.com/wilsonborba/certifications_api/commit/3c0934ed58e2fd0fecd31a00129f372cd97f9642))
 
 ### 💼 Other Changes
 
@@ -104,6 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(changelog)* Record history and statistics integration ([`264aba1`](https://github.com/wilsonborba/certifications_api/commit/264aba1148c480e9d5cf27cd3966103d7d1beddb))
 - *(changelog)* Record public question reuse integration ([`433e4e1`](https://github.com/wilsonborba/certifications_api/commit/433e4e1b1033682ae8c8549af61643df48d4524e))
 - *(changelog)* Record prepared settings and PostgreSQL history fixes ([`b10e505`](https://github.com/wilsonborba/certifications_api/commit/b10e505ac35ac8f2f6b0fb10ef98fc1e5691cadb))
+- *(changelog)* Record verified Rust service preparation ([`f7afd15`](https://github.com/wilsonborba/certifications_api/commit/f7afd1516a0a5968d2e947544fca773855bcef25))
 
 ### 🎨 Styling
 
