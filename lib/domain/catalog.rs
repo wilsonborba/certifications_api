@@ -128,6 +128,32 @@ fn score_distribution_page(
             "version":1,
             "mapping":{"bucket":["score_band"],"attempts":["attempt_count"]},
             "options":{}
+        },
+        "template_definition": {
+            "template_id":"cert-score-distribution",
+            "version":1,
+            "kind":"chart",
+            "visual":"bar",
+            "title":title,
+            "slots":[
+                {
+                    "slot_name":"bucket",
+                    "role":"dimension",
+                    "is_required":true,
+                    "min_count":1,
+                    "max_count":1,
+                    "accepted_types":["string"]
+                },
+                {
+                    "slot_name":"attempts",
+                    "role":"measure",
+                    "is_required":true,
+                    "min_count":1,
+                    "max_count":2,
+                    "accepted_types":["integer","float"]
+                }
+            ],
+            "options":[]
         }
     })
 }

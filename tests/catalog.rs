@@ -527,16 +527,60 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
         stats["score_distribution_report_view"]["rows"][0]["score_band"],
         "0% to <50%"
     );
+    let report_view = &stats["score_distribution_report_view"];
     assert_eq!(
-        stats["score_distribution_report_view"]["descriptor"]["meta"]["source"],
+        report_view["visual"],
+        json!({
+            "template": "cert-score-distribution",
+            "version": 1,
+            "mapping": {"bucket": ["score_band"], "attempts": ["attempt_count"]},
+            "options": {}
+        })
+    );
+    assert_eq!(
+        report_view["template_definition"],
+        json!({
+            "template_id": "cert-score-distribution",
+            "version": 1,
+            "kind": "chart",
+            "visual": "bar",
+            "title": report_view["descriptor"]["title"],
+            "slots": [
+                {
+                    "slot_name": "bucket",
+                    "role": "dimension",
+                    "is_required": true,
+                    "min_count": 1,
+                    "max_count": 1,
+                    "accepted_types": ["string"]
+                },
+                {
+                    "slot_name": "attempts",
+                    "role": "measure",
+                    "is_required": true,
+                    "min_count": 1,
+                    "max_count": 2,
+                    "accepted_types": ["integer", "float"]
+                }
+            ],
+            "options": []
+        })
+    );
+    assert_eq!(
+        report_view["template_definition"]["slots"][0]["accepted_types"][0],
+        report_view["descriptor"]["fields"][0]["type"]
+    );
+    assert_eq!(
+        report_view["template_definition"]["slots"][1]["accepted_types"][0],
+        report_view["descriptor"]["fields"][1]["type"]
+    );
+    assert_eq!(
+        report_view["descriptor"]["meta"]["source"],
         "Certifications API"
     );
+    assert_eq!(report_view["descriptor"]["meta"]["sample_size"], 11);
     assert_eq!(
-        stats["score_distribution_report_view"]["descriptor"]["meta"]["sample_size"],
-        11
-    );
-    assert_eq!(
-        stats["score_distribution_report_view"]["descriptor"]["meta"]["sample_unit"],
+        report_view["descriptor"]["meta"]["sample_unit"],
         "completed_attempts"
     );
 
@@ -553,6 +597,10 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     assert_eq!(
         pt_stats["score_distribution_report_view"]["descriptor"]["title"],
         "Distribuição das pontuações do questionário"
+    );
+    assert_eq!(
+        pt_stats["score_distribution_report_view"]["template_definition"]["title"],
+        pt_stats["score_distribution_report_view"]["descriptor"]["title"]
     );
     assert_eq!(pt_stats["score_distribution"][0]["score_band"], "0% a <50%");
     assert_eq!(
@@ -572,6 +620,10 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     assert_eq!(
         th_stats["score_distribution_report_view"]["descriptor"]["title"],
         "การกระจายคะแนนแบบทดสอบ"
+    );
+    assert_eq!(
+        th_stats["score_distribution_report_view"]["template_definition"]["title"],
+        th_stats["score_distribution_report_view"]["descriptor"]["title"]
     );
     assert_eq!(
         th_stats["score_distribution"][1]["score_band"],
