@@ -284,6 +284,253 @@ async fn selections_survive_refresh_and_prepared_studies_reuse_fsm_without_uploa
 }
 
 #[tokio::test]
+async fn prepared_study_config_persists_durably_and_rejects_invalid_or_cross_owner() {
+    let mut store = Store::fixture().await;
+    let fsm = MemoryFsm::new();
+    fsm.seed(
+        "annotations/u1/file-1",
+        b"Biology lesson content for quiz generation",
+    );
+    store.fsm = fsm.clone() as Arc<dyn certifications_api::dal::fsm::FsmClient>;
+
+    let mut settings = test_settings();
+    settings.certifications_service_key = "ann-svc-key".into();
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings: settings.clone(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+
+    // 1. Invalid configs reject with 422 before any database side effects.
+    let count_studies_before: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM studies")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let count_configs_before: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM study_configs")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+
+    // Invalid language
+    let (st, err) = call_with_service_key(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("u1"),
+        Some("ann-svc-key"),
+        Some(json!({
+            "title": "Invalid Lang Prep",
+            "sources": [{
+                "filename": "bio.txt",
+                "mime_type": "text/plain",
+                "size_bytes": 42,
+                "fsm_ref": "annotations/u1/file-1"
+            }],
+            "config": {
+                "language": "es",
+                "count": 10
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(err["error"].as_str().unwrap().contains("invalid_config"));
+
+    // Invalid count > 20
+    let (st, err) = call_with_service_key(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("u1"),
+        Some("ann-svc-key"),
+        Some(json!({
+            "title": "Invalid Count Prep",
+            "sources": [{
+                "filename": "bio.txt",
+                "mime_type": "text/plain",
+                "size_bytes": 42,
+                "fsm_ref": "annotations/u1/file-1"
+            }],
+            "config": {
+                "language": "th",
+                "count": 25
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(err["error"].as_str().unwrap().contains("invalid_config"));
+
+    // Invalid count < 1
+    let (st, err) = call_with_service_key(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("u1"),
+        Some("ann-svc-key"),
+        Some(json!({
+            "title": "Invalid Zero Count Prep",
+            "sources": [{
+                "filename": "bio.txt",
+                "mime_type": "text/plain",
+                "size_bytes": 42,
+                "fsm_ref": "annotations/u1/file-1"
+            }],
+            "config": {
+                "language": "pt-BR",
+                "count": 0
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(err["error"].as_str().unwrap().contains("invalid_config"));
+
+    // Unknown field rejected
+    let (st, _) = call_with_service_key(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("u1"),
+        Some("ann-svc-key"),
+        Some(json!({
+            "title": "Unknown Field Prep",
+            "sources": [{
+                "filename": "bio.txt",
+                "mime_type": "text/plain",
+                "size_bytes": 42,
+                "fsm_ref": "annotations/u1/file-1"
+            }],
+            "config": {
+                "language": "en",
+                "count": 10,
+                "unexpected": true
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Verify zero database side-effects after failures.
+    let count_studies_after: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM studies")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let count_configs_after: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM study_configs")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(count_studies_before.0, count_studies_after.0);
+    assert_eq!(count_configs_before.0, count_configs_after.0);
+
+    // 2. Successful creation with non-default config (Thai, count 15).
+    let (st, prepared) = call_with_service_key(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("u1"),
+        Some("ann-svc-key"),
+        Some(json!({
+            "title": "Thai Biology Study",
+            "description": "Prepared with Thai and 15 questions",
+            "sources": [{
+                "filename": "bio.txt",
+                "mime_type": "text/plain",
+                "size_bytes": 42,
+                "fsm_ref": "annotations/u1/file-1",
+                "selection_kind": "all",
+                "selection_spec": ""
+            }],
+            "config": {
+                "language": "th",
+                "count": 15
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(prepared["config"]["language"], "th");
+    assert_eq!(prepared["config"]["count"], 15);
+    let sid = prepared["study"]["id"].as_str().unwrap();
+
+    // 3. Fresh GET /studies/{id} on the live service returns the durable config.
+    let (st, detail) = call(&app, "GET", &format!("/studies/{sid}"), Some("u1"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(detail["config"]["language"], "th");
+    assert_eq!(detail["config"]["count"], 15);
+
+    // 4. Server restart simulation: fresh app router on the same store.
+    let restarted_app = presentation::router(App {
+        store: store.clone(),
+        settings: settings.clone(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+    let (st, restarted_detail) = call(
+        &restarted_app,
+        "GET",
+        &format!("/studies/{sid}"),
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(restarted_detail["config"]["language"], "th");
+    assert_eq!(restarted_detail["config"]["count"], 15);
+
+    // 5. Cross-owner denial: another user cannot read this study or its config.
+    let (st, _) = call(
+        &restarted_app,
+        "GET",
+        &format!("/studies/{sid}"),
+        Some("u2"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // 6. List studies succeeds and retains study summary.
+    let (st, list) = call(&restarted_app, "GET", "/studies", Some("u1"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    let items = list["items"].as_array().unwrap();
+    assert!(items.iter().any(|item| item["id"] == sid));
+
+    // 7. Prepared study without config defaults to None/null.
+    let (st, prep_no_cfg) = call_with_service_key(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("u1"),
+        Some("ann-svc-key"),
+        Some(json!({
+            "title": "No Config Prep",
+            "sources": [{
+                "filename": "bio.txt",
+                "mime_type": "text/plain",
+                "size_bytes": 42,
+                "fsm_ref": "annotations/u1/file-1"
+            }]
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert!(prep_no_cfg.get("config").is_none() || prep_no_cfg["config"].is_null());
+    let sid_no_cfg = prep_no_cfg["study"]["id"].as_str().unwrap();
+
+    let (st, detail_no_cfg) = call(
+        &app,
+        "GET",
+        &format!("/studies/{sid_no_cfg}"),
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(detail_no_cfg.get("config").is_none() || detail_no_cfg["config"].is_null());
+}
+
+#[tokio::test]
 async fn reports_picker_and_report_source_enforce_permissions_and_unconfigured_503() {
     use certifications_api::{
         core::{Error as CoreError, Result as CoreResult},
