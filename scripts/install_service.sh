@@ -24,7 +24,7 @@ source_hash() {
   (
     cd "$PROJECT_DIR"
     git ls-files -co --exclude-standard -z -- \
-      Cargo.toml Cargo.lock build.rs .cargo lib migrations tests/sqlite scripts/install_service.sh |
+      Cargo.toml Cargo.lock build.rs .cargo assets/fonts lib migrations tests/sqlite scripts/install_service.sh |
       LC_ALL=C sort -z | xargs -0 -r sha256sum
   ) | sha256sum | cut -d ' ' -f1
 }

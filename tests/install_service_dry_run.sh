@@ -18,6 +18,8 @@ mkdir -p "$fixture/tests"
 cp -R "$repo/tests/sqlite" "$fixture/tests/sqlite"
 if [[ -d "$repo/.cargo" ]]; then cp -R "$repo/.cargo" "$fixture/.cargo"; fi
 if [[ -f "$repo/build.rs" ]]; then cp "$repo/build.rs" "$fixture/build.rs"; fi
+mkdir -p "$fixture/assets/fonts"
+printf 'mock font bytes\n' > "$fixture/assets/fonts/IBMPlexSansThai-Regular.ttf"
 chmod +x "$fixture/scripts/install_service.sh"
 printf 'space-sensitive build input\n' > "$fixture/lib/input file with spaces.txt"
 git -C "$fixture" init -q
@@ -131,6 +133,11 @@ printf 'source changed\n' >> "$fixture/lib/main.rs"
 expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --dry-run
 expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --check
 git -C "$fixture" checkout -- lib/main.rs
+
+printf 'font changed\n' >> "$fixture/assets/fonts/IBMPlexSansThai-Regular.ttf"
+expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --dry-run
+expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --check
+git -C "$fixture" checkout -- assets/fonts/IBMPlexSansThai-Regular.ttf
 
 rm "$fixture/var/deploy/certifications-api"
 printf 'outside binary\n' > "$tmp/outside-binary"
