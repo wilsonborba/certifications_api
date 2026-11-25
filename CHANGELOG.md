@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(#35)* Align MAX_SELECTION_RANGES to 100 with Cortex #136 ([`d5962fb`](https://github.com/wilsonborba/certifications_api/commit/d5962fba03b4351a2968b8929d54748d7b2de660))
 - *(certifications)* Add statistics history routes ([`35684a7`](https://github.com/wilsonborba/certifications_api/commit/35684a709d7af29442e8beb83e20c7e9b6ab67f1))
 - *(certifications)* Integrate history and statistics (#43) ([`69c4196`](https://github.com/wilsonborba/certifications_api/commit/69c41966dace392e25b017e011e618a8ac4c24aa))
+- Add public question version reuse flow ([`2803170`](https://github.com/wilsonborba/certifications_api/commit/2803170737704a5324171276599e3c6e681e6f36))
+- *(catalog)* Add bounded search projection rebuild (#49) ([`32e5037`](https://github.com/wilsonborba/certifications_api/commit/32e5037db366d3989c14a92306ef479db01d4ba4))
+- *(certifications)* Integrate explicit public question reuse (#49) ([`93e8a11`](https://github.com/wilsonborba/certifications_api/commit/93e8a1141ee5591937a97975005b7ec3b8c5d2ca))
 
 ### 🐛 Bug Fixes
 
@@ -45,6 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(studies)* Enforce 100-page PDF total cap and text-only passages selection ([`b993c3d`](https://github.com/wilsonborba/certifications_api/commit/b993c3d000e972db1c6ac19f1686e316ec91b76a))
 - *(certifications)* Add provenance to attempt statistics ([`8a568fc`](https://github.com/wilsonborba/certifications_api/commit/8a568fc0a1f0a8f8671678771cff2770668cffff))
 - *(certifications)* Include score chart template definition ([`81fd5a1`](https://github.com/wilsonborba/certifications_api/commit/81fd5a105a754def1886692de58d870340bcffe1))
+- *(certifications)* Validate reuse lifecycle and bound public search ([`19a0491`](https://github.com/wilsonborba/certifications_api/commit/19a04913c13e82114e41bec24f645909e39f62b3))
+- *(certifications)* Hide private citation in reused quiz results ([`b596ba7`](https://github.com/wilsonborba/certifications_api/commit/b596ba7be2b1cc0301a89cda050b0597afa3be4a))
+- *(catalog)* Retain rebuild cursor on batch failure (#49) ([`33890b0`](https://github.com/wilsonborba/certifications_api/commit/33890b094951e7821aa054ce2d8b9dea0d1bb443))
+- Pin unicode normalization version ([`89c4286`](https://github.com/wilsonborba/certifications_api/commit/89c428602514f76cd3cd0f99f3cd9472fbf8ad67))
 
 ### 💼 Other Changes
 
@@ -82,6 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 📚 Documentation
 
 - *(changelog)* Record source authorization and selection fixes ([`233ac47`](https://github.com/wilsonborba/certifications_api/commit/233ac478f41aa362e2479e385599c3b4dc08c1fb))
+- *(changelog)* Record history and statistics integration ([`264aba1`](https://github.com/wilsonborba/certifications_api/commit/264aba1148c480e9d5cf27cd3966103d7d1beddb))
 
 ### 🎨 Styling
 
@@ -91,6 +99,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(release)* Sync release/v1.0.0 back to feature/main ([`b014731`](https://github.com/wilsonborba/certifications_api/commit/b014731f5f5218f649958c424d281d595b21f826))
 - *(security)* Add app-owned ClamAV runtime without system service (#47) ([`17ff9bc`](https://github.com/wilsonborba/certifications_api/commit/17ff9bcf9633f7eecdbf1d723d31d24d9b8d0f66))
+- Remove ignored docs artifact from public branch ([`c44b9cb`](https://github.com/wilsonborba/certifications_api/commit/c44b9cb866d2546e93a4fe59c311cb1d3fd679ef))
+- Refresh unreleased changelog ([`71844ee`](https://github.com/wilsonborba/certifications_api/commit/71844ee70b5cfc6bf2ddc4f26b9289b254136fe4))
+- Refresh unreleased changelog ([`c0a85dc`](https://github.com/wilsonborba/certifications_api/commit/c0a85dcae7dbde82713bdd501a8cf33a9a68d93a))
 
 ## [1.0.0] - 2026-09-08
 
