@@ -7,15 +7,26 @@ PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 DEPLOY_DIR="$PROJECT_DIR/var/deploy"
 MODE=${1:---prepare}
 
+if (( $# > 1 )); then
+  printf 'Usage: %s [--prepare|--check|--activate|--dry-run]\n' "${0##*/}" >&2
+  exit 2
+fi
 case "$MODE" in
   --prepare|--check|--activate|--dry-run) ;;
   *) printf 'Usage: %s [--prepare|--check|--activate|--dry-run]\n' "${0##*/}" >&2; exit 2 ;;
 esac
 
 source_hash() {
-  git -C "$PROJECT_DIR" ls-files -co --exclude-standard -z -- \
-    Cargo.toml Cargo.lock build.rs .cargo lib scripts/install_service.sh |
-    LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d ' ' -f1
+  # Cargo compilation inputs: manifests/config, Rust sources, and the SQL
+  # fixtures included by lib/dal/mod.rs. Hash from the checkout root so the
+  # digest is independent of the caller's working directory. `-z` keeps paths
+  # with whitespace/newlines intact; pipefail propagates enumeration/read errors.
+  (
+    cd "$PROJECT_DIR"
+    git ls-files -co --exclude-standard -z -- \
+      Cargo.toml Cargo.lock build.rs .cargo lib migrations tests/sqlite scripts/install_service.sh |
+      LC_ALL=C sort -z | xargs -0 -r sha256sum
+  ) | sha256sum | cut -d ' ' -f1
 }
 
 validate_inputs() {
@@ -30,6 +41,17 @@ validate_inputs() {
 }
 
 validate_prepared() {
+  [[ ! -L "$DEPLOY_DIR" && -d "$DEPLOY_DIR" ]] || {
+    printf 'Prepared package directory is missing or is a symbolic link.\n' >&2; return 1;
+  }
+  [[ "$(stat -c '%a' "$DEPLOY_DIR")" == 755 ]] || {
+    printf 'Prepared package directory permissions are invalid.\n' >&2; return 1;
+  }
+  for path in certifications-api "$SERVICE_NAME.service" source.sha256 artifacts.sha256; do
+    [[ ! -L "$DEPLOY_DIR/$path" && -f "$DEPLOY_DIR/$path" ]] || {
+      printf 'Prepared package contains a missing or symbolic-link file: %s\n' "$path" >&2; return 1;
+    }
+  done
   [[ -f "$DEPLOY_DIR/certifications-api" ]] || {
     printf 'No prepared Rust binary. Run install_service.sh --prepare first.\n' >&2; return 1;
   }
@@ -39,8 +61,18 @@ validate_prepared() {
   [[ -f "$DEPLOY_DIR/certifications-api.service" && -f "$DEPLOY_DIR/source.sha256" && -f "$DEPLOY_DIR/artifacts.sha256" ]] || {
     printf 'Prepared Rust package is incomplete. Run install_service.sh --prepare again.\n' >&2; return 1;
   }
-  [[ "$(source_hash)" == "$(<"$DEPLOY_DIR/source.sha256")" ]] || {
+  local current_source_hash
+  current_source_hash=$(source_hash) || {
+    printf 'Could not hash all Rust release inputs. Check the checkout and file readability.\n' >&2; return 1;
+  }
+  [[ "$current_source_hash" == "$(<"$DEPLOY_DIR/source.sha256")" ]] || {
     printf 'Rust sources changed since prepare. Run install_service.sh --prepare again.\n' >&2; return 1;
+  }
+  [[ "$(stat -c '%a' "$DEPLOY_DIR/certifications-api")" == 755 &&
+     "$(stat -c '%a' "$DEPLOY_DIR/$SERVICE_NAME.service")" == 644 &&
+     "$(stat -c '%a' "$DEPLOY_DIR/source.sha256")" == 644 &&
+     "$(stat -c '%a' "$DEPLOY_DIR/artifacts.sha256")" == 644 ]] || {
+    printf 'Prepared package file permissions are invalid. Run install_service.sh --prepare again.\n' >&2; return 1;
   }
   (cd "$DEPLOY_DIR" && sha256sum --check --status artifacts.sha256) || {
     printf 'Prepared artifacts failed checksum validation. Run install_service.sh --prepare again.\n' >&2; return 1;
@@ -57,6 +89,9 @@ validate_prepared() {
 # commands. It only reads the checkout and reports the package/activation plan.
 if [[ "$MODE" == --dry-run ]]; then
   validate_inputs
+  source_hash >/dev/null || {
+    printf 'Could not hash all Rust release inputs. Check the checkout and file readability.\n' >&2; exit 1;
+  }
   if [[ -d "$DEPLOY_DIR" ]]; then
     validate_prepared
     printf 'Dry run: prepared Rust binary and unit passed read-only validation.\n'
@@ -81,12 +116,19 @@ if [[ "$MODE" == --prepare ]]; then
   mkdir -p "$PROJECT_DIR/var"
   exec 9>"$PROJECT_DIR/var/deploy.lock"
   flock -n 9 || { printf 'Another deployment is in progress.\n' >&2; exit 1; }
-  before=$(source_hash)
-  cargo build --release --locked --bin certifications-api
-  [[ "$before" == "$(source_hash)" ]] || {
+  before=$(source_hash) || {
+    printf 'Could not hash all Rust release inputs before building.\n' >&2; exit 1;
+  }
+  (cd "$PROJECT_DIR" && cargo build --release --locked --bin certifications-api)
+  after=$(source_hash) || {
+    printf 'Could not hash all Rust release inputs after building.\n' >&2; exit 1;
+  }
+  [[ "$before" == "$after" ]] || {
     printf 'Rust source changed during the build. Prepare again.\n' >&2; exit 1;
   }
-  BINARY="$PROJECT_DIR/target/release/certifications-api"
+  target_dir=$(cd "$PROJECT_DIR" && cargo metadata --no-deps --locked --format-version 1 --manifest-path Cargo.toml |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
+  BINARY="$target_dir/release/certifications-api"
   [[ -s "$BINARY" && -x "$BINARY" ]] || {
     printf 'Cargo did not produce an executable Rust binary at %s.\n' "$BINARY" >&2; exit 1;
   }
@@ -115,6 +157,8 @@ WantedBy=multi-user.target
 UNIT
   source_hash > "$stage/source.sha256"
   (cd "$stage" && sha256sum certifications-api "$SERVICE_NAME.service" > artifacts.sha256)
+  chmod 644 "$stage/$SERVICE_NAME.service" "$stage/source.sha256" "$stage/artifacts.sha256"
+  chmod 755 "$stage"
   rm -rf "$DEPLOY_DIR"
   mv "$stage" "$DEPLOY_DIR"
   trap - EXIT
