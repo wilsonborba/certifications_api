@@ -105,81 +105,64 @@ fn decode_qr_from_svg(svg_bytes: &[u8]) -> Result<String, String> {
 }
 
 fn decode_qr_from_pdf(pdf_bytes: &[u8]) -> Result<String, String> {
-    let s = String::from_utf8_lossy(pdf_bytes);
-    let start_tag = "% QR_START\n";
-    let end_tag = "% QR_END";
-    let start = s.find(start_tag).ok_or("no % QR_START in pdf")? + start_tag.len();
-    let end = s[start..].find(end_tag).ok_or("no % QR_END in pdf")? + start;
-    let section = &s[start..end];
+    use std::io::Write;
+    let mut temp_pdf = tempfile::Builder::new()
+        .suffix(".pdf")
+        .tempfile()
+        .map_err(|e| e.to_string())?;
+    temp_pdf.write_all(pdf_bytes).map_err(|e| e.to_string())?;
+    let pdf_path = temp_pdf.path().to_str().unwrap().to_string();
 
-    let mut rects = Vec::new();
-    for line in section.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() == 6
-            && parts[4] == "re"
-            && parts[5] == "f"
-            && let (Ok(x), Ok(y)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>())
-        {
-            rects.push((x, y));
-        }
-    }
-    if rects.is_empty() {
-        return Err("no qr rects found in pdf".into());
-    }
+    let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let out_prefix = temp_dir.path().join("out");
 
-    let min_x = rects.iter().map(|(x, _)| *x).fold(f64::INFINITY, f64::min);
-    let min_y = rects.iter().map(|(_, y)| *y).fold(f64::INFINITY, f64::min);
-    let max_x = rects
-        .iter()
-        .map(|(x, _)| *x)
-        .fold(f64::NEG_INFINITY, f64::max);
-    let max_y = rects
-        .iter()
-        .map(|(_, y)| *y)
-        .fold(f64::NEG_INFINITY, f64::max);
-
-    let mut xs: Vec<f64> = rects.iter().map(|(x, _)| *x).collect();
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    xs.dedup_by(|a, b| (*a - *b).abs() < 0.01);
-    let mut step = f64::INFINITY;
-    for i in 1..xs.len() {
-        let diff = xs[i] - xs[i - 1];
-        if diff > 0.1 && diff < step {
-            step = diff;
-        }
-    }
-    let grid_w = ((max_x - min_x) / step).round() as usize + 1;
-    let grid_h = ((max_y - min_y) / step).round() as usize + 1;
-    assert_eq!(grid_w, grid_h);
-
-    let quiet = 4;
-    let scale = 4;
-    let total_w = (grid_w + quiet * 2) * scale;
-    let mut gray =
-        image::GrayImage::from_pixel(total_w as u32, total_w as u32, image::Luma([255u8]));
-
-    for (x, y) in rects {
-        let col = ((x - min_x) / step).round() as usize;
-        let row = ((max_y - y) / step).round() as usize;
-        for dy in 0..scale {
-            for dx in 0..scale {
-                let px = (col + quiet) * scale + dx;
-                let py = (row + quiet) * scale + dy;
-                gray.put_pixel(px as u32, py as u32, image::Luma([0u8]));
-            }
-        }
+    let status = std::process::Command::new("pdftoppm")
+        .args([
+            "-png",
+            "-singlefile",
+            "-r",
+            "150",
+            &pdf_path,
+            out_prefix.to_str().unwrap(),
+        ])
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("pdftoppm execution failed".into());
     }
 
+    let png_path = temp_dir.path().join("out.png");
+    let img = image::open(&png_path).map_err(|e| format!("image::open error: {e:?}"))?;
+    let gray = img.into_luma8();
     let mut prepared = rqrr::PreparedImage::prepare(gray);
     let grids = prepared.detect_grids();
     if grids.is_empty() {
-        return Err("rqrr detected 0 grids in pdf qr".into());
+        return Err("rqrr detected 0 grids in rendered pdf image".into());
     }
     let mut buf = Vec::new();
     grids[0]
         .decode_to(&mut buf)
         .map_err(|e| format!("decode error: {e:?}"))?;
     String::from_utf8(buf).map_err(|e| e.to_string())
+}
+
+fn extract_pdf_text(pdf_bytes: &[u8]) -> String {
+    use std::io::Write;
+    let mut child = std::process::Command::new("pdftotext")
+        .args(["-", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn pdftotext");
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(pdf_bytes)
+            .expect("failed to write to pdftotext stdin");
+    }
+    let output = child
+        .wait_with_output()
+        .expect("failed to wait on pdftotext");
+    String::from_utf8_lossy(&output.stdout).to_string()
 }
 
 fn test_settings() -> Settings {
@@ -521,7 +504,7 @@ async fn certificate_identity_idempotent_issuance_snapshot_files_and_revocation(
     )
     .await;
     assert_eq!(st, StatusCode::OK);
-    assert!(pdf_bytes.starts_with(b"%PDF-1.4"));
+    assert!(pdf_bytes.starts_with(b"%PDF-"));
 
     let (st, img_bytes) = call_raw(
         &app,
@@ -553,11 +536,11 @@ async fn certificate_identity_idempotent_issuance_snapshot_files_and_revocation(
     assert!(!svg_str.contains("page_hidden"));
     assert!(!svg_str.contains("Yes is right"));
 
-    let pdf_str = String::from_utf8_lossy(&pdf_bytes);
+    let pdf_str = extract_pdf_text(&pdf_bytes);
     assert!(pdf_str.contains("Asodya Completion Certificate"));
     assert!(pdf_str.contains("Holder: Ana Silva"));
     assert!(pdf_str.contains("Quiz: Cert Quiz"));
-    assert!(pdf_str.contains("Score: 0/1"));
+    assert!(pdf_str.contains("Result: 0/1"));
     assert!(pdf_str.contains("Date:"));
     assert!(!pdf_str.contains("page_hidden"));
     assert!(!pdf_str.contains("Yes is right"));
@@ -714,7 +697,7 @@ async fn certificate_qr_and_multilingual_unicode_rendering_en_pt_th() {
     assert!(pt_svg_str.contains("Programação Básica em Rust"));
     assert!(!pt_svg_str.contains("Explicação"));
 
-    let pt_pdf_str = String::from_utf8_lossy(&pt_pdf);
+    let pt_pdf_str = extract_pdf_text(&pt_pdf);
     assert!(pt_pdf_str.contains("João da Silva Oliveira"));
     assert!(pt_pdf_str.contains("Programação Básica em Rust"));
     assert!(!pt_pdf_str.contains("Explicação"));
@@ -841,8 +824,42 @@ async fn certificate_qr_and_multilingual_unicode_rendering_en_pt_th() {
     assert!(th_svg_str.contains("แบบทดสอบความรู้พื้นฐาน"));
     assert!(!th_svg_str.contains("คำอธิบาย"));
 
-    let th_pdf_str = String::from_utf8_lossy(&th_pdf);
+    let th_pdf_str = extract_pdf_text(&th_pdf);
     assert!(th_pdf_str.contains("สมชาย ใจดี"));
     assert!(th_pdf_str.contains("แบบทดสอบความรู้พื้นฐาน"));
     assert!(!th_pdf_str.contains("คำอธิบาย"));
+}
+
+#[tokio::test]
+async fn certificate_multiline_wrapping_and_no_qr_overlap() {
+    let holder = "นายสมชาย ใจดี ผู้เชี่ยวชาญด้านการทดสอบระบบซอฟต์แวร์และการรักษาความปลอดภัยระดับองค์กร";
+    let title = "แบบทดสอบทักษะและการพัฒนาโปรแกรมประยุกต์ขั้นสูงสำหรับผู้เชี่ยวชาญรุ่นที่หนึ่ง ประจำปี 2026";
+    let code = "ASODYA-TEST-LONG-WRAP-1234";
+    let ts = 1795600000;
+
+    let pdf = certifications_api::domain::certificates::render_certificate_pdf(
+        holder, title, 95, 100, code, ts,
+    );
+    let svg = certifications_api::domain::certificates::render_certificate_svg(
+        holder, title, 95, 100, code, ts,
+    );
+
+    assert!(pdf.starts_with(b"%PDF-"));
+    let expected_url = format!("https://certifications.asodya.com/certificates/{code}");
+    assert_eq!(decode_qr_from_pdf(&pdf).unwrap(), expected_url);
+    assert_eq!(decode_qr_from_svg(&svg).unwrap(), expected_url);
+
+    let pdf_text = extract_pdf_text(&pdf);
+    assert!(pdf_text.contains("นายสมชาย"));
+    assert!(pdf_text.contains("ใจดี"));
+    assert!(pdf_text.contains("แบบทดสอบทักษะ"));
+    assert!(pdf_text.contains("95/100"));
+    assert!(pdf_text.contains(code));
+
+    let svg_text = String::from_utf8_lossy(&svg);
+    assert!(svg_text.contains("นายสมชาย"));
+    assert!(svg_text.contains("ใจดี"));
+    assert!(svg_text.contains("แบบทดสอบทักษะ"));
+    assert!(svg_text.contains("95/100"));
+    assert!(svg_text.contains(code));
 }

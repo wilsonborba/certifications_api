@@ -7,8 +7,18 @@ use crate::{
         authoring::ORIGIN_CREATOR,
     },
 };
+use icu_segmenter::LineSegmenter;
+use krilla::color::rgb;
+use krilla::geom::{PathBuilder, Point};
+use krilla::page::PageSettings;
+use krilla::paint::{Fill, Stroke};
+use krilla::text::{Font, TextDirection};
+use krilla::{Data, Document};
 use serde::Serialize;
 use sqlx::Row;
+
+const REGULAR_FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/IBMPlexSansThai-Regular.ttf");
+const BOLD_FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/IBMPlexSansThai-Bold.ttf");
 
 #[derive(Clone, Debug, Serialize)]
 pub struct HolderIdentity {
@@ -151,13 +161,142 @@ pub async fn admin_update_holder(
     })
 }
 
-fn escape_pdf_text(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('(', "\\(")
-        .replace(')', "\\)")
+struct CertLabels {
+    cert_title: &'static str,
+    holder_prefix: &'static str,
+    quiz_prefix: &'static str,
+    result_prefix: &'static str,
+    date_prefix: &'static str,
+    code_prefix: &'static str,
+    verify_prefix: &'static str,
 }
 
-fn render_certificate_pdf(
+fn resolve_labels(holder_name: &str, quiz_title: &str) -> CertLabels {
+    let has_thai = holder_name
+        .chars()
+        .any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c))
+        || quiz_title
+            .chars()
+            .any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c));
+    if has_thai {
+        return CertLabels {
+            cert_title: "ใบรับรองการสำเร็จการศึกษา Asodya",
+            holder_prefix: "ผู้รับใบรับรอง",
+            quiz_prefix: "แบบทดสอบ",
+            result_prefix: "ผลคะแนน",
+            date_prefix: "วันที่ออก",
+            code_prefix: "รหัสยืนยัน",
+            verify_prefix: "ตรวจสอบได้ที่",
+        };
+    }
+
+    let has_pt = holder_name.chars().any(|c| {
+        matches!(
+            c,
+            'ã' | 'á'
+                | 'à'
+                | 'â'
+                | 'é'
+                | 'ê'
+                | 'í'
+                | 'ó'
+                | 'ô'
+                | 'õ'
+                | 'ú'
+                | 'ç'
+                | 'Ã'
+                | 'Á'
+                | 'À'
+                | 'Â'
+                | 'É'
+                | 'Ê'
+                | 'Í'
+                | 'Ó'
+                | 'Ô'
+                | 'Õ'
+                | 'Ú'
+                | 'Ç'
+        )
+    }) || quiz_title.chars().any(|c| {
+        matches!(
+            c,
+            'ã' | 'á'
+                | 'à'
+                | 'â'
+                | 'é'
+                | 'ê'
+                | 'í'
+                | 'ó'
+                | 'ô'
+                | 'õ'
+                | 'ú'
+                | 'ç'
+                | 'Ã'
+                | 'Á'
+                | 'À'
+                | 'Â'
+                | 'É'
+                | 'Ê'
+                | 'Í'
+                | 'Ó'
+                | 'Ô'
+                | 'Õ'
+                | 'Ú'
+                | 'Ç'
+        )
+    });
+    if has_pt {
+        return CertLabels {
+            cert_title: "Certificado de Conclusão Asodya",
+            holder_prefix: "Titular",
+            quiz_prefix: "Questionário",
+            result_prefix: "Resultado",
+            date_prefix: "Data",
+            code_prefix: "Código de Verificação",
+            verify_prefix: "Verifique em",
+        };
+    }
+
+    CertLabels {
+        cert_title: "Asodya Completion Certificate",
+        holder_prefix: "Holder",
+        quiz_prefix: "Quiz",
+        result_prefix: "Result",
+        date_prefix: "Date",
+        code_prefix: "Verification Code",
+        verify_prefix: "Verify at",
+    }
+}
+
+fn break_lines(text: &str, max_width: f32, approx_char_width: f32) -> Vec<String> {
+    let segmenter = LineSegmenter::new_auto(Default::default());
+    let mut lines = Vec::new();
+    for para in text.split('\n') {
+        let breaks: Vec<usize> = segmenter.segment_str(para).collect();
+        let mut current = String::new();
+        let mut prev = 0usize;
+        for &b in &breaks {
+            if b <= prev {
+                continue;
+            }
+            let seg = &para[prev..b];
+            let next_w = (current.chars().count() + seg.chars().count()) as f32 * approx_char_width;
+            if !current.is_empty() && next_w > max_width {
+                lines.push(current.trim_end().to_string());
+                current = seg.to_string();
+            } else {
+                current.push_str(seg);
+            }
+            prev = b;
+        }
+        if !current.is_empty() || para.is_empty() {
+            lines.push(current.trim_end().to_string());
+        }
+    }
+    lines
+}
+
+pub fn render_certificate_pdf(
     holder_name: &str,
     quiz_title: &str,
     score_correct: i64,
@@ -165,63 +304,214 @@ fn render_certificate_pdf(
     code: &str,
     issued_at: i64,
 ) -> Vec<u8> {
+    let regular_font = Font::new(Data::from(REGULAR_FONT_BYTES), 0).expect("regular font");
+    let bold_font = Font::new(Data::from(BOLD_FONT_BYTES), 0).expect("bold font");
+    let labels = resolve_labels(holder_name, quiz_title);
     let date_str = chrono::DateTime::from_timestamp(issued_at, 0)
         .map(|dt| dt.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "2026-11-25".to_string());
     let verification_url = format!("https://certifications.asodya.com/certificates/{code}");
 
-    let line1 = escape_pdf_text(&format!("Asodya Completion Certificate ({code})"));
-    let line2 = escape_pdf_text(&format!("Holder: {holder_name}"));
-    let line3 = escape_pdf_text(&format!("Quiz: {quiz_title}"));
-    let line4 = escape_pdf_text(&format!("Score: {score_correct}/{score_total}"));
-    let line5 = escape_pdf_text(&format!("Date: {date_str}"));
-    let line6 = escape_pdf_text(&format!("Verify: {verification_url}"));
+    let width = 800.0f32;
+    let height = 500.0f32;
+    let mut doc = Document::new();
+    let page_settings = PageSettings::from_wh(width, height).expect("page settings");
+    let mut page = doc.start_page_with(page_settings);
+    let mut surface = page.surface();
 
-    let mut stream = format!(
-        "BT /F1 14 Tf 50 740 Td ({line1}) Tj 0 -24 Td ({line2}) Tj 0 -24 Td ({line3}) Tj 0 -24 Td ({line4}) Tj 0 -24 Td ({line5}) Tj 0 -24 Td ({line6}) Tj ET\n"
+    // Background & Outer Border
+    let mut pb = PathBuilder::new();
+    pb.move_to(15.0, 15.0);
+    pb.line_to(width - 15.0, 15.0);
+    pb.line_to(width - 15.0, height - 15.0);
+    pb.line_to(15.0, height - 15.0);
+    pb.close();
+    if let Some(path) = pb.finish() {
+        surface.set_fill(Some(Fill {
+            paint: rgb::Color::new(255, 255, 255).into(),
+            ..Default::default()
+        }));
+        surface.set_stroke(Some(Stroke {
+            paint: rgb::Color::new(31, 41, 55).into(),
+            width: 3.0,
+            ..Default::default()
+        }));
+        surface.draw_path(&path);
+    }
+
+    // Inner subtle border
+    let mut ib = PathBuilder::new();
+    ib.move_to(22.0, 22.0);
+    ib.line_to(width - 22.0, 22.0);
+    ib.line_to(width - 22.0, height - 22.0);
+    ib.line_to(22.0, height - 22.0);
+    ib.close();
+    if let Some(path) = ib.finish() {
+        surface.set_fill(None);
+        surface.set_stroke(Some(Stroke {
+            paint: rgb::Color::new(209, 213, 219).into(),
+            width: 1.0,
+            ..Default::default()
+        }));
+        surface.draw_path(&path);
+    }
+
+    let left_x = 48.0f32;
+    let max_text_width = 470.0f32;
+
+    // Title
+    surface.set_fill(Some(Fill {
+        paint: rgb::Color::new(17, 24, 39).into(),
+        ..Default::default()
+    }));
+    surface.set_stroke(None);
+    surface.draw_text(
+        Point::from_xy(left_x, 65.0),
+        bold_font.clone(),
+        22.0,
+        labels.cert_title,
+        false,
+        TextDirection::Auto,
     );
 
-    if let Ok(qr) = qrcode::QrCode::new(verification_url.as_bytes()) {
-        let width = qr.width();
-        let colors = qr.to_colors();
-        let module_size = 3.0f64;
-        let qr_x = 420.0f64;
-        let qr_bottom_y = 560.0f64;
-        let quiet = 4;
-        let total_size = ((width + quiet * 2) as f64) * module_size;
+    let mut current_y = 115.0f32;
 
-        stream.push_str(&format!(
-            "q 1 1 1 rg {qr_x:.1} {qr_bottom_y:.1} {total_size:.1} {total_size:.1} re f Q\n\
-             q 0 0 0 rg\n\
-             % QR_START\n"
-        ));
-        for y in 0..width {
-            let my = qr_bottom_y + (((width - 1 - y) + quiet) as f64) * module_size;
-            for x in 0..width {
-                if colors[y * width + x] == qrcode::Color::Dark {
-                    let mx = qr_x + ((x + quiet) as f64) * module_size;
-                    stream.push_str(&format!(
-                        "{mx:.1} {my:.1} {module_size:.1} {module_size:.1} re f\n"
-                    ));
+    let draw_field =
+        |surface: &mut krilla::surface::Surface<'_>, label: &str, value: &str, y: &mut f32| {
+            let full_text = format!("{label}: {value}");
+            let lines = break_lines(&full_text, max_text_width, 16.0 * 0.50);
+            for line in lines {
+                surface.set_fill(Some(Fill {
+                    paint: rgb::Color::new(55, 65, 81).into(),
+                    ..Default::default()
+                }));
+                surface.set_stroke(None);
+                surface.draw_text(
+                    Point::from_xy(left_x, *y),
+                    regular_font.clone(),
+                    16.0,
+                    &line,
+                    false,
+                    TextDirection::Auto,
+                );
+                *y += 24.0;
+            }
+            *y += 6.0;
+        };
+
+    draw_field(
+        &mut surface,
+        labels.holder_prefix,
+        holder_name,
+        &mut current_y,
+    );
+    draw_field(&mut surface, labels.quiz_prefix, quiz_title, &mut current_y);
+
+    let score_str = format!("{score_correct}/{score_total}");
+    draw_field(
+        &mut surface,
+        labels.result_prefix,
+        &score_str,
+        &mut current_y,
+    );
+    draw_field(&mut surface, labels.date_prefix, &date_str, &mut current_y);
+
+    current_y += 6.0;
+    let code_line = format!("{}: {code}", labels.code_prefix);
+    surface.set_fill(Some(Fill {
+        paint: rgb::Color::new(31, 41, 55).into(),
+        ..Default::default()
+    }));
+    surface.set_stroke(None);
+    surface.draw_text(
+        Point::from_xy(left_x, current_y),
+        bold_font.clone(),
+        14.0,
+        &code_line,
+        false,
+        TextDirection::Auto,
+    );
+    current_y += 22.0;
+
+    let url_line = format!("{}: {verification_url}", labels.verify_prefix);
+    let url_lines = break_lines(&url_line, max_text_width, 12.0 * 0.52);
+    for uline in url_lines {
+        surface.set_fill(Some(Fill {
+            paint: rgb::Color::new(107, 114, 128).into(),
+            ..Default::default()
+        }));
+        surface.set_stroke(None);
+        surface.draw_text(
+            Point::from_xy(left_x, current_y),
+            regular_font.clone(),
+            12.0,
+            &uline,
+            false,
+            TextDirection::Auto,
+        );
+        current_y += 18.0;
+    }
+
+    // QR Code on the right half (x = 550, y = 110)
+    if let Ok(qr) = qrcode::QrCode::new(verification_url.as_bytes()) {
+        let qr_width = qr.width();
+        let colors = qr.to_colors();
+        let module_size = 4.0f32;
+        let quiet = 4;
+        let total_modules = qr_width + quiet * 2;
+        let total_size = (total_modules as f32) * module_size;
+        let qr_x = 550.0f32;
+        let qr_y = 110.0f32;
+
+        let mut qb = PathBuilder::new();
+        qb.move_to(qr_x, qr_y);
+        qb.line_to(qr_x + total_size, qr_y);
+        qb.line_to(qr_x + total_size, qr_y + total_size);
+        qb.line_to(qr_x, qr_y + total_size);
+        qb.close();
+        if let Some(qpath) = qb.finish() {
+            surface.set_fill(Some(Fill {
+                paint: rgb::Color::new(255, 255, 255).into(),
+                ..Default::default()
+            }));
+            surface.set_stroke(Some(Stroke {
+                paint: rgb::Color::new(229, 231, 235).into(),
+                width: 1.0,
+                ..Default::default()
+            }));
+            surface.draw_path(&qpath);
+        }
+
+        for y in 0..qr_width {
+            for x in 0..qr_width {
+                if colors[y * qr_width + x] == qrcode::Color::Dark {
+                    let mx = qr_x + ((x + quiet) as f32) * module_size;
+                    let my = qr_y + ((y + quiet) as f32) * module_size;
+                    let mut mb = PathBuilder::new();
+                    mb.move_to(mx, my);
+                    mb.line_to(mx + module_size, my);
+                    mb.line_to(mx + module_size, my + module_size);
+                    mb.line_to(mx, my + module_size);
+                    mb.close();
+                    if let Some(mpath) = mb.finish() {
+                        surface.set_fill(Some(Fill {
+                            paint: rgb::Color::new(0, 0, 0).into(),
+                            ..Default::default()
+                        }));
+                        surface.set_stroke(None);
+                        surface.draw_path(&mpath);
+                    }
                 }
             }
         }
-        stream.push_str("% QR_END\nQ\n");
     }
 
-    let pdf = format!(
-        "%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
-         2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
-         3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj\n\
-         4 0 obj << /Length {} >> stream\n{stream}\nendstream endobj\n\
-         5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n\
-         trailer << /Root 1 0 R >>\n%%EOF\n",
-        stream.len()
-    );
-    pdf.into_bytes()
+    surface.finish();
+    page.finish();
+    doc.finish().expect("finish pdf")
 }
 
-fn render_certificate_svg(
+pub fn render_certificate_svg(
     holder_name: &str,
     quiz_title: &str,
     score_correct: i64,
@@ -236,28 +526,80 @@ fn render_certificate_svg(
             .replace('"', "&quot;")
             .replace('\'', "&apos;")
     };
+    let labels = resolve_labels(holder_name, quiz_title);
     let date_str = chrono::DateTime::from_timestamp(issued_at, 0)
         .map(|dt| dt.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "2026-11-25".to_string());
     let verification_url = format!("https://certifications.asodya.com/certificates/{code}");
 
+    let left_x = 48;
+    let max_text_width = 470.0f32;
+
+    let mut text_elements = String::new();
+
+    // Title
+    text_elements.push_str(&format!(
+        "<text x=\"{left_x}\" y=\"65\" font-size=\"22\" font-family=\"sans-serif\" font-weight=\"bold\" fill=\"#111827\">{}</text>\n",
+        escape_xml(labels.cert_title)
+    ));
+
+    let mut current_y = 115.0f32;
+    let mut add_field = |label: &str, value: &str, y: &mut f32| {
+        let full_text = format!("{label}: {value}");
+        let lines = break_lines(&full_text, max_text_width, 16.0 * 0.50);
+        for line in lines {
+            text_elements.push_str(&format!(
+                "<text x=\"{left_x}\" y=\"{:.1}\" font-size=\"16\" font-family=\"sans-serif\" fill=\"#374151\">{}</text>\n",
+                *y, escape_xml(&line)
+            ));
+            *y += 24.0;
+        }
+        *y += 6.0;
+    };
+
+    add_field(labels.holder_prefix, holder_name, &mut current_y);
+    add_field(labels.quiz_prefix, quiz_title, &mut current_y);
+    let score_str = format!("{score_correct}/{score_total}");
+    add_field(labels.result_prefix, &score_str, &mut current_y);
+    add_field(labels.date_prefix, &date_str, &mut current_y);
+
+    current_y += 6.0;
+    let code_line = format!("{}: {code}", labels.code_prefix);
+    text_elements.push_str(&format!(
+        "<text x=\"{left_x}\" y=\"{:.1}\" font-size=\"14\" font-family=\"monospace\" font-weight=\"bold\" fill=\"#1f2937\">{}</text>\n",
+        current_y, escape_xml(&code_line)
+    ));
+    current_y += 22.0;
+
+    let url_line = format!("{}: {verification_url}", labels.verify_prefix);
+    let url_lines = break_lines(&url_line, max_text_width, 12.0 * 0.52);
+    for uline in url_lines {
+        text_elements.push_str(&format!(
+            "<text x=\"{left_x}\" y=\"{:.1}\" font-size=\"12\" font-family=\"monospace\" fill=\"#6b7280\">{}</text>\n",
+            current_y, escape_xml(&uline)
+        ));
+        current_y += 18.0;
+    }
+
+    // QR modules
     let mut qr_modules = String::new();
     if let Ok(qr) = qrcode::QrCode::new(verification_url.as_bytes()) {
-        let width = qr.width();
+        let qr_width = qr.width();
         let colors = qr.to_colors();
         let module_size = 4;
-        let qr_x = 540;
-        let qr_y = 60;
         let quiet = 4;
-        let total_size = (width + quiet * 2) * module_size;
+        let total_size = (qr_width + quiet * 2) * module_size;
+        let qr_x = 550;
+        let qr_y = 110;
+
         qr_modules.push_str(&format!(
             "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#ffffff\" stroke=\"#e5e7eb\" stroke-width=\"1\"/>\n",
             qr_x, qr_y, total_size, total_size
         ));
         qr_modules.push_str("<g id=\"qr-code\">\n");
-        for y in 0..width {
-            for x in 0..width {
-                if colors[y * width + x] == qrcode::Color::Dark {
+        for y in 0..qr_width {
+            for x in 0..qr_width {
+                if colors[y * qr_width + x] == qrcode::Color::Dark {
                     let px = qr_x + (x + quiet) * module_size;
                     let py = qr_y + (y + quiet) * module_size;
                     qr_modules.push_str(&format!(
@@ -270,25 +612,12 @@ fn render_certificate_svg(
     }
 
     let svg = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"800\" height=\"500\">\n\
-         <rect width=\"800\" height=\"500\" fill=\"#ffffff\" stroke=\"#1f2937\" stroke-width=\"4\"/>\n\
-         <text x=\"40\" y=\"70\" font-size=\"26\" font-family=\"sans-serif\" font-weight=\"bold\" fill=\"#111827\">Asodya Completion Certificate</text>\n\
-         <text x=\"40\" y=\"130\" font-size=\"20\" font-family=\"sans-serif\" fill=\"#374151\">Holder: {}</text>\n\
-         <text x=\"40\" y=\"180\" font-size=\"20\" font-family=\"sans-serif\" fill=\"#374151\">Quiz: {}</text>\n\
-         <text x=\"40\" y=\"230\" font-size=\"20\" font-family=\"sans-serif\" fill=\"#374151\">Result: {}/{}</text>\n\
-         <text x=\"40\" y=\"280\" font-size=\"16\" font-family=\"sans-serif\" fill=\"#374151\">Date: {}</text>\n\
-         <text x=\"40\" y=\"330\" font-size=\"15\" font-family=\"monospace\" fill=\"#1f2937\">Verification Code: {}</text>\n\
-         <text x=\"40\" y=\"365\" font-size=\"12\" font-family=\"monospace\" fill=\"#6b7280\">{}</text>\n\
-         {}\
-         </svg>",
-        escape_xml(holder_name),
-        escape_xml(quiz_title),
-        score_correct,
-        score_total,
-        date_str,
-        escape_xml(code),
-        escape_xml(&verification_url),
-        qr_modules
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"800\" height=\"500\" viewBox=\"0 0 800 500\">\n\
+         <rect x=\"15\" y=\"15\" width=\"770\" height=\"470\" rx=\"6\" fill=\"#ffffff\" stroke=\"#1f2937\" stroke-width=\"3\"/>\n\
+         <rect x=\"22\" y=\"22\" width=\"756\" height=\"456\" rx=\"4\" fill=\"none\" stroke=\"#d1d5db\" stroke-width=\"1\"/>\n\
+         {text_elements}\
+         {qr_modules}\
+         </svg>"
     );
     svg.into_bytes()
 }
