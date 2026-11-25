@@ -1,8 +1,10 @@
 use crate::{
     core::{Error, Result, now},
-    dal::{Store, new_id},
-    domain::auth::{CallerIdentity, require_owner, require_owner_or_admin},
-    domain::provenance::{QuestionProvenanceStats, question_provenance_stats},
+    dal::{AnyQuery, Store, new_id},
+    domain::{
+        auth::{CallerIdentity, require_owner, require_owner_or_admin},
+        provenance::{QuestionProvenanceStats, question_provenance_stats},
+    },
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{AnyConnection, Row};
@@ -949,8 +951,8 @@ pub(crate) async fn public_question_version_sources_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Any>,
     question_version_ids: Option<&[String]>,
 ) -> Result<Vec<PublicQuestionVersionSource>> {
-    let mut query = public_question_version_sources_query(question_version_ids)?;
-    let rows = query.build().fetch_all(&mut **tx).await?;
+    let query = public_question_version_sources_query(question_version_ids)?;
+    let rows = query.query().fetch_all(&mut **tx).await?;
     Ok(rows
         .into_iter()
         .map(|row| PublicQuestionVersionSource {
@@ -967,13 +969,13 @@ pub(crate) async fn public_question_version_sources_in_tx(
 
 fn public_question_version_sources_query(
     question_version_ids: Option<&[String]>,
-) -> Result<sqlx::QueryBuilder<'static, sqlx::Any>> {
+) -> Result<AnyQuery> {
     if question_version_ids.is_some_and(|ids| ids.is_empty()) {
-        return Ok(sqlx::QueryBuilder::<sqlx::Any>::new(
+        return Ok(AnyQuery::new(
             "SELECT '' AS question_id, '' AS question_version_id, '' AS source_quiz_id, '' AS source_quiz_version_id, '' AS source_scope, NULL AS origin_quiz_id, NULL AS origin_quiz_version_id, '' AS couch_doc_id, '' AS language, '' AS question_origin, '' AS source_quiz_title WHERE 1 = 0",
         ));
     }
-    let mut query = sqlx::QueryBuilder::<sqlx::Any>::new(
+    let mut query = AnyQuery::new(
         "WITH public_candidates AS (
              SELECT q.id AS source_quiz_id, q.active_version_id AS source_quiz_version_id,
                     qversion.title AS source_quiz_title,
@@ -1001,11 +1003,13 @@ fn public_question_version_sources_query(
     );
     if let Some(ids) = question_version_ids {
         query.push(" AND qvq.question_version_id IN (");
-        let mut separated = query.separated(", ");
-        for id in ids {
-            separated.push_bind(id.clone());
+        for (index, id) in ids.iter().enumerate() {
+            if index > 0 {
+                query.push(", ");
+            }
+            query.push_bind_text(id.clone());
         }
-        separated.push_unseparated(")");
+        query.push(")");
     }
     query.push(
         ") SELECT source_quiz_id, source_quiz_version_id, source_quiz_title,
@@ -1024,15 +1028,17 @@ async fn public_quiz_tags(
     if quiz_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let mut query = sqlx::QueryBuilder::<sqlx::Any>::new(
+    let mut query = AnyQuery::new(
         "SELECT qt.quiz_id, t.label FROM quiz_tags qt JOIN tags t ON t.id = qt.tag_id WHERE qt.quiz_id IN (",
     );
-    let mut separated = query.separated(", ");
-    for id in quiz_ids {
-        separated.push_bind(id);
+    for (index, id) in quiz_ids.iter().enumerate() {
+        if index > 0 {
+            query.push(", ");
+        }
+        query.push_bind_text(id.clone());
     }
-    separated.push_unseparated(") ORDER BY t.label");
-    let rows = query.build().fetch_all(&store.db).await?;
+    query.push(") ORDER BY t.label");
+    let rows = query.query().fetch_all(&store.db).await?;
     let mut tags: HashMap<String, Vec<String>> = HashMap::new();
     for row in rows {
         tags.entry(row.get("quiz_id"))
@@ -1107,18 +1113,18 @@ async fn build_public_question_search_projection(
         .map(|row| normalize_public_search_text(&row.get::<String, _>("label")))
         .collect::<Vec<_>>()
         .join("\u{1f}");
-    let mut question_query = sqlx::QueryBuilder::<sqlx::Any>::new(
+    let mut question_query = AnyQuery::new(
         "SELECT qv.id AS question_version_id, qv.couch_doc_id
          FROM quiz_version_questions qvq JOIN question_versions qv ON qv.id = qvq.question_version_id
          WHERE qvq.quiz_version_id = ",
     );
-    question_query.push_bind(&active_version_id);
+    question_query.push_bind_text(active_version_id.clone());
     question_query.push(" ORDER BY qvq.position, qv.id");
     if let Some(limit) = max_questions {
         question_query.push(" LIMIT ");
-        question_query.push_bind(i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX));
+        question_query.push_bind_i64(i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX));
     }
-    let question_rows = question_query.build().fetch_all(&mut *connection).await?;
+    let question_rows = question_query.query().fetch_all(&mut *connection).await?;
     if max_questions.is_some_and(|limit| question_rows.len() > limit) {
         return Err(Error::unprocessable(
             "search_rebuild_quiz_too_large: Quiz exceeds the bounded per-quiz question limit",
@@ -1228,14 +1234,14 @@ pub async fn rebuild_public_question_search_batch(
             "invalid_batch_size: Batch size must be between 1 and 100",
         ));
     }
-    let mut quiz_query = sqlx::QueryBuilder::<sqlx::Any>::new("SELECT id FROM quizzes WHERE 1 = 1");
+    let mut quiz_query = AnyQuery::new("SELECT id FROM quizzes WHERE 1 = 1");
     if let Some(cursor) = after_quiz_id.filter(|value| !value.is_empty()) {
         quiz_query.push(" AND id > ");
-        quiz_query.push_bind(cursor);
+        quiz_query.push_bind_text(cursor.to_owned());
     }
     quiz_query.push(" ORDER BY id LIMIT ");
-    quiz_query.push_bind(i64::try_from(batch_size.saturating_add(1)).unwrap_or(i64::MAX));
-    let quiz_rows = quiz_query.build().fetch_all(&store.db).await?;
+    quiz_query.push_bind_i64(i64::try_from(batch_size.saturating_add(1)).unwrap_or(i64::MAX));
+    let quiz_rows = quiz_query.query().fetch_all(&store.db).await?;
     let has_more = quiz_rows.len() > batch_size;
     let quiz_ids = quiz_rows
         .into_iter()
@@ -1307,7 +1313,7 @@ pub async fn list_catalog_questions(
         });
     let limit = query.limit.unwrap_or(20).clamp(1, 50) as usize;
     let offset = query.offset.unwrap_or(0).max(0) as usize;
-    let mut sql = sqlx::QueryBuilder::<sqlx::Any>::new(
+    let mut sql = AnyQuery::new(
         "WITH matching_origins AS (
            SELECT q.id AS source_quiz_id, q.active_version_id AS source_quiz_version_id,
                   qv.title AS source_quiz_title, qvq.question_version_id,
@@ -1331,11 +1337,11 @@ pub async fn list_catalog_questions(
     );
     if let Some(language) = query.language.as_deref() {
         sql.push(" AND qquestion.language = ");
-        sql.push_bind(language.to_string());
+        sql.push_bind_text(language.to_string());
     }
     if let Some(origin) = query.origin.as_deref() {
         sql.push(" AND question.origin = ");
-        sql.push_bind(origin.to_string());
+        sql.push_bind_text(origin.to_string());
     }
     if let Some(ref q) = q_filter {
         sql.push(
@@ -1344,11 +1350,11 @@ pub async fn list_catalog_questions(
                                  AND pqs.quiz_id = q.id
                                  AND (pqs.normalized_prompt LIKE ",
         );
-        sql.push_bind(q.clone());
+        sql.push_bind_text(q.clone());
         sql.push(" ESCAPE '!' OR pqs.normalized_title LIKE ");
-        sql.push_bind(q.clone());
+        sql.push_bind_text(q.clone());
         sql.push(" ESCAPE '!' OR pqs.normalized_tags LIKE ");
-        sql.push_bind(q.clone());
+        sql.push_bind_text(q.clone());
         sql.push(" ESCAPE '!'))");
     }
     sql.push(
@@ -1357,10 +1363,10 @@ pub async fn list_catalog_questions(
           FROM matching_origins WHERE origin_rank = 1
           ORDER BY question_created_at DESC, question_version_id ASC LIMIT ",
     );
-    sql.push_bind((limit + 1) as i64);
+    sql.push_bind_i64((limit + 1) as i64);
     sql.push(" OFFSET ");
-    sql.push_bind(offset as i64);
-    let rows = sql.build().fetch_all(&store.db).await?;
+    sql.push_bind_i64(offset as i64);
+    let rows = sql.query().fetch_all(&store.db).await?;
     let has_more = rows.len() > limit;
     let page_rows = rows.into_iter().take(limit).collect::<Vec<_>>();
     let quiz_ids = page_rows

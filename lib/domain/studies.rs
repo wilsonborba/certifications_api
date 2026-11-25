@@ -1,6 +1,6 @@
 use crate::{
     core::{Error, Result, now},
-    dal::{Store, fsm::sha256_hex, new_id},
+    dal::{AnyQuery, Store, fsm::sha256_hex, new_id},
     domain::{
         auth::{CallerIdentity, require_owner},
         cleanup,
@@ -751,7 +751,7 @@ fn escape_like_literal(value: &str) -> String {
 }
 
 fn push_study_history_filters(
-    query: &mut sqlx::QueryBuilder<'_, sqlx::Any>,
+    query: &mut AnyQuery,
     caller: &CallerIdentity,
     ts: i64,
     search_pattern: Option<&str>,
@@ -763,33 +763,39 @@ fn push_study_history_filters(
 ) {
     query
         .push(" WHERE s.owner_id = ")
-        .push_bind(caller.user_id.clone())
+        .push_bind_text(caller.user_id.clone())
         .push(" AND s.status <> 'expired' AND (s.status <> 'draft' OR s.expires_at IS NULL OR s.expires_at >= ")
-        .push_bind(ts)
+        .push_bind_i64(ts)
         .push(")");
     if let Some(search_pattern) = search_pattern {
         query
             .push(" AND (LOWER(s.title) LIKE ")
-            .push_bind(search_pattern.to_string())
+            .push_bind_text(search_pattern.to_string())
             .push(r#" ESCAPE '\' OR LOWER(s.description) LIKE "#)
-            .push_bind(search_pattern.to_string())
+            .push_bind_text(search_pattern.to_string())
             .push(r#" ESCAPE '\' OR LOWER(qv.title) LIKE "#)
-            .push_bind(search_pattern.to_string())
+            .push_bind_text(search_pattern.to_string())
             .push(r#" ESCAPE '\')"#);
     }
     if let Some(created_from) = created_from {
-        query.push(" AND s.created_at >= ").push_bind(created_from);
+        query
+            .push(" AND s.created_at >= ")
+            .push_bind_i64(created_from);
     }
     if let Some(created_to) = created_to {
-        query.push(" AND s.created_at <= ").push_bind(created_to);
+        query
+            .push(" AND s.created_at <= ")
+            .push_bind_i64(created_to);
     }
     if let Some(status) = status {
-        query.push(" AND s.status = ").push_bind(status.to_string());
+        query
+            .push(" AND s.status = ")
+            .push_bind_text(status.to_string());
     }
     if let Some(quiz_id) = quiz_id {
         query
             .push(" AND s.quiz_id = ")
-            .push_bind(quiz_id.to_string());
+            .push_bind_text(quiz_id.to_string());
     }
     if let Some(tag) = tag {
         query
@@ -802,7 +808,7 @@ fn push_study_history_filters(
                     WHERE tag_quiz.id = s.quiz_id AND tag_quiz.owner_id = s.owner_id
                       AND t.slug = ",
             )
-            .push_bind(tag.to_string())
+            .push_bind_text(tag.to_string())
             .push(")");
     }
 }
@@ -861,7 +867,7 @@ pub async fn list_studies(
     let offset = offset.max(0);
     let ts = now();
 
-    let mut count = sqlx::QueryBuilder::<sqlx::Any>::new(
+    let mut count = AnyQuery::new(
         "SELECT COUNT(*) FROM studies s
          LEFT JOIN quizzes q ON q.id = s.quiz_id AND q.owner_id = s.owner_id
          LEFT JOIN quiz_versions qv ON qv.id = q.active_version_id",
@@ -877,20 +883,17 @@ pub async fn list_studies(
         quiz_id,
         tag,
     );
-    let total = count
-        .build_query_scalar::<i64>()
-        .fetch_one(&store.db)
-        .await?;
+    let total: i64 = count.query().fetch_one(&store.db).await?.try_get(0)?;
 
     let tag_rows = sqlx::query(
-        "SELECT DISTINCT t.slug, t.label
+        "SELECT DISTINCT t.slug, t.label, LOWER(t.label) AS sort_label
          FROM studies s
          JOIN quizzes q ON q.id = s.quiz_id AND q.owner_id = s.owner_id
          JOIN quiz_tags qt ON qt.quiz_id = q.id
          JOIN tags t ON t.id = qt.tag_id
          WHERE s.owner_id = $1 AND s.quiz_id <> '' AND s.status <> 'expired'
            AND (s.status <> 'draft' OR s.expires_at IS NULL OR s.expires_at >= $2)
-         ORDER BY LOWER(t.label), t.slug",
+         ORDER BY sort_label, t.slug",
     )
     .bind(&caller.user_id)
     .bind(ts)
@@ -906,7 +909,7 @@ pub async fn list_studies(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let mut query = sqlx::QueryBuilder::<sqlx::Any>::new(
+    let mut query = AnyQuery::new(
         "SELECT s.id, s.title, s.description, s.source_origin, s.status, s.quiz_id,
                 s.expires_at, s.created_at, s.updated_at
          FROM studies s
@@ -926,10 +929,10 @@ pub async fn list_studies(
     );
     query
         .push(" ORDER BY s.updated_at DESC, s.id DESC LIMIT ")
-        .push_bind(limit)
+        .push_bind_i64(limit)
         .push(" OFFSET ")
-        .push_bind(offset);
-    let rows = query.build().fetch_all(&store.db).await?;
+        .push_bind_i64(offset);
+    let rows = query.query().fetch_all(&store.db).await?;
     let items = rows
         .into_iter()
         .map(|row| {
