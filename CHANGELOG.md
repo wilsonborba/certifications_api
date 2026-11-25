@@ -58,6 +58,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pin unicode normalization version ([`89c4286`](https://github.com/wilsonborba/certifications_api/commit/89c428602514f76cd3cd0f99f3cd9472fbf8ad67))
 - *(certifications)* Use PostgreSQL compatible any binds ([`7607d49`](https://github.com/wilsonborba/certifications_api/commit/7607d49e792463efb97727e60340c36ac20d1e23))
 - *(database)* Integrate portable Any queries and study history ([`def0a96`](https://github.com/wilsonborba/certifications_api/commit/def0a965b30cfe1ed4dbf4128fd8b4a37ada4e0d))
+- Validate Rust package from checkout root ([`3efcd3e`](https://github.com/wilsonborba/certifications_api/commit/3efcd3e31e0039eca6bb6ad8f620ec9e3d7c3727))
+- Require complete Rust artifact manifest ([`6068fb2`](https://github.com/wilsonborba/certifications_api/commit/6068fb2254d11d8222220da5ab5bf94e824c448e))
+- *(installer)* Include assets/fonts in source fingerprinting ([`3015308`](https://github.com/wilsonborba/certifications_api/commit/30153089f46a6136dec80180dfe70e5d13016300))
+- *(installer)* Fingerprint tracked assets ([`e23075c`](https://github.com/wilsonborba/certifications_api/commit/e23075cf8a7a2b7b0547b95c9033937fafcad456))
 
 ### 💼 Other Changes
 
@@ -99,6 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(changelog)* Record source authorization and selection fixes ([`233ac47`](https://github.com/wilsonborba/certifications_api/commit/233ac478f41aa362e2479e385599c3b4dc08c1fb))
 - *(changelog)* Record history and statistics integration ([`264aba1`](https://github.com/wilsonborba/certifications_api/commit/264aba1148c480e9d5cf27cd3966103d7d1beddb))
 - *(changelog)* Record public question reuse integration ([`433e4e1`](https://github.com/wilsonborba/certifications_api/commit/433e4e1b1033682ae8c8549af61643df48d4524e))
+- *(changelog)* Record prepared settings and PostgreSQL history fixes ([`b10e505`](https://github.com/wilsonborba/certifications_api/commit/b10e505ac35ac8f2f6b0fb10ef98fc1e5691cadb))
 
 ### 🎨 Styling
 
@@ -107,6 +112,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 🧪 Testing
 
 - Keep PostgreSQL fixture identity portable ([`d161e34`](https://github.com/wilsonborba/certifications_api/commit/d161e3436491519465cb15e01a4cbe1f2c2c3bbf))
+- Extend installer negative package coverage ([`7f7e06f`](https://github.com/wilsonborba/certifications_api/commit/7f7e06f8ad876f0946bdf2b0e58d0ca59aff5968))
 
 ### ⚙️ Miscellaneous Tasks
 
@@ -115,6 +121,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remove ignored docs artifact from public branch ([`c44b9cb`](https://github.com/wilsonborba/certifications_api/commit/c44b9cb866d2546e93a4fe59c311cb1d3fd679ef))
 - Refresh unreleased changelog ([`71844ee`](https://github.com/wilsonborba/certifications_api/commit/71844ee70b5cfc6bf2ddc4f26b9289b254136fe4))
 - Refresh unreleased changelog ([`c0a85dc`](https://github.com/wilsonborba/certifications_api/commit/c0a85dcae7dbde82713bdd501a8cf33a9a68d93a))
+- Package Rust service with safe dry-run ([`6ec2834`](https://github.com/wilsonborba/certifications_api/commit/6ec283416a690483e951df62f41c7cc9e5927f60))
+- *(installer)* Integrate verified Rust preparation and asset fingerprints ([`23c5118`](https://github.com/wilsonborba/certifications_api/commit/23c51183d1273fe25bd1a95645b5f5aed0fb242a))
 
 ## [1.0.0] - 2026-09-08
 
