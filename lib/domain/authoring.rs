@@ -1076,7 +1076,7 @@ pub async fn render_question_visual(
     let fsm_ref = store.fsm.put_bytes(&ref_key, &rendered.bytes).await?;
     let id = new_id();
     let ts = now();
-    sqlx::query(
+    let insert_result = sqlx::query(
         "INSERT INTO question_visuals(id, question_version_id, fsm_ref, mime_type, created_at)
          VALUES($1, $2, $3, $4, $5)",
     )
@@ -1086,7 +1086,17 @@ pub async fn render_question_visual(
     .bind(&rendered.mime_type)
     .bind(ts)
     .execute(&store.db)
-    .await?;
+    .await
+    .map_err(crate::core::Error::from);
+    if let Err(insert_err) = insert_result {
+        if let Err(cleanup_err) = store.fsm.delete_ref(&fsm_ref).await {
+            tracing::error!(
+                module = "authoring",
+                "Failed to remove visual blob after metadata insert failure: {cleanup_err}"
+            );
+        }
+        return Err(insert_err);
+    }
 
     Ok(QuestionVisual {
         id,

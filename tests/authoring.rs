@@ -283,6 +283,30 @@ async fn manual_authoring_edit_delete_visual_and_origin_guards() {
     let fsm_ref = vis["fsm_ref"].as_str().unwrap().to_string();
     assert!(fsm.has_blob(&fsm_ref));
 
+    // A failed durable metadata write must remove the unreferenced FSM blob.
+    sqlx::query(
+        "CREATE TRIGGER reject_question_visual_insert BEFORE INSERT ON question_visuals
+         BEGIN SELECT RAISE(ABORT, 'forced visual insert failure'); END",
+    )
+    .execute(&store.db)
+    .await
+    .unwrap();
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visual"),
+        "author-1",
+        None,
+        Some(json!({ "visual_spec": { "chart": "bar" } })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(fsm.blob_count(), 1);
+    sqlx::query("DROP TRIGGER reject_question_visual_insert")
+        .execute(&store.db)
+        .await
+        .unwrap();
+
     // Quiz id for admin origin override.
     let quiz_id: String = sqlx::query_scalar("SELECT quiz_id FROM studies WHERE id = $1")
         .bind(&sid)
