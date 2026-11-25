@@ -1,6 +1,6 @@
 use crate::{
     core::{Error, Result, now},
-    dal::{Store, fsm::sha256_hex, new_id},
+    dal::{AnyQuery, Store, fsm::sha256_hex, new_id},
     domain::{
         auth::{CallerIdentity, require_owner},
         cleanup,
@@ -26,6 +26,31 @@ pub struct StudySummary {
     pub expires_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StudyHistoryFilter {
+    pub search: Option<String>,
+    pub created_from: Option<i64>,
+    pub created_to: Option<i64>,
+    pub status: Option<String>,
+    pub quiz_id: Option<String>,
+    pub tag: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AvailableStudyTag {
+    pub slug: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StudyHistoryPage {
+    pub items: Vec<StudySummary>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+    pub available_tags: Vec<AvailableStudyTag>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -759,37 +784,224 @@ pub async fn create_prepared_study(
     get_study(store, caller, &study_id, quotas).await
 }
 
+fn escape_like_literal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    format!("%{escaped}%")
+}
+
+fn push_study_history_filters(
+    query: &mut AnyQuery,
+    caller: &CallerIdentity,
+    ts: i64,
+    search_pattern: Option<&str>,
+    created_from: Option<i64>,
+    created_to: Option<i64>,
+    status: Option<&str>,
+    quiz_id: Option<&str>,
+    tag: Option<&str>,
+) {
+    query
+        .push(" WHERE s.owner_id = ")
+        .push_bind_text(caller.user_id.clone())
+        .push(" AND s.status <> 'expired' AND (s.status <> 'draft' OR s.expires_at IS NULL OR s.expires_at >= ")
+        .push_bind_i64(ts)
+        .push(")");
+    if let Some(search_pattern) = search_pattern {
+        query
+            .push(" AND (LOWER(s.title) LIKE ")
+            .push_bind_text(search_pattern.to_string())
+            .push(r#" ESCAPE '\' OR LOWER(s.description) LIKE "#)
+            .push_bind_text(search_pattern.to_string())
+            .push(r#" ESCAPE '\' OR LOWER(qv.title) LIKE "#)
+            .push_bind_text(search_pattern.to_string())
+            .push(r#" ESCAPE '\')"#);
+    }
+    if let Some(created_from) = created_from {
+        query
+            .push(" AND s.created_at >= ")
+            .push_bind_i64(created_from);
+    }
+    if let Some(created_to) = created_to {
+        query
+            .push(" AND s.created_at <= ")
+            .push_bind_i64(created_to);
+    }
+    if let Some(status) = status {
+        query
+            .push(" AND s.status = ")
+            .push_bind_text(status.to_string());
+    }
+    if let Some(quiz_id) = quiz_id {
+        query
+            .push(" AND s.quiz_id = ")
+            .push_bind_text(quiz_id.to_string());
+    }
+    if let Some(tag) = tag {
+        query
+            .push(
+                " AND EXISTS (
+                    SELECT 1
+                    FROM quizzes tag_quiz
+                    JOIN quiz_tags qt ON qt.quiz_id = tag_quiz.id
+                    JOIN tags t ON t.id = qt.tag_id
+                    WHERE tag_quiz.id = s.quiz_id AND tag_quiz.owner_id = s.owner_id
+                      AND t.slug = ",
+            )
+            .push_bind_text(tag.to_string())
+            .push(")");
+    }
+}
+
 pub async fn list_studies(
     store: &Store,
     caller: &CallerIdentity,
+    filter: &StudyHistoryFilter,
     limit: i64,
-) -> Result<Vec<StudySummary>> {
+    offset: i64,
+) -> Result<StudyHistoryPage> {
+    if filter
+        .created_from
+        .zip(filter.created_to)
+        .is_some_and(|(from, to)| from > to)
+        || filter.created_from.is_some_and(|value| value < 0)
+        || filter.created_to.is_some_and(|value| value < 0)
+    {
+        return Err(Error::unprocessable(
+            "invalid_date_range: created_from and created_to must be non-negative and ordered",
+        ));
+    }
+
+    let search = filter
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if search.is_some_and(|value| value.chars().count() > 200) {
+        return Err(Error::unprocessable(
+            "invalid_search: q must contain no more than 200 characters",
+        ));
+    }
+    let search_pattern = search.map(|value| escape_like_literal(&value.to_lowercase()));
+    let status = filter
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if status.is_some_and(|value| !matches!(value, "draft" | "active" | "expired")) {
+        return Err(Error::unprocessable(
+            "invalid_status: status must be draft, active, or expired",
+        ));
+    }
+    let quiz_id = filter
+        .quiz_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let tag = filter
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let limit = limit.clamp(1, MAX_PAGE_LIMIT);
+    let offset = offset.max(0);
     let ts = now();
-    let rows = sqlx::query(
-        "SELECT id, title, description, source_origin, status, quiz_id, expires_at, created_at, updated_at
-         FROM studies WHERE owner_id = $1 AND status <> 'expired' AND (status <> 'draft' OR expires_at IS NULL OR expires_at >= $2)
-         ORDER BY updated_at DESC LIMIT $3",
+
+    let mut count = AnyQuery::new(
+        "SELECT COUNT(*) FROM studies s
+         LEFT JOIN quizzes q ON q.id = s.quiz_id AND q.owner_id = s.owner_id
+         LEFT JOIN quiz_versions qv ON qv.id = q.active_version_id",
+    );
+    push_study_history_filters(
+        &mut count,
+        caller,
+        ts,
+        search_pattern.as_deref(),
+        filter.created_from,
+        filter.created_to,
+        status,
+        quiz_id,
+        tag,
+    );
+    let total: i64 = count.query().fetch_one(&store.db).await?.try_get(0)?;
+
+    let tag_rows = sqlx::query(
+        "SELECT DISTINCT t.slug, t.label, LOWER(t.label) AS sort_label
+         FROM studies s
+         JOIN quizzes q ON q.id = s.quiz_id AND q.owner_id = s.owner_id
+         JOIN quiz_tags qt ON qt.quiz_id = q.id
+         JOIN tags t ON t.id = qt.tag_id
+         WHERE s.owner_id = $1 AND s.quiz_id <> '' AND s.status <> 'expired'
+           AND (s.status <> 'draft' OR s.expires_at IS NULL OR s.expires_at >= $2)
+         ORDER BY sort_label, t.slug",
     )
     .bind(&caller.user_id)
     .bind(ts)
-    .bind(limit)
     .fetch_all(&store.db)
     .await?;
-    Ok(rows
+    let available_tags = tag_rows
         .into_iter()
-        .map(|r| StudySummary {
-            id: r.get("id"),
-            title: r.get("title"),
-            description: r.get("description"),
-            source_origin: r.get("source_origin"),
-            status: r.get("status"),
-            quiz_id: r.get("quiz_id"),
-            expires_at: r.get("expires_at"),
-            created_at: r.get("created_at"),
-            updated_at: r.get("updated_at"),
+        .map(|row| {
+            Ok(AvailableStudyTag {
+                slug: row.try_get("slug")?,
+                label: row.try_get("label")?,
+            })
         })
-        .collect())
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut query = AnyQuery::new(
+        "SELECT s.id, s.title, s.description, s.source_origin, s.status, s.quiz_id,
+                s.expires_at, s.created_at, s.updated_at
+         FROM studies s
+         LEFT JOIN quizzes q ON q.id = s.quiz_id AND q.owner_id = s.owner_id
+         LEFT JOIN quiz_versions qv ON qv.id = q.active_version_id",
+    );
+    push_study_history_filters(
+        &mut query,
+        caller,
+        ts,
+        search_pattern.as_deref(),
+        filter.created_from,
+        filter.created_to,
+        status,
+        quiz_id,
+        tag,
+    );
+    query
+        .push(" ORDER BY s.updated_at DESC, s.id DESC LIMIT ")
+        .push_bind_i64(limit)
+        .push(" OFFSET ")
+        .push_bind_i64(offset);
+    let rows = query.query().fetch_all(&store.db).await?;
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            Ok(StudySummary {
+                id: row.try_get("id")?,
+                title: row.try_get("title")?,
+                description: row.try_get("description")?,
+                source_origin: row.try_get("source_origin")?,
+                status: row.try_get("status")?,
+                quiz_id: row.try_get("quiz_id")?,
+                expires_at: row.try_get("expires_at")?,
+                created_at: row.try_get("created_at")?,
+                updated_at: row.try_get("updated_at")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(StudyHistoryPage {
+        items,
+        total,
+        limit,
+        offset,
+        available_tags,
+    })
 }
 
 async fn load_study_config(store: &Store, study_id: &str) -> Result<Option<PreparedStudyConfig>> {

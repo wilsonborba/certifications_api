@@ -5,6 +5,9 @@ pub mod reports;
 pub mod scanner;
 pub mod schemas;
 
+mod any_query;
+pub(crate) use any_query::AnyQuery;
+
 use crate::core::{Error, Result, Settings};
 use sqlx::{AnyPool, ConnectOptions, any::AnyPoolOptions};
 use std::sync::Arc;

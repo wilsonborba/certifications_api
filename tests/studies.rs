@@ -17,6 +17,116 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tower::ServiceExt;
 
+#[tokio::test]
+async fn study_history_is_owner_scoped_stably_paginated_and_filterable() {
+    let mut store = Store::fixture().await;
+    store.fsm = MemoryFsm::new();
+    sqlx::query(
+        "INSERT INTO tags(id, slug, label, created_at) VALUES('tag-1', 'biology', 'Biology', 1)",
+    )
+    .execute(&store.db)
+    .await
+    .unwrap();
+
+    for (owner, prefix, count) in [("u1", "mine", 55), ("u2", "other", 2)] {
+        for n in 0..count {
+            let study_id = format!("{prefix}-{n:02}");
+            let created_at = 1_700_000_000 + n;
+            sqlx::query(
+                "INSERT INTO studies(id, owner_id, title, description, created_at, updated_at,
+                                    source_origin, status, quiz_id, expires_at)
+                 VALUES($1, $2, $3, $4, $5, $6, 'direct', 'active', $7, NULL)",
+            )
+            .bind(&study_id)
+            .bind(owner)
+            .bind(format!("Biology study {n:02}"))
+            .bind("history fixture")
+            .bind(created_at)
+            .bind(created_at)
+            .bind(if n == 0 { "quiz-1" } else { "" })
+            .execute(&store.db)
+            .await
+            .unwrap();
+        }
+    }
+    sqlx::query(
+        "INSERT INTO quizzes(id, owner_id, study_id, visibility, active_version_id, created_at, updated_at)
+         VALUES('quiz-1', 'u1', 'mine-00', 'private', 'version-1', 1, 1)",
+    )
+    .execute(&store.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO quiz_versions(id, quiz_id, version_num, title, created_at)
+         VALUES('version-1', 'quiz-1', 1, 'Cell Biology Quiz', 1)",
+    )
+    .execute(&store.db)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO quiz_tags(quiz_id, tag_id) VALUES('quiz-1', 'tag-1')")
+        .execute(&store.db)
+        .await
+        .unwrap();
+
+    let app = presentation::router(App {
+        store,
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+
+    let (status, first) = call(&app, "GET", "/studies?limit=10", Some("u1"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["total"], 55);
+    assert_eq!(first["limit"], 10);
+    assert_eq!(first["offset"], 0);
+    assert_eq!(first["items"].as_array().unwrap().len(), 10);
+    assert_eq!(first["items"][0]["id"], "mine-54");
+    assert_eq!(first["available_tags"][0]["slug"], "biology");
+
+    let (status, second) = call(&app, "GET", "/studies?limit=10&offset=50", Some("u1"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["total"], 55);
+    assert_eq!(second["offset"], 50);
+    assert_eq!(second["items"].as_array().unwrap().len(), 5);
+    assert!(
+        second["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["id"] != "other-00")
+    );
+
+    let (status, filtered) = call(
+        &app,
+        "GET",
+        "/studies?q=cell%20biology&created_from=1700000000&created_to=1700000000&status=active&quiz_id=quiz-1&tag=biology",
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(filtered["total"], 1);
+    assert_eq!(filtered["items"][0]["id"], "mine-00");
+    assert_eq!(filtered["available_tags"][0]["slug"], "biology");
+
+    let (status, invalid_range) = call(
+        &app,
+        "GET",
+        "/studies?created_from=1700000001&created_to=1700000000",
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        invalid_range["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid_date_range")
+    );
+}
+
 fn test_settings() -> Settings {
     Settings {
         host: "127.0.0.1".into(),
