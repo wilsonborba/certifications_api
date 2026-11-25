@@ -51,6 +51,8 @@ pub struct StudyDetail {
     pub study: StudySummary,
     pub sources: Vec<SourceSummary>,
     pub quota: QuotaMeter,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<PreparedStudyConfig>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -99,6 +101,24 @@ pub struct PreparedStudyInput {
     #[serde(default)]
     pub description: String,
     pub sources: Vec<PreparedSourceRef>,
+    pub config: Option<PreparedStudyConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedStudyConfig {
+    #[serde(default = "default_config_language")]
+    pub language: String,
+    #[serde(default = "default_config_count")]
+    pub count: i64,
+}
+
+fn default_config_language() -> String {
+    "en".to_string()
+}
+
+fn default_config_count() -> i64 {
+    10
 }
 
 #[derive(Deserialize)]
@@ -642,6 +662,18 @@ pub async fn create_prepared_study(
             "invalid_sources: Prepared study requires 1 to 20 sources",
         ));
     }
+    if let Some(ref cfg) = input.config {
+        if !matches!(cfg.language.as_str(), "en" | "pt-BR" | "th") {
+            return Err(Error::unprocessable(
+                "invalid_config: Supported languages are en, pt-BR, and th",
+            ));
+        }
+        if cfg.count < 1 || cfg.count > 20 {
+            return Err(Error::unprocessable(
+                "invalid_config: Question count must be between 1 and 20",
+            ));
+        }
+    }
     let mut verified_sizes = Vec::with_capacity(input.sources.len());
     let mut canonical_specs = Vec::with_capacity(input.sources.len());
     for s in &input.sources {
@@ -677,6 +709,19 @@ pub async fn create_prepared_study(
     .bind(ts)
     .execute(&mut *tx)
     .await?;
+
+    if let Some(ref cfg) = input.config {
+        sqlx::query(
+            "INSERT INTO study_configs(study_id, language, count, created_at, updated_at)
+             VALUES($1, $2, $3, $4, $4)",
+        )
+        .bind(&study_id)
+        .bind(&cfg.language)
+        .bind(cfg.count)
+        .bind(ts)
+        .execute(&mut *tx)
+        .await?;
+    }
 
     let provenance = if trusted_service {
         "prepared_service"
@@ -747,6 +792,17 @@ pub async fn list_studies(
         .collect())
 }
 
+async fn load_study_config(store: &Store, study_id: &str) -> Result<Option<PreparedStudyConfig>> {
+    let row = sqlx::query("SELECT language, count FROM study_configs WHERE study_id = $1")
+        .bind(study_id)
+        .fetch_optional(&store.db)
+        .await?;
+    Ok(row.map(|r| PreparedStudyConfig {
+        language: r.get("language"),
+        count: r.get("count"),
+    }))
+}
+
 pub async fn get_study(
     store: &Store,
     caller: &CallerIdentity,
@@ -764,11 +820,13 @@ pub async fn get_study(
         study.expires_at = Some(new_exp);
     }
     let sources = load_sources(store, study_id).await?;
+    let config = load_study_config(store, study_id).await?;
     let quota = quotas::meter_for_owner(store, &caller.user_id, &quotas.get()).await?;
     Ok(StudyDetail {
         study,
         sources,
         quota,
+        config,
     })
 }
 
@@ -833,6 +891,10 @@ pub async fn delete_study(store: &Store, caller: &CallerIdentity, study_id: &str
     .bind(study_id)
     .execute(&mut *tx)
     .await?;
+    sqlx::query("DELETE FROM study_configs WHERE study_id = $1")
+        .bind(study_id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM studies WHERE id = $1")
         .bind(study_id)
         .execute(&mut *tx)
