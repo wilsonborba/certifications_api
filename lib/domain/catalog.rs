@@ -1,7 +1,7 @@
 use crate::{
     core::{Error, Result, now},
     dal::{Store, new_id},
-    domain::auth::{CallerIdentity, require_owner},
+    domain::auth::{CallerIdentity, require_owner, require_owner_or_admin},
     domain::provenance::{QuestionProvenanceStats, question_provenance_stats},
 };
 use serde::{Deserialize, Serialize};
@@ -90,6 +90,7 @@ fn score_distribution_page(
     quiz_id: &str,
     rows: &[ScoreBandCount],
     language: &str,
+    visibility: &str,
 ) -> serde_json::Value {
     let (title, description, band_label, attempts_label, sample_definition) = match language {
         "pt-BR" => (
@@ -128,7 +129,7 @@ fn score_distribution_page(
             "filters": [],
             "data_tier": "live",
             "can_view": true,
-            "visibility": "public",
+            "visibility": visibility,
             "meta": {
                 "source":"Certifications API",
                 "tier":"live",
@@ -588,19 +589,12 @@ async fn load_quiz_tags(store: &Store, quiz_id: &str) -> Result<Vec<TagInfo>> {
         .collect())
 }
 
-pub async fn get_public_quiz_statistics(
+async fn calculate_quiz_statistics(
     store: &Store,
     quiz_id: &str,
     language: Option<&str>,
+    visibility: &str,
 ) -> Result<PublicQuizStats> {
-    let vis: Option<String> = sqlx::query_scalar("SELECT visibility FROM quizzes WHERE id = $1")
-        .bind(quiz_id)
-        .fetch_optional(&store.db)
-        .await?;
-    if vis.as_deref() != Some("public") {
-        return Err(Error::missing());
-    }
-
     let question_provenance = question_provenance_stats(store, "quiz", quiz_id).await?;
 
     let row = sqlx::query(
@@ -669,7 +663,7 @@ pub async fn get_public_quiz_statistics(
         }
     }
     let score_distribution_report_view =
-        score_distribution_page(quiz_id, &score_distribution, language);
+        score_distribution_page(quiz_id, &score_distribution, language, visibility);
 
     Ok(PublicQuizStats {
         quiz_id: quiz_id.to_string(),
@@ -685,6 +679,44 @@ pub async fn get_public_quiz_statistics(
         score_distribution_report_view,
         question_provenance,
     })
+}
+
+pub async fn get_public_quiz_statistics(
+    store: &Store,
+    quiz_id: &str,
+    language: Option<&str>,
+) -> Result<PublicQuizStats> {
+    let visibility: Option<String> =
+        sqlx::query_scalar("SELECT visibility FROM quizzes WHERE id = $1")
+            .bind(quiz_id)
+            .fetch_optional(&store.db)
+            .await?;
+    if visibility.as_deref() != Some("public") {
+        return Err(Error::missing());
+    }
+    calculate_quiz_statistics(store, quiz_id, language, "public").await
+}
+
+pub async fn get_owner_quiz_statistics(
+    store: &Store,
+    caller: &CallerIdentity,
+    quiz_id: &str,
+    language: Option<&str>,
+) -> Result<PublicQuizStats> {
+    let row = sqlx::query("SELECT owner_id, visibility FROM quizzes WHERE id = $1")
+        .bind(quiz_id)
+        .fetch_optional(&store.db)
+        .await?
+        .ok_or_else(Error::missing)?;
+    let owner_id: String = row.try_get("owner_id")?;
+    let visibility: String = row.try_get("visibility")?;
+    require_owner_or_admin(caller, &owner_id)?;
+    let report_visibility = if visibility == "public" {
+        "public"
+    } else {
+        "restricted"
+    };
+    calculate_quiz_statistics(store, quiz_id, language, report_visibility).await
 }
 
 pub async fn get_public_quiz(
