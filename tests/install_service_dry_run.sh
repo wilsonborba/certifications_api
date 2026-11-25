@@ -18,8 +18,10 @@ mkdir -p "$fixture/tests"
 cp -R "$repo/tests/sqlite" "$fixture/tests/sqlite"
 if [[ -d "$repo/.cargo" ]]; then cp -R "$repo/.cargo" "$fixture/.cargo"; fi
 if [[ -f "$repo/build.rs" ]]; then cp "$repo/build.rs" "$fixture/build.rs"; fi
-mkdir -p "$fixture/assets/fonts"
+mkdir -p "$fixture/assets/fonts" "$fixture/assets/branding" "$fixture/assets/templates"
 printf 'mock font bytes\n' > "$fixture/assets/fonts/IBMPlexSansThai-Regular.ttf"
+printf 'mock certificate branding bytes\n' > "$fixture/assets/branding/certificate-logo.svg"
+printf 'mock certificate template bytes\n' > "$fixture/assets/templates/certificate.json"
 chmod +x "$fixture/scripts/install_service.sh"
 printf 'space-sensitive build input\n' > "$fixture/lib/input file with spaces.txt"
 git -C "$fixture" init -q
@@ -101,6 +103,15 @@ output=$(cd "$caller" && PATH="$guard_path" "$fixture/scripts/install_service.sh
 [[ "$before" == "$(snapshot)" ]]
 [[ ! -e "$MUTATION_ATTEMPTS" ]]
 
+# Untracked prototypes and screenshots must not affect the package fingerprint.
+mkdir -p "$fixture/assets/branding/prototypes"
+printf 'untracked prototype screenshot bytes\n' > "$fixture/assets/branding/prototypes/sample-screenshot.png"
+before=$(snapshot)
+output=$(cd "$caller" && PATH="$guard_path" "$fixture/scripts/install_service.sh" --dry-run)
+[[ "$output" == *"passed read-only validation"* ]]
+[[ "$before" == "$(snapshot)" ]]
+[[ ! -e "$MUTATION_ATTEMPTS" ]]
+
 mv "$fixture/var/deploy" "$tmp/prepared-package"
 expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --check
 mv "$tmp/prepared-package" "$fixture/var/deploy"
@@ -134,10 +145,30 @@ expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service
 expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --check
 git -C "$fixture" checkout -- lib/main.rs
 
+source_code_hash=$(sha256sum "$fixture/lib/main.rs")
 printf 'font changed\n' >> "$fixture/assets/fonts/IBMPlexSansThai-Regular.ttf"
+[[ "$source_code_hash" == "$(sha256sum "$fixture/lib/main.rs")" ]]
 expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --dry-run
 expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --check
 git -C "$fixture" checkout -- assets/fonts/IBMPlexSansThai-Regular.ttf
+output=$(cd "$caller" && PATH="$guard_path" "$fixture/scripts/install_service.sh" --check)
+[[ "$output" == *"Prepared Rust package verified"* ]]
+
+printf 'branding changed\n' >> "$fixture/assets/branding/certificate-logo.svg"
+[[ "$source_code_hash" == "$(sha256sum "$fixture/lib/main.rs")" ]]
+expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --dry-run
+expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --check
+git -C "$fixture" checkout -- assets/branding/certificate-logo.svg
+output=$(cd "$caller" && PATH="$guard_path" "$fixture/scripts/install_service.sh" --check)
+[[ "$output" == *"Prepared Rust package verified"* ]]
+
+printf 'template changed\n' >> "$fixture/assets/templates/certificate.json"
+[[ "$source_code_hash" == "$(sha256sum "$fixture/lib/main.rs")" ]]
+expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --dry-run
+expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --check
+git -C "$fixture" checkout -- assets/templates/certificate.json
+output=$(cd "$caller" && PATH="$guard_path" "$fixture/scripts/install_service.sh" --check)
+[[ "$output" == *"Prepared Rust package verified"* ]]
 
 rm "$fixture/var/deploy/certifications-api"
 printf 'outside binary\n' > "$tmp/outside-binary"

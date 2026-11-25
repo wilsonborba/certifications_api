@@ -23,8 +23,8 @@ source_hash() {
   # with whitespace/newlines intact; pipefail propagates enumeration/read errors.
   (
     cd "$PROJECT_DIR"
-    git ls-files -co --exclude-standard -z -- \
-      Cargo.toml Cargo.lock build.rs .cargo assets/fonts lib migrations tests/sqlite scripts/install_service.sh |
+    git ls-files -c -z -- \
+      Cargo.toml Cargo.lock build.rs .cargo assets lib migrations tests/sqlite scripts/install_service.sh |
       LC_ALL=C sort -z | xargs -0 -r sha256sum
   ) | sha256sum | cut -d ' ' -f1
 }
