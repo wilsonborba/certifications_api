@@ -799,12 +799,8 @@ fn push_study_history_filters(
     query: &mut AnyQuery,
     caller: &CallerIdentity,
     ts: i64,
+    filter: &StudyHistoryFilter,
     search_pattern: Option<&str>,
-    created_from: Option<i64>,
-    created_to: Option<i64>,
-    status: Option<&str>,
-    quiz_id: Option<&str>,
-    tag: Option<&str>,
 ) {
     query
         .push(" WHERE s.owner_id = ")
@@ -822,27 +818,42 @@ fn push_study_history_filters(
             .push_bind_text(search_pattern.to_string())
             .push(r#" ESCAPE '\')"#);
     }
-    if let Some(created_from) = created_from {
+    if let Some(created_from) = filter.created_from {
         query
             .push(" AND s.created_at >= ")
             .push_bind_i64(created_from);
     }
-    if let Some(created_to) = created_to {
+    if let Some(created_to) = filter.created_to {
         query
             .push(" AND s.created_at <= ")
             .push_bind_i64(created_to);
     }
-    if let Some(status) = status {
+    if let Some(status) = filter
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         query
             .push(" AND s.status = ")
             .push_bind_text(status.to_string());
     }
-    if let Some(quiz_id) = quiz_id {
+    if let Some(quiz_id) = filter
+        .quiz_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         query
             .push(" AND s.quiz_id = ")
             .push_bind_text(quiz_id.to_string());
     }
-    if let Some(tag) = tag {
+    if let Some(tag) = filter
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         query
             .push(
                 " AND EXISTS (
@@ -898,16 +909,6 @@ pub async fn list_studies(
             "invalid_status: status must be draft, active, or expired",
         ));
     }
-    let quiz_id = filter
-        .quiz_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let tag = filter
-        .tag
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
     let limit = limit.clamp(1, MAX_PAGE_LIMIT);
     let offset = offset.max(0);
     let ts = now();
@@ -917,17 +918,7 @@ pub async fn list_studies(
          LEFT JOIN quizzes q ON q.id = s.quiz_id AND q.owner_id = s.owner_id
          LEFT JOIN quiz_versions qv ON qv.id = q.active_version_id",
     );
-    push_study_history_filters(
-        &mut count,
-        caller,
-        ts,
-        search_pattern.as_deref(),
-        filter.created_from,
-        filter.created_to,
-        status,
-        quiz_id,
-        tag,
-    );
+    push_study_history_filters(&mut count, caller, ts, filter, search_pattern.as_deref());
     let total: i64 = count.query().fetch_one(&store.db).await?.try_get(0)?;
 
     let tag_rows = sqlx::query(
@@ -961,17 +952,7 @@ pub async fn list_studies(
          LEFT JOIN quizzes q ON q.id = s.quiz_id AND q.owner_id = s.owner_id
          LEFT JOIN quiz_versions qv ON qv.id = q.active_version_id",
     );
-    push_study_history_filters(
-        &mut query,
-        caller,
-        ts,
-        search_pattern.as_deref(),
-        filter.created_from,
-        filter.created_to,
-        status,
-        quiz_id,
-        tag,
-    );
+    push_study_history_filters(&mut query, caller, ts, filter, search_pattern.as_deref());
     query
         .push(" ORDER BY s.updated_at DESC, s.id DESC LIMIT ")
         .push_bind_i64(limit)
