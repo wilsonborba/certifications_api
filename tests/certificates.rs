@@ -838,10 +838,22 @@ async fn certificate_multiline_wrapping_and_no_qr_overlap() {
     let ts = 1795600000;
 
     let pdf = certifications_api::domain::certificates::render_certificate_pdf(
-        holder, title, 95, 100, code, ts,
+        holder,
+        title,
+        95,
+        100,
+        code,
+        ts,
+        Some("th"),
     );
     let svg = certifications_api::domain::certificates::render_certificate_svg(
-        holder, title, 95, 100, code, ts,
+        holder,
+        title,
+        95,
+        100,
+        code,
+        ts,
+        Some("th"),
     );
 
     assert!(pdf.starts_with(b"%PDF-"));
@@ -862,4 +874,54 @@ async fn certificate_multiline_wrapping_and_no_qr_overlap() {
     assert!(svg_text.contains("แบบทดสอบทักษะ"));
     assert!(svg_text.contains("95/100"));
     assert!(svg_text.contains(code));
+    assert!(svg_text.contains("@font-face"));
+    assert!(svg_text.contains("IBMPlexSansThai"));
+    assert!(svg_text.contains("data:font/ttf;base64,"));
+}
+
+#[tokio::test]
+async fn certificate_deterministic_language_labels() {
+    let holder = "Maria Silva";
+    let title = "Safety Protocols";
+    let code = "ASODYA-TEST-LANG-5678";
+    let ts = 1795600000;
+
+    let en_svg = certifications_api::domain::certificates::render_certificate_svg(
+        holder,
+        title,
+        10,
+        10,
+        code,
+        ts,
+        Some("en"),
+    );
+    let en_text = String::from_utf8_lossy(&en_svg);
+    assert!(en_text.contains("Asodya Completion Certificate"));
+    assert!(en_text.contains("Holder:"));
+
+    let pt_svg = certifications_api::domain::certificates::render_certificate_svg(
+        holder,
+        title,
+        10,
+        10,
+        code,
+        ts,
+        Some("pt-BR"),
+    );
+    let pt_text = String::from_utf8_lossy(&pt_svg);
+    assert!(pt_text.contains("Certificado de Conclusão Asodya"));
+    assert!(pt_text.contains("Titular:"));
+
+    let th_svg = certifications_api::domain::certificates::render_certificate_svg(
+        holder,
+        title,
+        10,
+        10,
+        code,
+        ts,
+        Some("th"),
+    );
+    let th_text = String::from_utf8_lossy(&th_svg);
+    assert!(th_text.contains("ใบรับรองการสำเร็จการศึกษา Asodya"));
+    assert!(th_text.contains("ผู้รับใบรับรอง:"));
 }

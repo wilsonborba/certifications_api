@@ -171,15 +171,45 @@ struct CertLabels {
     verify_prefix: &'static str,
 }
 
-fn resolve_labels(holder_name: &str, quiz_title: &str) -> CertLabels {
-    let has_thai = holder_name
-        .chars()
-        .any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c))
-        || quiz_title
-            .chars()
-            .any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c));
-    if has_thai {
-        return CertLabels {
+fn to_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = if chunk.len() > 1 {
+            chunk[1] as usize
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            chunk[2] as usize
+        } else {
+            0
+        };
+        out.push(TABLE[b0 >> 2] as char);
+        out.push(TABLE[((b0 & 3) << 4) | (b1 >> 4)] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((b1 & 15) << 2) | (b2 >> 6)] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[b2 & 63] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+static REGULAR_FONT_BASE64: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| to_base64(REGULAR_FONT_BYTES));
+static BOLD_FONT_BASE64: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| to_base64(BOLD_FONT_BYTES));
+
+fn resolve_labels(language: Option<&str>) -> CertLabels {
+    match language.map(str::trim) {
+        Some("th") => CertLabels {
             cert_title: "ใบรับรองการสำเร็จการศึกษา Asodya",
             holder_prefix: "ผู้รับใบรับรอง",
             quiz_prefix: "แบบทดสอบ",
@@ -187,66 +217,8 @@ fn resolve_labels(holder_name: &str, quiz_title: &str) -> CertLabels {
             date_prefix: "วันที่ออก",
             code_prefix: "รหัสยืนยัน",
             verify_prefix: "ตรวจสอบได้ที่",
-        };
-    }
-
-    let has_pt = holder_name.chars().any(|c| {
-        matches!(
-            c,
-            'ã' | 'á'
-                | 'à'
-                | 'â'
-                | 'é'
-                | 'ê'
-                | 'í'
-                | 'ó'
-                | 'ô'
-                | 'õ'
-                | 'ú'
-                | 'ç'
-                | 'Ã'
-                | 'Á'
-                | 'À'
-                | 'Â'
-                | 'É'
-                | 'Ê'
-                | 'Í'
-                | 'Ó'
-                | 'Ô'
-                | 'Õ'
-                | 'Ú'
-                | 'Ç'
-        )
-    }) || quiz_title.chars().any(|c| {
-        matches!(
-            c,
-            'ã' | 'á'
-                | 'à'
-                | 'â'
-                | 'é'
-                | 'ê'
-                | 'í'
-                | 'ó'
-                | 'ô'
-                | 'õ'
-                | 'ú'
-                | 'ç'
-                | 'Ã'
-                | 'Á'
-                | 'À'
-                | 'Â'
-                | 'É'
-                | 'Ê'
-                | 'Í'
-                | 'Ó'
-                | 'Ô'
-                | 'Õ'
-                | 'Ú'
-                | 'Ç'
-        )
-    });
-    if has_pt {
-        return CertLabels {
+        },
+        Some("pt-BR") | Some("pt") => CertLabels {
             cert_title: "Certificado de Conclusão Asodya",
             holder_prefix: "Titular",
             quiz_prefix: "Questionário",
@@ -254,17 +226,16 @@ fn resolve_labels(holder_name: &str, quiz_title: &str) -> CertLabels {
             date_prefix: "Data",
             code_prefix: "Código de Verificação",
             verify_prefix: "Verifique em",
-        };
-    }
-
-    CertLabels {
-        cert_title: "Asodya Completion Certificate",
-        holder_prefix: "Holder",
-        quiz_prefix: "Quiz",
-        result_prefix: "Result",
-        date_prefix: "Date",
-        code_prefix: "Verification Code",
-        verify_prefix: "Verify at",
+        },
+        _ => CertLabels {
+            cert_title: "Asodya Completion Certificate",
+            holder_prefix: "Holder",
+            quiz_prefix: "Quiz",
+            result_prefix: "Result",
+            date_prefix: "Date",
+            code_prefix: "Verification Code",
+            verify_prefix: "Verify at",
+        },
     }
 }
 
@@ -303,10 +274,11 @@ pub fn render_certificate_pdf(
     score_total: i64,
     code: &str,
     issued_at: i64,
+    language: Option<&str>,
 ) -> Vec<u8> {
     let regular_font = Font::new(Data::from(REGULAR_FONT_BYTES), 0).expect("regular font");
     let bold_font = Font::new(Data::from(BOLD_FONT_BYTES), 0).expect("bold font");
-    let labels = resolve_labels(holder_name, quiz_title);
+    let labels = resolve_labels(language);
     let date_str = chrono::DateTime::from_timestamp(issued_at, 0)
         .map(|dt| dt.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "2026-11-25".to_string());
@@ -518,6 +490,7 @@ pub fn render_certificate_svg(
     score_total: i64,
     code: &str,
     issued_at: i64,
+    language: Option<&str>,
 ) -> Vec<u8> {
     let escape_xml = |s: &str| {
         s.replace('&', "&amp;")
@@ -526,7 +499,7 @@ pub fn render_certificate_svg(
             .replace('"', "&quot;")
             .replace('\'', "&apos;")
     };
-    let labels = resolve_labels(holder_name, quiz_title);
+    let labels = resolve_labels(language);
     let date_str = chrono::DateTime::from_timestamp(issued_at, 0)
         .map(|dt| dt.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "2026-11-25".to_string());
@@ -539,7 +512,7 @@ pub fn render_certificate_svg(
 
     // Title
     text_elements.push_str(&format!(
-        "<text x=\"{left_x}\" y=\"65\" font-size=\"22\" font-family=\"sans-serif\" font-weight=\"bold\" fill=\"#111827\">{}</text>\n",
+        "<text x=\"{left_x}\" y=\"65\" font-size=\"22\" font-family=\"'IBMPlexSansThai', 'Liberation Sans', sans-serif\" font-weight=\"bold\" fill=\"#111827\">{}</text>\n",
         escape_xml(labels.cert_title)
     ));
 
@@ -549,7 +522,7 @@ pub fn render_certificate_svg(
         let lines = break_lines(&full_text, max_text_width, 16.0 * 0.50);
         for line in lines {
             text_elements.push_str(&format!(
-                "<text x=\"{left_x}\" y=\"{:.1}\" font-size=\"16\" font-family=\"sans-serif\" fill=\"#374151\">{}</text>\n",
+                "<text x=\"{left_x}\" y=\"{:.1}\" font-size=\"16\" font-family=\"'IBMPlexSansThai', 'Liberation Sans', sans-serif\" fill=\"#374151\">{}</text>\n",
                 *y, escape_xml(&line)
             ));
             *y += 24.0;
@@ -613,11 +586,31 @@ pub fn render_certificate_svg(
 
     let svg = format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"800\" height=\"500\" viewBox=\"0 0 800 500\">\n\
+         <defs>\n\
+         <style>\n\
+         @font-face {{\n\
+           font-family: 'IBMPlexSansThai';\n\
+           font-weight: normal;\n\
+           font-style: normal;\n\
+           src: url('data:font/ttf;base64,{}') format('truetype');\n\
+         }}\n\
+         @font-face {{\n\
+           font-family: 'IBMPlexSansThai';\n\
+           font-weight: bold;\n\
+           font-style: normal;\n\
+           src: url('data:font/ttf;base64,{}') format('truetype');\n\
+         }}\n\
+         text {{\n\
+           font-family: 'IBMPlexSansThai', 'Liberation Sans', sans-serif;\n\
+         }}\n\
+         </style>\n\
+         </defs>\n\
          <rect x=\"15\" y=\"15\" width=\"770\" height=\"470\" rx=\"6\" fill=\"#ffffff\" stroke=\"#1f2937\" stroke-width=\"3\"/>\n\
          <rect x=\"22\" y=\"22\" width=\"756\" height=\"456\" rx=\"4\" fill=\"none\" stroke=\"#d1d5db\" stroke-width=\"1\"/>\n\
          {text_elements}\
          {qr_modules}\
-         </svg>"
+         </svg>",
+        *REGULAR_FONT_BASE64, *BOLD_FONT_BASE64
     );
     svg.into_bytes()
 }
@@ -710,9 +703,21 @@ pub async fn issue_or_get_certificate(
     let holder_id: String = holder.get("id");
     let holder_name: String = holder.get("display_name");
     let quiz_id: String = att.get("quiz_id");
+    let quiz_version_id: String = att.get("quiz_version_id");
     let quiz_title: String = att.get("quiz_title");
     let score_correct: i64 = att.get("score_correct");
     let score_total: i64 = att.get("score_total");
+
+    let quiz_language: Option<String> = sqlx::query_scalar(
+        "SELECT qver.language
+         FROM quiz_version_questions qvq
+         JOIN question_versions qver ON qver.id = qvq.question_version_id
+         WHERE qvq.quiz_version_id = $1
+         LIMIT 1",
+    )
+    .bind(&quiz_version_id)
+    .fetch_optional(&store.db)
+    .await?;
 
     let cert_id = new_id();
     let code = format!("ASODYA-{}", &new_id()[..12].to_uppercase());
@@ -724,6 +729,7 @@ pub async fn issue_or_get_certificate(
         score_total,
         &code,
         ts,
+        quiz_language.as_deref(),
     );
     let img_bytes = render_certificate_svg(
         &holder_name,
@@ -732,6 +738,7 @@ pub async fn issue_or_get_certificate(
         score_total,
         &code,
         ts,
+        quiz_language.as_deref(),
     );
 
     let pdf_ref = store
