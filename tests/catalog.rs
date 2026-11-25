@@ -1165,6 +1165,7 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
         report_view["template_definition"]["slots"][1]["accepted_types"][0],
         report_view["descriptor"]["fields"][1]["type"]
     );
+    assert!(report_view["descriptor"]["fields"][1].get("unit").is_none());
     assert_eq!(
         report_view["descriptor"]["meta"]["source"],
         "Certifications API"

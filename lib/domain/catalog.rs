@@ -126,7 +126,7 @@ fn score_distribution_page(
             "equation": null,
             "fields": [
                 {"name":"score_band", "label":band_label, "type":"string", "role":"dimension"},
-                {"name":"attempt_count", "label":attempts_label, "type":"integer", "role":"measure", "unit":"attempts"}
+                {"name":"attempt_count", "label":attempts_label, "type":"integer", "role":"measure"}
             ],
             "filters": [],
             "data_tier": "real",
