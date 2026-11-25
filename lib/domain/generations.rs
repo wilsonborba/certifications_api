@@ -595,7 +595,8 @@ pub async fn process_job(
             .execute(&mut *tx)
             .await?;
             sqlx::query(
-                "INSERT INTO quiz_version_questions(quiz_version_id, position, question_version_id) VALUES($1, $2, $3)",
+                "INSERT INTO quiz_version_questions(quiz_version_id, position, question_version_id, source_scope)
+                 VALUES($1, $2, $3, 'generated_from_current_selected_sources')",
             )
             .bind(&quiz_version_id)
             .bind(pos as i64)

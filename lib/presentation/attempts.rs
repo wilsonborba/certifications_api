@@ -2,7 +2,7 @@ use crate::{
     core::Result,
     domain::{
         App,
-        attempts::{self, ActivityEventInput},
+        attempts::{self, ActivityEventInput, AttemptHistoryFilter},
     },
     presentation::auth::SessionUser,
 };
@@ -19,6 +19,11 @@ use serde_json::{Value, json};
 struct ListParams {
     limit: Option<i64>,
     offset: Option<i64>,
+    q: Option<String>,
+    started_from: Option<i64>,
+    started_to: Option<i64>,
+    quiz_id: Option<String>,
+    tag: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -35,6 +40,7 @@ pub fn routes() -> Router<App> {
     Router::new()
         .route("/quizzes/{quiz_id}/attempts", post(start_attempt))
         .route("/attempts", get(list_attempts))
+        .route("/attempts/overview", get(get_personal_statistics))
         .route("/attempts/{attempt_id}", get(get_attempt))
         .route(
             "/attempts/{attempt_id}/answers/{question_id}",
@@ -59,14 +65,29 @@ async fn list_attempts(
     SessionUser(caller): SessionUser,
     Query(q): Query<ListParams>,
 ) -> Result<Json<Value>> {
-    let items = attempts::list_my_attempts(
+    let page = attempts::list_my_attempts(
         &app.store,
         &caller,
+        &AttemptHistoryFilter {
+            search: q.q,
+            started_from: q.started_from,
+            started_to: q.started_to,
+            quiz_id: q.quiz_id,
+            tag: q.tag,
+        },
         q.limit.unwrap_or(20),
         q.offset.unwrap_or(0),
     )
     .await?;
-    Ok(Json(json!({ "items": items })))
+    Ok(Json(json!(page)))
+}
+
+async fn get_personal_statistics(
+    State(app): State<App>,
+    SessionUser(caller): SessionUser,
+) -> Result<Json<Value>> {
+    let stats = attempts::personal_statistics(&app.store, &caller).await?;
+    Ok(Json(json!(stats)))
 }
 
 async fn get_attempt(

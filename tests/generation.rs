@@ -23,6 +23,7 @@ use certifications_api::{
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use sqlx::Row;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -336,6 +337,32 @@ async fn refresh_is_idempotent_second_active_job_blocked_and_stop_resume_requeue
         .await
         .unwrap();
     assert_eq!(vis, "private");
+    let generated_membership = sqlx::query(
+        "SELECT qvq.source_scope, qvq.origin_quiz_id, qvq.origin_quiz_version_id,
+                COUNT(qc.id) AS citation_count
+         FROM quizzes q
+         JOIN quiz_version_questions qvq ON qvq.quiz_version_id = q.active_version_id
+         LEFT JOIN question_citations qc ON qc.question_version_id = qvq.question_version_id
+         WHERE q.id = $1
+         GROUP BY qvq.source_scope, qvq.origin_quiz_id, qvq.origin_quiz_version_id",
+    )
+    .bind(&qid)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        generated_membership.get::<String, _>("source_scope"),
+        "generated_from_current_selected_sources"
+    );
+    assert_eq!(
+        generated_membership.get::<Option<String>, _>("origin_quiz_id"),
+        None
+    );
+    assert_eq!(
+        generated_membership.get::<Option<String>, _>("origin_quiz_version_id"),
+        None
+    );
+    assert_eq!(generated_membership.get::<i64, _>("citation_count"), 1);
 
     let sse_resp = app
         .clone()
