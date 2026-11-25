@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add public question version reuse flow ([`2803170`](https://github.com/wilsonborba/certifications_api/commit/2803170737704a5324171276599e3c6e681e6f36))
 - *(catalog)* Add bounded search projection rebuild (#49) ([`32e5037`](https://github.com/wilsonborba/certifications_api/commit/32e5037db366d3989c14a92306ef479db01d4ba4))
 - *(certifications)* Integrate explicit public question reuse (#49) ([`93e8a11`](https://github.com/wilsonborba/certifications_api/commit/93e8a1141ee5591937a97975005b7ec3b8c5d2ca))
+- *(studies)* Persist normalized prepared study config in study_configs table (#35) ([`87c79de`](https://github.com/wilsonborba/certifications_api/commit/87c79deb77d0b306cb8ede11cad950411f86ab9c))
+- *(studies)* Integrate durable prepared study configuration ([`19c442c`](https://github.com/wilsonborba/certifications_api/commit/19c442cc99ffcc5b95fb60969d0f8340e51c5849))
+- Authorize private quiz statistics ([`60b90c1`](https://github.com/wilsonborba/certifications_api/commit/60b90c11eb1f3347e554ff929201c3a64a81c19f))
+- Paginate and filter study history ([`4fc2ddc`](https://github.com/wilsonborba/certifications_api/commit/4fc2ddcd57ccfb2063e8d30780e1ea0a9cb70ff6))
 
 ### 🐛 Bug Fixes
 
@@ -52,6 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(certifications)* Hide private citation in reused quiz results ([`b596ba7`](https://github.com/wilsonborba/certifications_api/commit/b596ba7be2b1cc0301a89cda050b0597afa3be4a))
 - *(catalog)* Retain rebuild cursor on batch failure (#49) ([`33890b0`](https://github.com/wilsonborba/certifications_api/commit/33890b094951e7821aa054ce2d8b9dea0d1bb443))
 - Pin unicode normalization version ([`89c4286`](https://github.com/wilsonborba/certifications_api/commit/89c428602514f76cd3cd0f99f3cd9472fbf8ad67))
+- *(certifications)* Use PostgreSQL compatible any binds ([`7607d49`](https://github.com/wilsonborba/certifications_api/commit/7607d49e792463efb97727e60340c36ac20d1e23))
+- *(database)* Integrate portable Any queries and study history ([`def0a96`](https://github.com/wilsonborba/certifications_api/commit/def0a965b30cfe1ed4dbf4128fd8b4a37ada4e0d))
 
 ### 💼 Other Changes
 
@@ -85,15 +91,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 🚜 Refactor
 
 - *(shared)* Drop legacy local plans/waitlist/tickets tables in favor of central api_for_apps (#28, #34) ([`a1ba25c`](https://github.com/wilsonborba/certifications_api/commit/a1ba25cc762a293b51fdc2e31480c63897ebb7bb))
+- *(studies)* Bundle history filter arguments ([`b0d7626`](https://github.com/wilsonborba/certifications_api/commit/b0d7626f242ee6ccbbc5b9280387b6bb6d88c1c6))
+- *(studies)* Integrate shared history filter parameters ([`c6ae716`](https://github.com/wilsonborba/certifications_api/commit/c6ae71696f50154f88147f625ca427ea62d982f0))
 
 ### 📚 Documentation
 
 - *(changelog)* Record source authorization and selection fixes ([`233ac47`](https://github.com/wilsonborba/certifications_api/commit/233ac478f41aa362e2479e385599c3b4dc08c1fb))
 - *(changelog)* Record history and statistics integration ([`264aba1`](https://github.com/wilsonborba/certifications_api/commit/264aba1148c480e9d5cf27cd3966103d7d1beddb))
+- *(changelog)* Record public question reuse integration ([`433e4e1`](https://github.com/wilsonborba/certifications_api/commit/433e4e1b1033682ae8c8549af61643df48d4524e))
 
 ### 🎨 Styling
 
 - *(certifications_api#47)* Run cargo fmt ([`38189ac`](https://github.com/wilsonborba/certifications_api/commit/38189ac904c9669b91e795d0a0e407113722d126))
+
+### 🧪 Testing
+
+- Keep PostgreSQL fixture identity portable ([`d161e34`](https://github.com/wilsonborba/certifications_api/commit/d161e3436491519465cb15e01a4cbe1f2c2c3bbf))
 
 ### ⚙️ Miscellaneous Tasks
 
