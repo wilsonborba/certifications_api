@@ -99,6 +99,33 @@ output=$(cd "$caller" && PATH="$guard_path" "$fixture/scripts/install_service.sh
 [[ "$before" == "$(snapshot)" ]]
 [[ ! -e "$MUTATION_ATTEMPTS" ]]
 
+mv "$fixture/var/deploy" "$tmp/prepared-package"
+expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --check
+mv "$tmp/prepared-package" "$fixture/var/deploy"
+chmod 700 "$fixture/var/deploy"
+expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --check
+chmod 755 "$fixture/var/deploy"
+
+# A self-consistent checksum manifest cannot make a unit that points elsewhere
+# valid; the package contract also binds WorkingDirectory and ExecStart.
+cat > "$fixture/var/deploy/certifications-api.service" <<UNIT
+[Service]
+WorkingDirectory=$fixture
+ExecStart=$tmp/not-the-prepared-binary
+UNIT
+chmod 644 "$fixture/var/deploy/certifications-api.service"
+(cd "$fixture/var/deploy" && sha256sum certifications-api certifications-api.service > artifacts.sha256)
+chmod 644 "$fixture/var/deploy/artifacts.sha256"
+expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --check
+cat > "$fixture/var/deploy/certifications-api.service" <<UNIT
+[Service]
+WorkingDirectory=$fixture
+ExecStart=$fixture/var/deploy/certifications-api
+UNIT
+chmod 644 "$fixture/var/deploy/certifications-api.service"
+(cd "$fixture/var/deploy" && sha256sum certifications-api certifications-api.service > artifacts.sha256)
+chmod 644 "$fixture/var/deploy/artifacts.sha256"
+
 # Source and package validation failures remain read-only.
 printf 'source changed\n' >> "$fixture/lib/main.rs"
 expect_readonly_failure env PATH="$guard_path" "$fixture/scripts/install_service.sh" --dry-run
