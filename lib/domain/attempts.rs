@@ -664,7 +664,25 @@ pub async fn record_activity_events(
     Ok(inserted)
 }
 
-pub async fn load_activity_summary(store: &Store, attempt_id: &str) -> Result<ActivitySummary> {
+pub fn resolve_disclaimer(language: Option<&str>) -> &'static str {
+    match language.map(str::trim) {
+        Some(l) if l.starts_with("th") => {
+            "สรุปวงจรชีวิตของเบราว์เซอร์ที่สังเกตได้เท่านั้น การไม่มีเหตุการณ์หรือการมีสิ่งรบกวนไม่ใช่คำตัดสินว่ามีการทุจริต"
+        }
+        Some(l) if l.starts_with("pt") => {
+            "Resumo do ciclo de vida do navegador observado apenas; a ausência de eventos ou a presença de interrupções não é um veredito de fraude."
+        }
+        _ => {
+            "Observed browser lifecycle summary only; absence of events or presence of interruptions is not a cheating verdict."
+        }
+    }
+}
+
+pub async fn load_activity_summary(
+    store: &Store,
+    attempt_id: &str,
+    language: Option<&str>,
+) -> Result<ActivitySummary> {
     let rows = sqlx::query(
         "SELECT id, event_kind, duration_ms, occurred_at
          FROM attempt_activity_events
@@ -722,7 +740,7 @@ pub async fn load_activity_summary(store: &Store, attempt_id: &str) -> Result<Ac
         refresh_count,
         unknown_gap_count,
         completeness: completeness.into(),
-        disclaimer: "Observed browser lifecycle summary only; absence of events or presence of interruptions is not a cheating verdict.".into(),
+        disclaimer: resolve_disclaimer(language).into(),
         events,
     })
 }
@@ -816,7 +834,7 @@ pub async fn submit_attempt(
     .await?;
     tx.commit().await?;
 
-    let activity = load_activity_summary(store, attempt_id).await?;
+    let activity = load_activity_summary(store, attempt_id, None).await?;
     let _ = ensure_attempt_stats_schema(store).await;
     let doc_id = new_id();
     let stats_payload = json!({
@@ -943,7 +961,8 @@ pub async fn get_results(
         supplied_by_creator: make_stats_group(creator_correct, creator_total),
         overall: make_stats_group(score_correct, score_total),
     };
-    let activity_summary = load_activity_summary(store, attempt_id).await?;
+    let quiz_lang = questions.first().map(|q| q.language.as_str());
+    let activity_summary = load_activity_summary(store, attempt_id, quiz_lang).await?;
 
     Ok(AttemptResults {
         id: row.get("id"),

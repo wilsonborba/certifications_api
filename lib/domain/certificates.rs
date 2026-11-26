@@ -7,8 +7,19 @@ use crate::{
         authoring::ORIGIN_CREATOR,
     },
 };
+use icu_segmenter::LineSegmenter;
+use krilla::color::rgb;
+use krilla::geom::{PathBuilder, Point};
+use krilla::page::PageSettings;
+use krilla::paint::{Fill, Stroke};
+use krilla::text::{Font, TextDirection};
+use krilla::{Data, Document};
 use serde::Serialize;
 use sqlx::Row;
+
+const REGULAR_FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/IBMPlexSansThai-Regular.ttf");
+const BOLD_FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/IBMPlexSansThai-Bold.ttf");
+pub const ASODYA_LOGO_BYTES: &[u8] = include_bytes!("../../assets/asodya_logo.png");
 
 #[derive(Clone, Debug, Serialize)]
 pub struct HolderIdentity {
@@ -151,64 +162,606 @@ pub async fn admin_update_holder(
     })
 }
 
-fn escape_pdf_text(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('(', "\\(")
-        .replace(')', "\\)")
+struct CertLabels {
+    cert_title: &'static str,
+    holder_prefix: &'static str,
+    quiz_prefix: &'static str,
+    result_prefix: &'static str,
+    date_prefix: &'static str,
+    code_prefix: &'static str,
+    verify_prefix: &'static str,
 }
 
-fn render_certificate_pdf(
+fn to_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = if chunk.len() > 1 {
+            chunk[1] as usize
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            chunk[2] as usize
+        } else {
+            0
+        };
+        out.push(TABLE[b0 >> 2] as char);
+        out.push(TABLE[((b0 & 3) << 4) | (b1 >> 4)] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((b1 & 15) << 2) | (b2 >> 6)] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[b2 & 63] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+static REGULAR_FONT_BASE64: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| to_base64(REGULAR_FONT_BYTES));
+static BOLD_FONT_BASE64: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| to_base64(BOLD_FONT_BYTES));
+static LOGO_BASE64: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| to_base64(ASODYA_LOGO_BYTES));
+
+fn resolve_labels(language: Option<&str>) -> CertLabels {
+    match language.map(str::trim) {
+        Some("th") => CertLabels {
+            cert_title: "ใบรับรองการสำเร็จการศึกษา Asodya",
+            holder_prefix: "ผู้รับใบรับรอง",
+            quiz_prefix: "แบบทดสอบ",
+            result_prefix: "ผลคะแนน",
+            date_prefix: "วันที่ออก",
+            code_prefix: "รหัสยืนยัน",
+            verify_prefix: "ตรวจสอบได้ที่",
+        },
+        Some("pt-BR") | Some("pt") => CertLabels {
+            cert_title: "Certificado de Conclusão Asodya",
+            holder_prefix: "Titular",
+            quiz_prefix: "Questionário",
+            result_prefix: "Resultado",
+            date_prefix: "Data",
+            code_prefix: "Código de Verificação",
+            verify_prefix: "Verifique em",
+        },
+        _ => CertLabels {
+            cert_title: "Asodya Completion Certificate",
+            holder_prefix: "Holder",
+            quiz_prefix: "Quiz",
+            result_prefix: "Result",
+            date_prefix: "Date",
+            code_prefix: "Verification Code",
+            verify_prefix: "Verify at",
+        },
+    }
+}
+
+fn measure_str_width(face: &ttf_parser::Face<'_>, text: &str, font_size: f32) -> f32 {
+    let upem = face.units_per_em() as f32;
+    let mut total_advance = 0.0f32;
+    for c in text.chars() {
+        let adv = face
+            .glyph_index(c)
+            .and_then(|gid| face.glyph_hor_advance(gid))
+            .unwrap_or(face.units_per_em() / 2) as f32;
+        total_advance += adv;
+    }
+    (total_advance / upem) * font_size
+}
+
+fn break_lines(
+    text: &str,
+    max_width: f32,
+    font_bytes: &[u8],
+    font_size: f32,
+    max_lines: usize,
+) -> Vec<String> {
+    let face = ttf_parser::Face::parse(font_bytes, 0).expect("valid font bytes");
+    let line_segmenter = LineSegmenter::new_auto(Default::default());
+    let grapheme_segmenter = icu_segmenter::GraphemeClusterSegmenter::new();
+
+    let mut lines = Vec::new();
+    for para in text.split('\n') {
+        let breaks: Vec<usize> = line_segmenter.segment_str(para).collect();
+        let mut current = String::new();
+        let mut current_width = 0.0f32;
+        let mut prev = 0usize;
+
+        for &b in &breaks {
+            if b <= prev {
+                continue;
+            }
+            let seg = &para[prev..b];
+            let seg_width = measure_str_width(&face, seg, font_size);
+
+            if current_width + seg_width <= max_width {
+                current.push_str(seg);
+                current_width += seg_width;
+            } else if seg_width <= max_width {
+                let trimmed = current.trim_end();
+                if !trimmed.is_empty() {
+                    lines.push(trimmed.to_string());
+                }
+                current = seg.to_string();
+                current_width = seg_width;
+            } else {
+                // Emergency grapheme-aware wrap for long unbroken runs:
+                let g_breaks: Vec<usize> = grapheme_segmenter.segment_str(seg).collect();
+                let mut g_prev = 0usize;
+                for &gb in &g_breaks {
+                    if gb <= g_prev {
+                        continue;
+                    }
+                    let grapheme = &seg[g_prev..gb];
+                    let g_width = measure_str_width(&face, grapheme, font_size);
+                    if !current.is_empty() && current_width + g_width > max_width {
+                        let trimmed = current.trim_end();
+                        if !trimmed.is_empty() {
+                            lines.push(trimmed.to_string());
+                        }
+                        current.clear();
+                        current_width = 0.0;
+                    }
+                    current.push_str(grapheme);
+                    current_width += g_width;
+                    g_prev = gb;
+                }
+            }
+            prev = b;
+        }
+
+        let trimmed = current.trim_end();
+        if !trimmed.is_empty() || (para.is_empty() && lines.is_empty()) {
+            lines.push(trimmed.to_string());
+        }
+    }
+
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        if let Some(last) = lines.last_mut() {
+            let ellipsis = "…";
+            let ell_w = measure_str_width(&face, ellipsis, font_size);
+            while !last.is_empty() && measure_str_width(&face, last, font_size) + ell_w > max_width
+            {
+                last.pop();
+            }
+            last.push_str(ellipsis);
+        }
+    }
+
+    lines
+}
+
+pub fn render_certificate_pdf(
     holder_name: &str,
     quiz_title: &str,
     score_correct: i64,
     score_total: i64,
     code: &str,
+    issued_at: i64,
+    language: Option<&str>,
 ) -> Vec<u8> {
-    let line1 = escape_pdf_text(&format!("Asodya Completion Certificate ({code})"));
-    let line2 = escape_pdf_text(&format!("Holder: {holder_name}"));
-    let line3 = escape_pdf_text(&format!("Quiz: {quiz_title}"));
-    let line4 = escape_pdf_text(&format!("Score: {score_correct}/{score_total}"));
-    let stream = format!(
-        "BT /F1 14 Tf 50 740 Td ({line1}) Tj 0 -24 Td ({line2}) Tj 0 -24 Td ({line3}) Tj 0 -24 Td ({line4}) Tj ET"
+    let regular_font = Font::new(Data::from(REGULAR_FONT_BYTES), 0).expect("regular font");
+    let bold_font = Font::new(Data::from(BOLD_FONT_BYTES), 0).expect("bold font");
+    let labels = resolve_labels(language);
+    let date_str = chrono::DateTime::from_timestamp(issued_at, 0)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "2026-11-25".to_string());
+    let verification_url = format!("https://certifications.asodya.com/certificates/{code}");
+
+    let width = 800.0f32;
+    let height = 500.0f32;
+    let mut doc = Document::new();
+    let page_settings = PageSettings::from_wh(width, height).expect("page settings");
+    let mut page = doc.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    // Background & Outer Border
+    let mut pb = PathBuilder::new();
+    pb.move_to(15.0, 15.0);
+    pb.line_to(width - 15.0, 15.0);
+    pb.line_to(width - 15.0, height - 15.0);
+    pb.line_to(15.0, height - 15.0);
+    pb.close();
+    if let Some(path) = pb.finish() {
+        surface.set_fill(Some(Fill {
+            paint: rgb::Color::new(255, 255, 255).into(),
+            ..Default::default()
+        }));
+        surface.set_stroke(Some(Stroke {
+            paint: rgb::Color::new(107, 33, 168).into(),
+            width: 3.0,
+            ..Default::default()
+        }));
+        surface.draw_path(&path);
+    }
+
+    // Inner subtle border
+    let mut ib = PathBuilder::new();
+    ib.move_to(22.0, 22.0);
+    ib.line_to(width - 22.0, 22.0);
+    ib.line_to(width - 22.0, height - 22.0);
+    ib.line_to(22.0, height - 22.0);
+    ib.close();
+    if let Some(path) = ib.finish() {
+        surface.set_fill(None);
+        surface.set_stroke(Some(Stroke {
+            paint: rgb::Color::new(233, 213, 255).into(),
+            width: 1.0,
+            ..Default::default()
+        }));
+        surface.draw_path(&path);
+    }
+
+    // Asodya Logo (top-left)
+    if let Ok(logo_img) = krilla::image::Image::from_png(Data::from(ASODYA_LOGO_BYTES), true) {
+        surface.push_transform(&krilla::geom::Transform::from_translate(48.0, 36.0));
+        if let Some(logo_size) = krilla::geom::Size::from_wh(42.0, 42.0) {
+            surface.draw_image(logo_img, logo_size);
+        }
+        surface.pop();
+    }
+
+    // Brand Header "ASODYA"
+    surface.set_fill(Some(Fill {
+        paint: rgb::Color::new(107, 33, 168).into(),
+        ..Default::default()
+    }));
+    surface.set_stroke(None);
+    surface.draw_text(
+        Point::from_xy(98.0, 62.0),
+        bold_font.clone(),
+        18.0,
+        "ASODYA",
+        false,
+        TextDirection::Auto,
     );
-    let pdf = format!(
-        "%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
-         2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
-         3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj\n\
-         4 0 obj << /Length {} >> stream\n{stream}\nendstream endobj\n\
-         5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n\
-         trailer << /Root 1 0 R >>\n%%EOF\n",
-        stream.len()
+
+    let left_x = 48.0f32;
+    let max_text_width = 470.0f32;
+
+    // Title
+    surface.set_fill(Some(Fill {
+        paint: rgb::Color::new(88, 28, 135).into(),
+        ..Default::default()
+    }));
+    surface.set_stroke(None);
+    surface.draw_text(
+        Point::from_xy(left_x, 108.0),
+        bold_font.clone(),
+        20.0,
+        labels.cert_title,
+        false,
+        TextDirection::Auto,
     );
-    pdf.into_bytes()
+
+    let mut current_y = 138.0f32;
+    let max_usable_y = 465.0f32;
+    let line_height = 20.0f32;
+
+    let draw_field = |surface: &mut krilla::surface::Surface<'_>,
+                      label: &str,
+                      value: &str,
+                      y: &mut f32,
+                      max_lines: usize| {
+        let full_text = format!("{label}: {value}");
+        let lines = break_lines(
+            &full_text,
+            max_text_width,
+            REGULAR_FONT_BYTES,
+            15.0,
+            max_lines,
+        );
+        for line in lines {
+            if *y > max_usable_y {
+                break;
+            }
+            surface.set_fill(Some(Fill {
+                paint: rgb::Color::new(55, 65, 81).into(),
+                ..Default::default()
+            }));
+            surface.set_stroke(None);
+            surface.draw_text(
+                Point::from_xy(left_x, *y),
+                regular_font.clone(),
+                15.0,
+                &line,
+                false,
+                TextDirection::Auto,
+            );
+            *y += line_height;
+        }
+        *y += 5.0;
+    };
+
+    draw_field(
+        &mut surface,
+        labels.holder_prefix,
+        holder_name,
+        &mut current_y,
+        4,
+    );
+    draw_field(
+        &mut surface,
+        labels.quiz_prefix,
+        quiz_title,
+        &mut current_y,
+        4,
+    );
+
+    let score_str = format!("{score_correct}/{score_total}");
+    draw_field(
+        &mut surface,
+        labels.result_prefix,
+        &score_str,
+        &mut current_y,
+        1,
+    );
+    draw_field(
+        &mut surface,
+        labels.date_prefix,
+        &date_str,
+        &mut current_y,
+        1,
+    );
+
+    if current_y <= max_usable_y {
+        current_y += 5.0;
+        let code_line = format!("{}: {code}", labels.code_prefix);
+        surface.set_fill(Some(Fill {
+            paint: rgb::Color::new(31, 41, 55).into(),
+            ..Default::default()
+        }));
+        surface.set_stroke(None);
+        surface.draw_text(
+            Point::from_xy(left_x, current_y),
+            bold_font.clone(),
+            14.0,
+            &code_line,
+            false,
+            TextDirection::Auto,
+        );
+        current_y += 18.0;
+    }
+
+    if current_y <= max_usable_y {
+        let url_line = format!("{}: {verification_url}", labels.verify_prefix);
+        let url_lines = break_lines(&url_line, max_text_width, REGULAR_FONT_BYTES, 12.0, 2);
+        for uline in url_lines {
+            if current_y > max_usable_y {
+                break;
+            }
+            surface.set_fill(Some(Fill {
+                paint: rgb::Color::new(107, 114, 128).into(),
+                ..Default::default()
+            }));
+            surface.set_stroke(None);
+            surface.draw_text(
+                Point::from_xy(left_x, current_y),
+                regular_font.clone(),
+                12.0,
+                &uline,
+                false,
+                TextDirection::Auto,
+            );
+            current_y += 15.0;
+        }
+    }
+
+    // QR Code on the right half (x = 550, y = 110)
+    if let Ok(qr) = qrcode::QrCode::new(verification_url.as_bytes()) {
+        let qr_width = qr.width();
+        let colors = qr.to_colors();
+        let module_size = 4.0f32;
+        let quiet = 4;
+        let total_modules = qr_width + quiet * 2;
+        let total_size = (total_modules as f32) * module_size;
+        let qr_x = 550.0f32;
+        let qr_y = 110.0f32;
+
+        let mut qb = PathBuilder::new();
+        qb.move_to(qr_x, qr_y);
+        qb.line_to(qr_x + total_size, qr_y);
+        qb.line_to(qr_x + total_size, qr_y + total_size);
+        qb.line_to(qr_x, qr_y + total_size);
+        qb.close();
+        if let Some(qpath) = qb.finish() {
+            surface.set_fill(Some(Fill {
+                paint: rgb::Color::new(255, 255, 255).into(),
+                ..Default::default()
+            }));
+            surface.set_stroke(Some(Stroke {
+                paint: rgb::Color::new(229, 231, 235).into(),
+                width: 1.0,
+                ..Default::default()
+            }));
+            surface.draw_path(&qpath);
+        }
+
+        for y in 0..qr_width {
+            for x in 0..qr_width {
+                if colors[y * qr_width + x] == qrcode::Color::Dark {
+                    let mx = qr_x + ((x + quiet) as f32) * module_size;
+                    let my = qr_y + ((y + quiet) as f32) * module_size;
+                    let mut mb = PathBuilder::new();
+                    mb.move_to(mx, my);
+                    mb.line_to(mx + module_size, my);
+                    mb.line_to(mx + module_size, my + module_size);
+                    mb.line_to(mx, my + module_size);
+                    mb.close();
+                    if let Some(mpath) = mb.finish() {
+                        surface.set_fill(Some(Fill {
+                            paint: rgb::Color::new(0, 0, 0).into(),
+                            ..Default::default()
+                        }));
+                        surface.set_stroke(None);
+                        surface.draw_path(&mpath);
+                    }
+                }
+            }
+        }
+    }
+
+    surface.finish();
+    page.finish();
+    doc.finish().expect("finish pdf")
 }
 
-fn render_certificate_svg(
+pub fn render_certificate_svg(
     holder_name: &str,
     quiz_title: &str,
     score_correct: i64,
     score_total: i64,
     code: &str,
+    issued_at: i64,
+    language: Option<&str>,
 ) -> Vec<u8> {
     let escape_xml = |s: &str| {
         s.replace('&', "&amp;")
             .replace('<', "&lt;")
             .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;")
     };
+    let labels = resolve_labels(language);
+    let date_str = chrono::DateTime::from_timestamp(issued_at, 0)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "2026-11-25".to_string());
+    let verification_url = format!("https://certifications.asodya.com/certificates/{code}");
+
+    let left_x = 48;
+    let max_text_width = 470.0f32;
+
+    let mut text_elements = String::new();
+
+    // Title
+    text_elements.push_str(&format!(
+        "<text x=\"{left_x}\" y=\"108\" font-size=\"20\" font-family=\"'IBMPlexSansThai', 'Liberation Sans', sans-serif\" font-weight=\"bold\" fill=\"#581C87\">{}</text>\n",
+        escape_xml(labels.cert_title)
+    ));
+
+    let mut current_y = 138.0f32;
+    let max_usable_y = 465.0f32;
+    let line_height = 20.0f32;
+
+    let mut add_field = |label: &str, value: &str, y: &mut f32, max_lines: usize| {
+        let full_text = format!("{label}: {value}");
+        let lines = break_lines(
+            &full_text,
+            max_text_width,
+            REGULAR_FONT_BYTES,
+            15.0,
+            max_lines,
+        );
+        for line in lines {
+            if *y > max_usable_y {
+                break;
+            }
+            text_elements.push_str(&format!(
+                "<text x=\"{left_x}\" y=\"{:.1}\" font-size=\"15\" font-family=\"'IBMPlexSansThai', 'Liberation Sans', sans-serif\" fill=\"#374151\">{}</text>\n",
+                *y, escape_xml(&line)
+            ));
+            *y += line_height;
+        }
+        *y += 5.0;
+    };
+
+    add_field(labels.holder_prefix, holder_name, &mut current_y, 4);
+    add_field(labels.quiz_prefix, quiz_title, &mut current_y, 4);
+    let score_str = format!("{score_correct}/{score_total}");
+    add_field(labels.result_prefix, &score_str, &mut current_y, 1);
+    add_field(labels.date_prefix, &date_str, &mut current_y, 1);
+
+    if current_y <= max_usable_y {
+        current_y += 5.0;
+        let code_line = format!("{}: {code}", labels.code_prefix);
+        text_elements.push_str(&format!(
+            "<text x=\"{left_x}\" y=\"{:.1}\" font-size=\"14\" font-family=\"'IBMPlexSansThai', monospace\" font-weight=\"bold\" fill=\"#1f2937\">{}</text>\n",
+            current_y, escape_xml(&code_line)
+        ));
+        current_y += 18.0;
+    }
+
+    if current_y <= max_usable_y {
+        let url_line = format!("{}: {verification_url}", labels.verify_prefix);
+        let url_lines = break_lines(&url_line, max_text_width, REGULAR_FONT_BYTES, 12.0, 2);
+        for uline in url_lines {
+            if current_y > max_usable_y {
+                break;
+            }
+            text_elements.push_str(&format!(
+                "<text x=\"{left_x}\" y=\"{:.1}\" font-size=\"12\" font-family=\"'IBMPlexSansThai', monospace\" fill=\"#6b7280\">{}</text>\n",
+                current_y, escape_xml(&uline)
+            ));
+            current_y += 15.0;
+        }
+    }
+
+    // QR modules
+    let mut qr_modules = String::new();
+    if let Ok(qr) = qrcode::QrCode::new(verification_url.as_bytes()) {
+        let qr_width = qr.width();
+        let colors = qr.to_colors();
+        let module_size = 4;
+        let quiet = 4;
+        let total_size = (qr_width + quiet * 2) * module_size;
+        let qr_x = 550;
+        let qr_y = 110;
+
+        qr_modules.push_str(&format!(
+            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#ffffff\" stroke=\"#e5e7eb\" stroke-width=\"1\"/>\n",
+            qr_x, qr_y, total_size, total_size
+        ));
+        qr_modules.push_str("<g id=\"qr-code\">\n");
+        for y in 0..qr_width {
+            for x in 0..qr_width {
+                if colors[y * qr_width + x] == qrcode::Color::Dark {
+                    let px = qr_x + (x + quiet) * module_size;
+                    let py = qr_y + (y + quiet) * module_size;
+                    qr_modules.push_str(&format!(
+                        "<rect x=\"{px}\" y=\"{py}\" width=\"{module_size}\" height=\"{module_size}\" fill=\"#000000\"/>\n"
+                    ));
+                }
+            }
+        }
+        qr_modules.push_str("</g>\n");
+    }
+
     let svg = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"800\" height=\"500\">\
-         <rect width=\"800\" height=\"500\" fill=\"#ffffff\" stroke=\"#1f2937\" stroke-width=\"4\"/>\
-         <text x=\"40\" y=\"70\" font-size=\"28\" font-family=\"sans-serif\">Asodya Completion Certificate</text>\
-         <text x=\"40\" y=\"130\" font-size=\"22\" font-family=\"sans-serif\">Holder: {}</text>\
-         <text x=\"40\" y=\"180\" font-size=\"20\" font-family=\"sans-serif\">Quiz: {}</text>\
-         <text x=\"40\" y=\"230\" font-size=\"20\" font-family=\"sans-serif\">Result: {}/{}</text>\
-         <text x=\"40\" y=\"280\" font-size=\"16\" font-family=\"monospace\">Verification Code: {}</text>\
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"800\" height=\"500\" viewBox=\"0 0 800 500\">\n\
+         <defs>\n\
+         <style>\n\
+         @font-face {{\n\
+           font-family: 'IBMPlexSansThai';\n\
+           font-weight: normal;\n\
+           font-style: normal;\n\
+           src: url('data:font/ttf;base64,{}') format('truetype');\n\
+         }}\n\
+         @font-face {{\n\
+           font-family: 'IBMPlexSansThai';\n\
+           font-weight: bold;\n\
+           font-style: normal;\n\
+           src: url('data:font/ttf;base64,{}') format('truetype');\n\
+         }}\n\
+         text {{\n\
+           font-family: 'IBMPlexSansThai', 'Liberation Sans', sans-serif;\n\
+         }}\n\
+         </style>\n\
+         </defs>\n\
+         <rect x=\"15\" y=\"15\" width=\"770\" height=\"470\" rx=\"6\" fill=\"#ffffff\" stroke=\"#6B21A8\" stroke-width=\"3\"/>\n\
+         <rect x=\"22\" y=\"22\" width=\"756\" height=\"456\" rx=\"4\" fill=\"none\" stroke=\"#E9D5FF\" stroke-width=\"1\"/>\n\
+         <image href=\"data:image/png;base64,{}\" x=\"48\" y=\"36\" width=\"42\" height=\"42\"/>\n\
+         <text x=\"98\" y=\"62\" font-size=\"18\" font-family=\"'IBMPlexSansThai', 'Liberation Sans', sans-serif\" font-weight=\"bold\" fill=\"#6B21A8\">ASODYA</text>\n\
+         {text_elements}\
+         {qr_modules}\
          </svg>",
-        escape_xml(holder_name),
-        escape_xml(quiz_title),
-        score_correct,
-        score_total,
-        escape_xml(code)
+        *REGULAR_FONT_BASE64, *BOLD_FONT_BASE64, *LOGO_BASE64
     );
     svg.into_bytes()
 }
@@ -301,16 +854,43 @@ pub async fn issue_or_get_certificate(
     let holder_id: String = holder.get("id");
     let holder_name: String = holder.get("display_name");
     let quiz_id: String = att.get("quiz_id");
+    let quiz_version_id: String = att.get("quiz_version_id");
     let quiz_title: String = att.get("quiz_title");
     let score_correct: i64 = att.get("score_correct");
     let score_total: i64 = att.get("score_total");
 
+    let quiz_language: Option<String> = sqlx::query_scalar(
+        "SELECT qver.language
+         FROM quiz_version_questions qvq
+         JOIN question_versions qver ON qver.id = qvq.question_version_id
+         WHERE qvq.quiz_version_id = $1
+         LIMIT 1",
+    )
+    .bind(&quiz_version_id)
+    .fetch_optional(&store.db)
+    .await?;
+
     let cert_id = new_id();
     let code = format!("ASODYA-{}", &new_id()[..12].to_uppercase());
-    let pdf_bytes =
-        render_certificate_pdf(&holder_name, &quiz_title, score_correct, score_total, &code);
-    let img_bytes =
-        render_certificate_svg(&holder_name, &quiz_title, score_correct, score_total, &code);
+    let ts = now();
+    let pdf_bytes = render_certificate_pdf(
+        &holder_name,
+        &quiz_title,
+        score_correct,
+        score_total,
+        &code,
+        ts,
+        quiz_language.as_deref(),
+    );
+    let img_bytes = render_certificate_svg(
+        &holder_name,
+        &quiz_title,
+        score_correct,
+        score_total,
+        &code,
+        ts,
+        quiz_language.as_deref(),
+    );
 
     let pdf_ref = store
         .fsm
@@ -321,7 +901,6 @@ pub async fn issue_or_get_certificate(
         .put_bytes(&format!("certificates/{cert_id}.svg"), &img_bytes)
         .await?;
 
-    let ts = now();
     sqlx::query(
         "INSERT INTO certificates(
             id, holder_id, quiz_id, attempt_id, verification_code, status, issued_at,
@@ -359,6 +938,7 @@ pub async fn issue_or_get_certificate(
 pub async fn verify_certificate(
     store: &Store,
     code: &str,
+    accept_language: Option<&str>,
 ) -> Result<PublicCertificateVerification> {
     let row = sqlx::query(
         "SELECT holder_id, attempt_id, verification_code, status, issued_at, revoked_at,
@@ -372,7 +952,26 @@ pub async fn verify_certificate(
     .ok_or_else(Error::missing)?;
 
     let attempt_id: String = row.get("attempt_id");
-    let activity_summary = attempts::load_activity_summary(store, &attempt_id).await?;
+
+    let effective_language: Option<String> = match accept_language.map(str::trim) {
+        Some(l) if !l.is_empty() => Some(l.to_string()),
+        _ => {
+            sqlx::query_scalar(
+                "SELECT qver.language
+                 FROM attempts att
+                 JOIN quiz_version_questions qvq ON qvq.quiz_version_id = att.quiz_version_id
+                 JOIN question_versions qver ON qver.id = qvq.question_version_id
+                 WHERE att.id = $1
+                 LIMIT 1",
+            )
+            .bind(&attempt_id)
+            .fetch_optional(&store.db)
+            .await?
+        }
+    };
+
+    let activity_summary =
+        attempts::load_activity_summary(store, &attempt_id, effective_language.as_deref()).await?;
 
     Ok(PublicCertificateVerification {
         verification_code: row.get("verification_code"),
