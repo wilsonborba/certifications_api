@@ -553,6 +553,62 @@ async fn report_dataset_rows_are_frozen_and_used_without_fsm_reads() {
 }
 
 #[tokio::test]
+async fn report_snapshot_survives_stop_resume_and_runs_without_fsm_reads() {
+    let (mut store, app, cortex, _reports, original_job_id) = queued_report_generation().await;
+    let fsm = MemoryFsm::new();
+    store.fsm = fsm.clone();
+    let snapshot: (String, String, i64, String, String, String, i64, i64, String) = sqlx::query_as(
+        "SELECT external_ref, source_kind, size_bytes, sha256, selection_kind,
+                report_calculation_id, report_calculation_version, report_row_count, report_lineage_sha256
+         FROM generation_job_sources WHERE job_id = $1",
+    )
+    .bind(&original_job_id)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+
+    let (stop_status, stopped) = call(
+        &app,
+        "POST",
+        &format!("/generations/{original_job_id}/stop"),
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(stop_status, StatusCode::OK);
+    assert_eq!(stopped["status"], "cancelled");
+    let (resume_status, resumed) = call(
+        &app,
+        "POST",
+        &format!("/generations/{original_job_id}/resume"),
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(resume_status, StatusCode::CREATED);
+    let resumed_job_id = resumed["id"].as_str().unwrap();
+    let resumed_snapshot: (String, String, i64, String, String, String, i64, i64, String) =
+        sqlx::query_as(
+            "SELECT external_ref, source_kind, size_bytes, sha256, selection_kind,
+                    report_calculation_id, report_calculation_version, report_row_count, report_lineage_sha256
+             FROM generation_job_sources WHERE job_id = $1",
+        )
+        .bind(resumed_job_id)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(resumed_snapshot, snapshot);
+
+    let worker = tokio::spawn(generations::run_queue_worker(store.clone()));
+    let done = wait_for_job_status(&app, resumed_job_id, "completed").await;
+    assert_eq!(done["status"], "completed");
+    assert_eq!(*cortex.source_text.lock().unwrap(), r#"[{"value":7}]"#);
+    assert_eq!(fsm.get_count(), 0);
+    worker.abort();
+    let _ = worker.await;
+}
+
+#[tokio::test]
 async fn report_dataset_access_is_rechecked_before_any_cortex_call() {
     let (store, app, cortex, reports, job_id) = queued_report_generation().await;
     reports.accessible.store(false, Ordering::SeqCst);

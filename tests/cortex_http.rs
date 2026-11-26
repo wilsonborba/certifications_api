@@ -5,7 +5,9 @@ use axum::{
     http::{Request, StatusCode},
     routing::post,
 };
-use certifications_api::dal::cortex::{GenerationRequest, GenerationSource, HttpCortex};
+use certifications_api::dal::cortex::{
+    GeneratedAlternative, GeneratedQuestion, GenerationRequest, GenerationSource, HttpCortex,
+};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
@@ -103,12 +105,49 @@ async fn uploads_selected_bytes_then_uses_the_exact_temporary_sync_chat_contract
     assert_eq!(
         chat,
         json!({
-            "app_id":"certifications", "text":chat["text"], "file_ids":["temporary-file-1"],
+            "app_id":"certifications", "model_id":"cortex-t0", "text":chat["text"], "file_ids":["temporary-file-1"],
             "stream":false, "needs_web":false, "web_mode":"fast", "use_memory":false,
             "memory_topic":null, "thinking":false, "persona_id":null, "temporary":true
         })
     );
     assert!(chat["text"].as_str().unwrap().contains("p1:0-3"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn language_correction_pins_the_existing_t0_model() {
+    let seen = Seen::default();
+    let app = Router::new()
+        .route("/chats", post(chat))
+        .with_state(seen.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = HttpCortex::client(&format!("http://{address}"), reqwest::Client::new());
+    let question = GeneratedQuestion {
+        prompt: "Question?".into(),
+        alternatives: vec![GeneratedAlternative {
+            id: "a".into(),
+            text: "Answer".into(),
+        }],
+        correct_id: "a".into(),
+        explanation: "Reason".into(),
+        source_id: "source-1".into(),
+        citation_ref: "p1:0-3".into(),
+    };
+
+    let corrected = client
+        .correct_language("owner-1", "pt-BR", &[question])
+        .await
+        .unwrap();
+
+    assert_eq!(corrected.len(), 1);
+    let seen = seen.0.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let chat: Value = serde_json::from_slice(&seen[0].1).unwrap();
+    assert_eq!(chat["app_id"], "certifications");
+    assert_eq!(chat["model_id"], "cortex-t0");
+    assert_eq!(chat["file_ids"], json!([]));
     server.abort();
 }
 

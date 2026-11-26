@@ -139,6 +139,7 @@ impl CortexClient for HttpCortex {
                 .header("x-uuid", &req.owner_id)
                 .json(&json!({
                     "app_id": "certifications",
+                    "model_id": "cortex-t0",
                     "text": instructions,
                     "file_ids": file_ids,
                     "stream": false,
@@ -189,6 +190,7 @@ impl CortexClient for HttpCortex {
                 .header("x-uuid", owner_id)
                 .json(&json!({
                     "app_id": "certifications",
+                    "model_id": "cortex-t0",
                     "text": correction_prompt(language, questions),
                     "file_ids": [],
                     "stream": false,

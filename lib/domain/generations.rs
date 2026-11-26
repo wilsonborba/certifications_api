@@ -1621,8 +1621,10 @@ pub async fn resume_generation(
     .await?;
     sqlx::query(
         "INSERT INTO generation_job_sources
-         (job_id, source_id, filename, mime_type, size_bytes, sha256, source_kind, selection_kind, selection_spec)
-         SELECT $1, source_id, filename, mime_type, size_bytes, sha256, source_kind, selection_kind, selection_spec
+         (job_id, source_id, filename, mime_type, size_bytes, sha256, source_kind, selection_kind, selection_spec,
+          external_ref, report_calculation_id, report_calculation_version, report_row_count, report_lineage_sha256)
+         SELECT $1, source_id, filename, mime_type, size_bytes, sha256, source_kind, selection_kind, selection_spec,
+                external_ref, report_calculation_id, report_calculation_version, report_row_count, report_lineage_sha256
          FROM generation_job_sources WHERE job_id = $2",
     )
     .bind(&new_job_id)
