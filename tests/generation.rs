@@ -1541,15 +1541,25 @@ async fn active_queue_positions_follow_remaining_fifo_jobs() {
         )
         .await;
         assert_eq!(job_status, StatusCode::CREATED);
-        jobs.push((
-            user_id,
-            job["id"].as_str().unwrap().to_owned(),
-            job["queue_position"].as_i64().unwrap(),
-        ));
+        jobs.push((user_id, job["id"].as_str().unwrap().to_owned(), 0));
+    }
+    // Re-read both jobs after the second insertion: an earlier response cannot
+    // predict the rank of jobs that arrive later.
+    for job in &mut jobs {
+        let (_, current) = call(
+            &app,
+            "GET",
+            &format!("/generations/{}", job.1),
+            Some(job.0),
+            None,
+        )
+        .await;
+        job.2 = current["queue_position"].as_i64().unwrap();
     }
     assert_eq!(
         jobs.iter().map(|job| job.2).collect::<HashSet<_>>(),
-        HashSet::from([1, 2])
+        HashSet::from([1, 2]),
+        "queue entries: {jobs:?}"
     );
 
     let (front_user, front_id, _) = jobs.iter().find(|job| job.2 == 1).unwrap();
