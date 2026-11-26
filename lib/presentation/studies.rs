@@ -15,11 +15,16 @@ use axum::{
     body::Body,
     extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
-    response::Response,
+    response::{
+        IntoResponse, Response,
+        sse::{Event, Sse},
+    },
     routing::{get, patch, post},
 };
+use futures_util::stream;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::convert::Infallible;
 
 #[derive(Deserialize)]
 pub struct ListParams {
@@ -84,6 +89,7 @@ pub fn routes() -> Router<App> {
             "/studies/{study_id}/analysis",
             post(run_analysis).get(get_analysis),
         )
+        .route("/studies/{study_id}/analysis/stream", post(stream_analysis))
         .route("/reports/picker", get(reports_picker))
         .route("/quizzes/{quiz_id}", axum::routing::delete(remove_quiz))
 }
@@ -561,6 +567,77 @@ async fn get_analysis(
 ) -> Result<Json<Value>> {
     let a = studies::get_analysis(&app.store, &caller, &study_id).await?;
     Ok(Json(json!(a)))
+}
+
+async fn stream_analysis(
+    State(app): State<App>,
+    SessionUser(caller): SessionUser,
+    Path(study_id): Path<String>,
+) -> Result<Response> {
+    let inspection = studies::prepare_analysis_inspection(&app.store, &caller, &study_id).await?;
+    let store = app.store;
+    let total_sources = inspection.total_sources;
+    let ready_sources = inspection.total_ready_sources;
+    let total_bytes = inspection.total_bytes;
+    let stream = stream::unfold(
+        (Some((store, caller, inspection, 0usize, 0usize)), true),
+        move |(state, stage_pending)| async move {
+            let (store, caller, inspection, index, inspected_count) = state?;
+            if stage_pending {
+                let data = serde_json::json!({
+                    "study_id": inspection.study_id,
+                    "stage": "preparing_sources",
+                    "total_sources": total_sources,
+                    "ready_sources": ready_sources,
+                    "total_bytes": total_bytes,
+                    "estimate_status": "unavailable",
+                    "estimated_processing_ms": null,
+                });
+                let event = Event::default().event("stage").data(data.to_string());
+                return Some((
+                    Ok::<_, Infallible>(event),
+                    (
+                        Some((store, caller, inspection, index, inspected_count)),
+                        false,
+                    ),
+                ));
+            }
+            if index < inspection.sources.len() {
+                let source = &inspection.sources[index];
+                let result =
+                    studies::inspect_analysis_source(&store, &caller, &inspection.study_id, source)
+                        .await;
+                let event = Event::default()
+                    .event(result.event)
+                    .data(result.data.to_string());
+                let inspected_count =
+                    inspected_count + (result.event == "source_inspected") as usize;
+                return Some((
+                    Ok::<_, Infallible>(event),
+                    (
+                        Some((store, caller, inspection, index + 1, inspected_count)),
+                        false,
+                    ),
+                ));
+            }
+            let data = serde_json::json!({
+                "study_id": inspection.study_id,
+                "stage": "ready",
+                "inspected_sources": inspected_count,
+                "total_ready_sources": inspection.total_ready_sources,
+            });
+            let event = Event::default().event("complete").data(data.to_string());
+            Some((Ok::<_, Infallible>(event), (None, false)))
+        },
+    );
+    let mut response = Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
 }
 
 #[derive(Deserialize)]

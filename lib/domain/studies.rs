@@ -10,7 +10,7 @@ use crate::{
 };
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
+use sqlx::{Row, any::AnyRow};
 
 pub const STUDY_DRAFT_TTL_SECONDS: i64 = 1800;
 pub const MAX_PAGE_LIMIT: i64 = 50;
@@ -88,6 +88,224 @@ pub struct AnalysisSummary {
     pub ready_sources: i64,
     pub total_bytes: i64,
     pub updated_at: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct AnalysisStreamEvent {
+    pub event: &'static str,
+    pub data: serde_json::Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct AnalysisInspection {
+    pub study_id: String,
+    pub total_sources: usize,
+    pub total_ready_sources: usize,
+    pub total_bytes: i64,
+    pub sources: Vec<SourceSummary>,
+}
+
+const MAX_ANALYSIS_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+
+pub async fn prepare_analysis_inspection(
+    store: &Store,
+    caller: &CallerIdentity,
+    study_id: &str,
+) -> Result<AnalysisInspection> {
+    let _ = load_owned_study(store, caller, study_id).await?;
+    let all = load_sources(store, study_id).await?;
+    let ready: Vec<_> = all
+        .iter()
+        .filter(|source| source.status == "ready")
+        .cloned()
+        .collect();
+    let total_bytes = all.iter().try_fold(0i64, |sum, source| {
+        sum.checked_add(source.size_bytes.max(0))
+            .ok_or_else(Error::unavailable)
+    })?;
+    Ok(AnalysisInspection {
+        study_id: study_id.to_string(),
+        total_sources: all.len(),
+        total_ready_sources: ready.len(),
+        total_bytes,
+        sources: ready,
+    })
+}
+
+pub async fn inspect_analysis_source(
+    store: &Store,
+    caller: &CallerIdentity,
+    study_id: &str,
+    source: &SourceSummary,
+) -> AnalysisStreamEvent {
+    let started = std::time::Instant::now();
+    let inspected = inspect_analysis_source_bytes(store, caller, study_id, source).await;
+    match inspected {
+        Ok((text_char_count, page_count, duration_seconds)) => AnalysisStreamEvent {
+            event: "source_inspected",
+            data: serde_json::json!({
+                "stage": "inspecting_source",
+                "source_id": source.id,
+                "source_kind": source.source_kind,
+                "mime_type": source.mime_type,
+                "selection_kind": source.selection_kind,
+                "selection_spec": source.selection_spec,
+                "size_bytes": source.size_bytes,
+                "page_count": page_count,
+                "duration_seconds": duration_seconds,
+                "text_char_count": text_char_count,
+                "elapsed_ms": started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+            }),
+        },
+        Err(code) => AnalysisStreamEvent {
+            event: "error",
+            data: serde_json::json!({
+                "stage": "source_error",
+                "source_id": source.id,
+                "code": code,
+            }),
+        },
+    }
+}
+
+async fn inspect_analysis_source_bytes(
+    store: &Store,
+    caller: &CallerIdentity,
+    study_id: &str,
+    source: &SourceSummary,
+) -> std::result::Result<(Option<usize>, Option<u32>, Option<f64>), &'static str> {
+    let current = current_analysis_source_row(store, caller, study_id, source).await?;
+    if source.size_bytes < 0 || source.size_bytes as usize > MAX_ANALYSIS_SOURCE_BYTES {
+        return Err("source_size_unsupported");
+    }
+    let bytes = if source.source_kind == "report" {
+        let (project, report, dataset) =
+            parse_report_external_ref(&source.external_ref).map_err(|_| "source_access_denied")?;
+        let checked = store
+            .reports
+            .check_report_access(&caller.user_id, project, report)
+            .await
+            .map_err(|_| "source_access_denied")?;
+        let material = store
+            .reports
+            .fetch_report_dataset(&caller.user_id, project, report, dataset)
+            .await
+            .map_err(|_| "source_unavailable")?;
+        let expected_restricted = current.get::<i64, _>("is_restricted") != 0;
+        let expected_calculation: String = current.get("report_calculation_id");
+        let expected_version: i64 = current.get("report_calculation_version");
+        let expected_rows: i64 = current.get("report_row_count");
+        let expected_lineage: String = current.get("report_lineage_sha256");
+        if (checked.is_restricted || material.is_restricted) != expected_restricted
+            || material.lineage.calculation_id != expected_calculation
+            || material.lineage.calculation_version != expected_version
+            || material.row_count != expected_rows
+            || material.lineage_sha256 != expected_lineage
+        {
+            return Err("source_integrity_failed");
+        }
+        material.bytes
+    } else {
+        if ensure_source_blob_readable(store, caller, study_id, source)
+            .await
+            .is_err()
+        {
+            return Err("source_access_denied");
+        }
+        store
+            .fsm
+            .get_bytes_bounded(&source.fsm_ref, MAX_ANALYSIS_SOURCE_BYTES)
+            .await
+            .map_err(|_| "source_unavailable")?
+    };
+    if bytes.len() != source.size_bytes as usize
+        || source.sha256.trim().is_empty()
+        || sha256_hex(&bytes) != source.sha256
+    {
+        return Err("source_integrity_failed");
+    }
+    let latest = current_analysis_source_row(store, caller, study_id, source).await?;
+    if source.source_kind == "report"
+        && (latest.get::<String, _>("report_calculation_id")
+            != current.get::<String, _>("report_calculation_id")
+            || latest.get::<i64, _>("report_calculation_version")
+                != current.get::<i64, _>("report_calculation_version")
+            || latest.get::<i64, _>("report_row_count")
+                != current.get::<i64, _>("report_row_count")
+            || latest.get::<String, _>("report_lineage_sha256")
+                != current.get::<String, _>("report_lineage_sha256"))
+    {
+        return Err("source_integrity_failed");
+    }
+    let text_char_count = if source.mime_type.to_ascii_lowercase().starts_with("text/")
+        || source.source_kind == "report"
+    {
+        let (selected, _) = crate::domain::generations::select_text_content(
+            &bytes,
+            &source.mime_type,
+            &source.selection_kind,
+            &source.selection_spec,
+        )
+        .map_err(|_| "selection_invalid")?;
+        Some(selected.chars().count())
+    } else {
+        None
+    };
+    let page_count = source
+        .mime_type
+        .eq_ignore_ascii_case("application/pdf")
+        .then(|| extract_pdf_page_count(&bytes))
+        .flatten();
+    let duration_seconds = matches!(
+        source.mime_type.to_ascii_lowercase().as_str(),
+        "audio/wav" | "audio/x-wav" | "audio/wave"
+    )
+    .then(|| cheap_wav_duration_seconds(&bytes))
+    .flatten();
+    Ok((text_char_count, page_count, duration_seconds))
+}
+
+async fn current_analysis_source_row(
+    store: &Store,
+    caller: &CallerIdentity,
+    study_id: &str,
+    source: &SourceSummary,
+) -> std::result::Result<AnyRow, &'static str> {
+    // A stream can outlive its preflight. Reuse the normal draft-expiry and
+    // ownership checks before each read and before returning inspected data.
+    let _ = load_owned_study(store, caller, study_id)
+        .await
+        .map_err(|_| "source_unavailable")?;
+    let current = sqlx::query(
+        "SELECT s.owner_id, st.owner_id AS study_owner_id, s.status, s.source_kind, s.mime_type, s.size_bytes, s.sha256, s.fsm_ref, s.selection_kind, s.selection_spec, s.is_restricted, s.external_ref, s.report_calculation_id, s.report_calculation_version, s.report_row_count, s.report_lineage_sha256 FROM sources s JOIN studies st ON st.id = s.study_id WHERE s.id = $1 AND s.study_id = $2",
+    )
+    .bind(&source.id)
+    .bind(study_id)
+    .fetch_optional(&store.db)
+    .await
+    .map_err(|_| "source_unavailable")?
+    .ok_or("source_unavailable")?;
+    if current.get::<String, _>("owner_id") != caller.user_id
+        || current.get::<String, _>("study_owner_id") != caller.user_id
+    {
+        return Err("source_access_denied");
+    }
+    if current.get::<String, _>("status") != "ready" {
+        return Err("source_unavailable");
+    }
+    if current.get::<String, _>("source_kind") != source.source_kind
+        || current.get::<String, _>("mime_type") != source.mime_type
+        || current.get::<i64, _>("size_bytes") != source.size_bytes
+        || current.get::<String, _>("sha256") != source.sha256
+        || current.get::<String, _>("fsm_ref") != source.fsm_ref
+        || current.get::<String, _>("selection_kind") != source.selection_kind
+        || current.get::<String, _>("selection_spec") != source.selection_spec
+        || (current.get::<i64, _>("is_restricted") != 0) != source.is_restricted
+        || current.get::<String, _>("external_ref") != source.external_ref
+    {
+        return Err("source_integrity_failed");
+    }
+    Ok(current)
 }
 
 #[derive(Deserialize)]
