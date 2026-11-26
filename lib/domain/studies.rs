@@ -1,6 +1,6 @@
 use crate::{
     core::{Error, Result, now},
-    dal::{Store, fsm::sha256_hex, new_id},
+    dal::{AnyQuery, Store, fsm::sha256_hex, new_id},
     domain::{
         auth::{CallerIdentity, require_owner},
         cleanup,
@@ -14,6 +14,7 @@ use sqlx::Row;
 
 pub const STUDY_DRAFT_TTL_SECONDS: i64 = 1800;
 pub const MAX_PAGE_LIMIT: i64 = 50;
+pub const MAX_SELECTION_RANGES: usize = 100;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct StudySummary {
@@ -26,6 +27,31 @@ pub struct StudySummary {
     pub expires_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StudyHistoryFilter {
+    pub search: Option<String>,
+    pub created_from: Option<i64>,
+    pub created_to: Option<i64>,
+    pub status: Option<String>,
+    pub quiz_id: Option<String>,
+    pub tag: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AvailableStudyTag {
+    pub slug: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StudyHistoryPage {
+    pub items: Vec<StudySummary>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+    pub available_tags: Vec<AvailableStudyTag>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -51,6 +77,8 @@ pub struct StudyDetail {
     pub study: StudySummary,
     pub sources: Vec<SourceSummary>,
     pub quota: QuotaMeter,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<PreparedStudyConfig>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -99,6 +127,24 @@ pub struct PreparedStudyInput {
     #[serde(default)]
     pub description: String,
     pub sources: Vec<PreparedSourceRef>,
+    pub config: Option<PreparedStudyConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedStudyConfig {
+    #[serde(default = "default_config_language")]
+    pub language: String,
+    #[serde(default = "default_config_count")]
+    pub count: i64,
+}
+
+fn default_config_language() -> String {
+    "en".to_string()
+}
+
+fn default_config_count() -> i64 {
+    10
 }
 
 #[derive(Deserialize)]
@@ -134,7 +180,6 @@ fn default_text_mime() -> String {
 }
 
 const MAX_SELECTION_SPEC_BYTES: usize = 2000;
-const MAX_SELECTION_RANGES: usize = 100;
 const MAX_SELECTED_PDF_PAGES: u64 = 100;
 
 fn normalize_mime_base(mime_type: &str) -> String {
@@ -543,7 +588,7 @@ async fn authorize_fsm_ref(
     ))
 }
 
-async fn ensure_source_blob_readable(
+pub(crate) async fn ensure_source_blob_readable(
     store: &Store,
     caller: &CallerIdentity,
     study_id: &str,
@@ -642,6 +687,18 @@ pub async fn create_prepared_study(
             "invalid_sources: Prepared study requires 1 to 20 sources",
         ));
     }
+    if let Some(ref cfg) = input.config {
+        if !matches!(cfg.language.as_str(), "en" | "pt-BR" | "th") {
+            return Err(Error::unprocessable(
+                "invalid_config: Supported languages are en, pt-BR, and th",
+            ));
+        }
+        if cfg.count < 1 || cfg.count > 20 {
+            return Err(Error::unprocessable(
+                "invalid_config: Question count must be between 1 and 20",
+            ));
+        }
+    }
     let mut verified_sizes = Vec::with_capacity(input.sources.len());
     let mut canonical_specs = Vec::with_capacity(input.sources.len());
     for s in &input.sources {
@@ -677,6 +734,19 @@ pub async fn create_prepared_study(
     .bind(ts)
     .execute(&mut *tx)
     .await?;
+
+    if let Some(ref cfg) = input.config {
+        sqlx::query(
+            "INSERT INTO study_configs(study_id, language, count, created_at, updated_at)
+             VALUES($1, $2, $3, $4, $4)",
+        )
+        .bind(&study_id)
+        .bind(&cfg.language)
+        .bind(cfg.count)
+        .bind(ts)
+        .execute(&mut *tx)
+        .await?;
+    }
 
     let provenance = if trusted_service {
         "prepared_service"
@@ -714,37 +784,216 @@ pub async fn create_prepared_study(
     get_study(store, caller, &study_id, quotas).await
 }
 
+fn escape_like_literal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    format!("%{escaped}%")
+}
+
+fn push_study_history_filters(
+    query: &mut AnyQuery,
+    caller: &CallerIdentity,
+    ts: i64,
+    filter: &StudyHistoryFilter,
+    search_pattern: Option<&str>,
+) {
+    query
+        .push(" WHERE s.owner_id = ")
+        .push_bind_text(caller.user_id.clone())
+        .push(" AND s.status <> 'expired' AND (s.status <> 'draft' OR s.expires_at IS NULL OR s.expires_at >= ")
+        .push_bind_i64(ts)
+        .push(")");
+    if let Some(search_pattern) = search_pattern {
+        query
+            .push(" AND (LOWER(s.title) LIKE ")
+            .push_bind_text(search_pattern.to_string())
+            .push(r#" ESCAPE '\' OR LOWER(s.description) LIKE "#)
+            .push_bind_text(search_pattern.to_string())
+            .push(r#" ESCAPE '\' OR LOWER(qv.title) LIKE "#)
+            .push_bind_text(search_pattern.to_string())
+            .push(r#" ESCAPE '\')"#);
+    }
+    if let Some(created_from) = filter.created_from {
+        query
+            .push(" AND s.created_at >= ")
+            .push_bind_i64(created_from);
+    }
+    if let Some(created_to) = filter.created_to {
+        query
+            .push(" AND s.created_at <= ")
+            .push_bind_i64(created_to);
+    }
+    if let Some(status) = filter
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        query
+            .push(" AND s.status = ")
+            .push_bind_text(status.to_string());
+    }
+    if let Some(quiz_id) = filter
+        .quiz_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        query
+            .push(" AND s.quiz_id = ")
+            .push_bind_text(quiz_id.to_string());
+    }
+    if let Some(tag) = filter
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        query
+            .push(
+                " AND EXISTS (
+                    SELECT 1
+                    FROM quizzes tag_quiz
+                    JOIN quiz_tags qt ON qt.quiz_id = tag_quiz.id
+                    JOIN tags t ON t.id = qt.tag_id
+                    WHERE tag_quiz.id = s.quiz_id AND tag_quiz.owner_id = s.owner_id
+                      AND t.slug = ",
+            )
+            .push_bind_text(tag.to_string())
+            .push(")");
+    }
+}
+
 pub async fn list_studies(
     store: &Store,
     caller: &CallerIdentity,
+    filter: &StudyHistoryFilter,
     limit: i64,
-) -> Result<Vec<StudySummary>> {
+    offset: i64,
+) -> Result<StudyHistoryPage> {
+    if filter
+        .created_from
+        .zip(filter.created_to)
+        .is_some_and(|(from, to)| from > to)
+        || filter.created_from.is_some_and(|value| value < 0)
+        || filter.created_to.is_some_and(|value| value < 0)
+    {
+        return Err(Error::unprocessable(
+            "invalid_date_range: created_from and created_to must be non-negative and ordered",
+        ));
+    }
+
+    let search = filter
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if search.is_some_and(|value| value.chars().count() > 200) {
+        return Err(Error::unprocessable(
+            "invalid_search: q must contain no more than 200 characters",
+        ));
+    }
+    let search_pattern = search.map(|value| escape_like_literal(&value.to_lowercase()));
+    let status = filter
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if status.is_some_and(|value| !matches!(value, "draft" | "active" | "expired")) {
+        return Err(Error::unprocessable(
+            "invalid_status: status must be draft, active, or expired",
+        ));
+    }
     let limit = limit.clamp(1, MAX_PAGE_LIMIT);
+    let offset = offset.max(0);
     let ts = now();
-    let rows = sqlx::query(
-        "SELECT id, title, description, source_origin, status, quiz_id, expires_at, created_at, updated_at
-         FROM studies WHERE owner_id = $1 AND status <> 'expired' AND (status <> 'draft' OR expires_at IS NULL OR expires_at >= $2)
-         ORDER BY updated_at DESC LIMIT $3",
+
+    let mut count = AnyQuery::new(
+        "SELECT COUNT(*) FROM studies s
+         LEFT JOIN quizzes q ON q.id = s.quiz_id AND q.owner_id = s.owner_id
+         LEFT JOIN quiz_versions qv ON qv.id = q.active_version_id",
+    );
+    push_study_history_filters(&mut count, caller, ts, filter, search_pattern.as_deref());
+    let total: i64 = count.query().fetch_one(&store.db).await?.try_get(0)?;
+
+    let tag_rows = sqlx::query(
+        "SELECT DISTINCT t.slug, t.label, LOWER(t.label) AS sort_label
+         FROM studies s
+         JOIN quizzes q ON q.id = s.quiz_id AND q.owner_id = s.owner_id
+         JOIN quiz_tags qt ON qt.quiz_id = q.id
+         JOIN tags t ON t.id = qt.tag_id
+         WHERE s.owner_id = $1 AND s.quiz_id <> '' AND s.status <> 'expired'
+           AND (s.status <> 'draft' OR s.expires_at IS NULL OR s.expires_at >= $2)
+         ORDER BY sort_label, t.slug",
     )
     .bind(&caller.user_id)
     .bind(ts)
-    .bind(limit)
     .fetch_all(&store.db)
     .await?;
-    Ok(rows
+    let available_tags = tag_rows
         .into_iter()
-        .map(|r| StudySummary {
-            id: r.get("id"),
-            title: r.get("title"),
-            description: r.get("description"),
-            source_origin: r.get("source_origin"),
-            status: r.get("status"),
-            quiz_id: r.get("quiz_id"),
-            expires_at: r.get("expires_at"),
-            created_at: r.get("created_at"),
-            updated_at: r.get("updated_at"),
+        .map(|row| {
+            Ok(AvailableStudyTag {
+                slug: row.try_get("slug")?,
+                label: row.try_get("label")?,
+            })
         })
-        .collect())
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut query = AnyQuery::new(
+        "SELECT s.id, s.title, s.description, s.source_origin, s.status, s.quiz_id,
+                s.expires_at, s.created_at, s.updated_at
+         FROM studies s
+         LEFT JOIN quizzes q ON q.id = s.quiz_id AND q.owner_id = s.owner_id
+         LEFT JOIN quiz_versions qv ON qv.id = q.active_version_id",
+    );
+    push_study_history_filters(&mut query, caller, ts, filter, search_pattern.as_deref());
+    query
+        .push(" ORDER BY s.updated_at DESC, s.id DESC LIMIT ")
+        .push_bind_i64(limit)
+        .push(" OFFSET ")
+        .push_bind_i64(offset);
+    let rows = query.query().fetch_all(&store.db).await?;
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            Ok(StudySummary {
+                id: row.try_get("id")?,
+                title: row.try_get("title")?,
+                description: row.try_get("description")?,
+                source_origin: row.try_get("source_origin")?,
+                status: row.try_get("status")?,
+                quiz_id: row.try_get("quiz_id")?,
+                expires_at: row.try_get("expires_at")?,
+                created_at: row.try_get("created_at")?,
+                updated_at: row.try_get("updated_at")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(StudyHistoryPage {
+        items,
+        total,
+        limit,
+        offset,
+        available_tags,
+    })
+}
+
+async fn load_study_config(store: &Store, study_id: &str) -> Result<Option<PreparedStudyConfig>> {
+    let row = sqlx::query("SELECT language, count FROM study_configs WHERE study_id = $1")
+        .bind(study_id)
+        .fetch_optional(&store.db)
+        .await?;
+    Ok(row.map(|r| PreparedStudyConfig {
+        language: r.get("language"),
+        count: r.get("count"),
+    }))
 }
 
 pub async fn get_study(
@@ -764,11 +1013,13 @@ pub async fn get_study(
         study.expires_at = Some(new_exp);
     }
     let sources = load_sources(store, study_id).await?;
+    let config = load_study_config(store, study_id).await?;
     let quota = quotas::meter_for_owner(store, &caller.user_id, &quotas.get()).await?;
     Ok(StudyDetail {
         study,
         sources,
         quota,
+        config,
     })
 }
 
@@ -833,6 +1084,10 @@ pub async fn delete_study(store: &Store, caller: &CallerIdentity, study_id: &str
     .bind(study_id)
     .execute(&mut *tx)
     .await?;
+    sqlx::query("DELETE FROM study_configs WHERE study_id = $1")
+        .bind(study_id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM studies WHERE id = $1")
         .bind(study_id)
         .execute(&mut *tx)
@@ -973,29 +1228,49 @@ pub async fn add_source_reference(
             "invalid_source_kind: Kind must be fsm_ref, link, or report",
         ));
     }
+    if input.kind == "report" && !input.fsm_ref.trim().is_empty() {
+        return Err(Error::unprocessable(
+            "invalid_report_ref: Report sources must not include an FSM reference",
+        ));
+    }
     let mut is_restricted = input.is_restricted;
     let mut effective_size = input.size_bytes.max(0);
+    let mut sha256 = String::new();
+    let mut report_calculation_id = String::new();
+    let mut report_calculation_version = 0i64;
+    let mut report_row_count = 0i64;
+    let mut report_lineage_sha256 = String::new();
+    let effective_mime_type = if input.kind == "report" {
+        "text/plain"
+    } else {
+        input.mime_type.trim()
+    };
     if input.kind == "fsm_ref" {
         if let Some(verified_size) = authorize_fsm_ref(store, caller, &input.fsm_ref, false).await?
         {
             effective_size = verified_size;
         }
     } else if input.kind == "report" {
-        let (project, report) = input
-            .external_ref
-            .trim()
-            .split_once('/')
-            .filter(|(p, r)| !p.is_empty() && !r.is_empty())
-            .ok_or_else(|| {
-                Error::unprocessable(
-                    "invalid_report_ref: Report external_ref must be <project>/<report>",
-                )
-            })?;
+        let (project, report, dataset) = parse_report_external_ref(&input.external_ref)?;
         let checked = store
             .reports
             .check_report_access(&caller.user_id, project, report)
             .await?;
-        is_restricted = checked.is_restricted;
+        let material = store
+            .reports
+            .fetch_report_dataset(&caller.user_id, project, report, dataset)
+            .await?;
+        effective_size = i64::try_from(material.bytes.len()).map_err(|_| {
+            Error::unprocessable(
+                "report_source_too_large: Dataset exceeds the supported source size",
+            )
+        })?;
+        sha256 = sha256_hex(&material.bytes);
+        is_restricted = checked.is_restricted || material.is_restricted;
+        report_calculation_id = material.lineage.calculation_id.clone();
+        report_calculation_version = material.lineage.calculation_version;
+        report_row_count = material.row_count;
+        report_lineage_sha256 = material.lineage_sha256.clone();
     }
     let source_id = new_id();
     let ts = now();
@@ -1005,31 +1280,39 @@ pub async fn add_source_reference(
     } else {
         "unknown"
     };
+    let mut tx = store.db.begin().await?;
     sqlx::query(
-        "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, source_provenance, created_at, updated_at)
-         VALUES($1, $2, $3, $4, $5, $6, '', $7, $8, 'ready', 'all', '', $9, $10, $11, $12, $12)",
+        "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, source_provenance, report_calculation_id, report_calculation_version, report_row_count, report_lineage_sha256, created_at, updated_at)
+         VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ready', 'all', '', $10, $11, $12, $13, $14, $15, $16, $17, $17)",
     )
     .bind(&source_id)
     .bind(&caller.user_id)
     .bind(study_id)
     .bind(input.filename.trim())
-    .bind(input.mime_type.trim())
+    .bind(effective_mime_type)
     .bind(effective_size)
+    .bind(&sha256)
     .bind(input.fsm_ref.trim())
     .bind(&input.kind)
     .bind(restricted)
     .bind(input.external_ref.trim())
     .bind(provenance)
+    .bind(&report_calculation_id)
+    .bind(report_calculation_version)
+    .bind(report_row_count)
+    .bind(&report_lineage_sha256)
     .bind(ts)
-    .execute(&store.db)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(SourceSummary {
         id: source_id,
         filename: input.filename.trim().to_string(),
-        mime_type: input.mime_type.trim().to_string(),
+        mime_type: effective_mime_type.to_string(),
         size_bytes: effective_size,
-        sha256: String::new(),
+        sha256,
         fsm_ref: input.fsm_ref.trim().to_string(),
         source_kind: input.kind,
         status: "ready".into(),
@@ -1040,6 +1323,35 @@ pub async fn add_source_reference(
         created_at: ts,
         updated_at: ts,
     })
+}
+
+pub(crate) fn parse_report_external_ref(external_ref: &str) -> Result<(&str, &str, &str)> {
+    let mut parts = external_ref.trim().split('/');
+    let (Some(project), Some(report), Some(dataset), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(Error::unprocessable(
+            "invalid_report_ref: Report external_ref must be <project>/<report>/<dataset>",
+        ));
+    };
+    let valid_slug = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 128
+            && part != "."
+            && part != ".."
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    };
+    if [project, report, dataset]
+        .iter()
+        .any(|part| *part != part.trim() || !valid_slug(part))
+    {
+        return Err(Error::unprocessable(
+            "invalid_report_ref: Report external_ref must contain valid project, report, and dataset identifiers",
+        ));
+    }
+    Ok((project, report, dataset))
 }
 
 pub async fn get_source(
@@ -1482,4 +1794,37 @@ pub async fn get_analysis(
         });
     }
     analyze_study(store, caller, study_id).await
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::{MAX_SELECTION_RANGES, canonicalize_selection};
+
+    #[test]
+    fn selection_specs_enforce_the_shared_size_and_range_caps() {
+        let at_limit = (0..MAX_SELECTION_RANGES)
+            .map(|range| format!("p1:{}-{}", range * 2, range * 2 + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            canonicalize_selection("passages", &at_limit, Some("text/plain"), None, None).is_ok()
+        );
+        let start = MAX_SELECTION_RANGES * 2;
+        let over_limit = format!("{at_limit},p1:{start}-{}", start + 1);
+        assert!(
+            canonicalize_selection("passages", &over_limit, Some("text/plain"), None, None)
+                .is_err()
+        );
+        assert!(canonicalize_selection("all", "not-empty", None, None, None).is_err());
+        assert!(
+            canonicalize_selection(
+                "passages",
+                &"x".repeat(2001),
+                Some("text/plain"),
+                None,
+                None
+            )
+            .is_err()
+        );
+    }
 }

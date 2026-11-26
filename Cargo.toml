@@ -28,6 +28,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-normalization = "=0.1.26"
 uuid = { version = "1", features = ["v4"] }
 qrcode = { version = "=0.14.1", default-features = false }
 krilla = "=0.7.0"

@@ -8,6 +8,7 @@ pub mod cleanup;
 pub mod estimates;
 pub mod generations;
 pub mod guardrail;
+pub mod provenance;
 pub mod quotas;
 pub mod security;
 pub mod studies;

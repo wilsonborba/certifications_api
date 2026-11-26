@@ -17,6 +17,116 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tower::ServiceExt;
 
+#[tokio::test]
+async fn study_history_is_owner_scoped_stably_paginated_and_filterable() {
+    let mut store = Store::fixture().await;
+    store.fsm = MemoryFsm::new();
+    sqlx::query(
+        "INSERT INTO tags(id, slug, label, created_at) VALUES('tag-1', 'biology', 'Biology', 1)",
+    )
+    .execute(&store.db)
+    .await
+    .unwrap();
+
+    for (owner, prefix, count) in [("u1", "mine", 55), ("u2", "other", 2)] {
+        for n in 0..count {
+            let study_id = format!("{prefix}-{n:02}");
+            let created_at = 1_700_000_000 + n;
+            sqlx::query(
+                "INSERT INTO studies(id, owner_id, title, description, created_at, updated_at,
+                                    source_origin, status, quiz_id, expires_at)
+                 VALUES($1, $2, $3, $4, $5, $6, 'direct', 'active', $7, NULL)",
+            )
+            .bind(&study_id)
+            .bind(owner)
+            .bind(format!("Biology study {n:02}"))
+            .bind("history fixture")
+            .bind(created_at)
+            .bind(created_at)
+            .bind(if n == 0 { "quiz-1" } else { "" })
+            .execute(&store.db)
+            .await
+            .unwrap();
+        }
+    }
+    sqlx::query(
+        "INSERT INTO quizzes(id, owner_id, study_id, visibility, active_version_id, created_at, updated_at)
+         VALUES('quiz-1', 'u1', 'mine-00', 'private', 'version-1', 1, 1)",
+    )
+    .execute(&store.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO quiz_versions(id, quiz_id, version_num, title, created_at)
+         VALUES('version-1', 'quiz-1', 1, 'Cell Biology Quiz', 1)",
+    )
+    .execute(&store.db)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO quiz_tags(quiz_id, tag_id) VALUES('quiz-1', 'tag-1')")
+        .execute(&store.db)
+        .await
+        .unwrap();
+
+    let app = presentation::router(App {
+        store,
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+
+    let (status, first) = call(&app, "GET", "/studies?limit=10", Some("u1"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["total"], 55);
+    assert_eq!(first["limit"], 10);
+    assert_eq!(first["offset"], 0);
+    assert_eq!(first["items"].as_array().unwrap().len(), 10);
+    assert_eq!(first["items"][0]["id"], "mine-54");
+    assert_eq!(first["available_tags"][0]["slug"], "biology");
+
+    let (status, second) = call(&app, "GET", "/studies?limit=10&offset=50", Some("u1"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["total"], 55);
+    assert_eq!(second["offset"], 50);
+    assert_eq!(second["items"].as_array().unwrap().len(), 5);
+    assert!(
+        second["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["id"] != "other-00")
+    );
+
+    let (status, filtered) = call(
+        &app,
+        "GET",
+        "/studies?q=cell%20biology&created_from=1700000000&created_to=1700000000&status=active&quiz_id=quiz-1&tag=biology",
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(filtered["total"], 1);
+    assert_eq!(filtered["items"][0]["id"], "mine-00");
+    assert_eq!(filtered["available_tags"][0]["slug"], "biology");
+
+    let (status, invalid_range) = call(
+        &app,
+        "GET",
+        "/studies?created_from=1700000001&created_to=1700000000",
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        invalid_range["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid_date_range")
+    );
+}
+
 fn test_settings() -> Settings {
     Settings {
         host: "127.0.0.1".into(),
@@ -237,7 +347,7 @@ async fn selections_survive_refresh_and_prepared_studies_reuse_fsm_without_uploa
     let (st, _) = call(&app, "GET", &format!("/studies/{sid}"), Some("u2"), None).await;
     assert_eq!(st, StatusCode::FORBIDDEN);
 
-    // Update selection and verify it survives refresh.
+    // Update text passages and verify the selection survives refresh.
     let (st, _) = call(
         &app,
         "PATCH",
@@ -284,10 +394,260 @@ async fn selections_survive_refresh_and_prepared_studies_reuse_fsm_without_uploa
 }
 
 #[tokio::test]
+async fn prepared_study_config_persists_durably_and_rejects_invalid_or_cross_owner() {
+    let mut store = Store::fixture().await;
+    let fsm = MemoryFsm::new();
+    fsm.seed(
+        "annotations/u1/file-1",
+        b"Biology lesson content for quiz generation",
+    );
+    store.fsm = fsm.clone() as Arc<dyn certifications_api::dal::fsm::FsmClient>;
+
+    let mut settings = test_settings();
+    settings.certifications_service_key = "ann-svc-key".into();
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings: settings.clone(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+
+    // 1. Invalid configs reject with 422 before any database side effects.
+    let count_studies_before: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM studies")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let count_configs_before: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM study_configs")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+
+    // Invalid language
+    let (st, err) = call_with_service_key(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("u1"),
+        Some("ann-svc-key"),
+        Some(json!({
+            "title": "Invalid Lang Prep",
+            "sources": [{
+                "filename": "bio.txt",
+                "mime_type": "text/plain",
+                "size_bytes": 42,
+                "fsm_ref": "annotations/u1/file-1"
+            }],
+            "config": {
+                "language": "es",
+                "count": 10
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(err["error"].as_str().unwrap().contains("invalid_config"));
+
+    // Invalid count > 20
+    let (st, err) = call_with_service_key(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("u1"),
+        Some("ann-svc-key"),
+        Some(json!({
+            "title": "Invalid Count Prep",
+            "sources": [{
+                "filename": "bio.txt",
+                "mime_type": "text/plain",
+                "size_bytes": 42,
+                "fsm_ref": "annotations/u1/file-1"
+            }],
+            "config": {
+                "language": "th",
+                "count": 25
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(err["error"].as_str().unwrap().contains("invalid_config"));
+
+    // Invalid count < 1
+    let (st, err) = call_with_service_key(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("u1"),
+        Some("ann-svc-key"),
+        Some(json!({
+            "title": "Invalid Zero Count Prep",
+            "sources": [{
+                "filename": "bio.txt",
+                "mime_type": "text/plain",
+                "size_bytes": 42,
+                "fsm_ref": "annotations/u1/file-1"
+            }],
+            "config": {
+                "language": "pt-BR",
+                "count": 0
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(err["error"].as_str().unwrap().contains("invalid_config"));
+
+    // Unknown field rejected
+    let (st, _) = call_with_service_key(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("u1"),
+        Some("ann-svc-key"),
+        Some(json!({
+            "title": "Unknown Field Prep",
+            "sources": [{
+                "filename": "bio.txt",
+                "mime_type": "text/plain",
+                "size_bytes": 42,
+                "fsm_ref": "annotations/u1/file-1"
+            }],
+            "config": {
+                "language": "en",
+                "count": 10,
+                "unexpected": true
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Verify zero database side-effects after failures.
+    let count_studies_after: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM studies")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let count_configs_after: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM study_configs")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(count_studies_before.0, count_studies_after.0);
+    assert_eq!(count_configs_before.0, count_configs_after.0);
+
+    // 2. Successful creation with non-default config (Thai, count 15).
+    let (st, prepared) = call_with_service_key(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("u1"),
+        Some("ann-svc-key"),
+        Some(json!({
+            "title": "Thai Biology Study",
+            "description": "Prepared with Thai and 15 questions",
+            "sources": [{
+                "filename": "bio.txt",
+                "mime_type": "text/plain",
+                "size_bytes": 42,
+                "fsm_ref": "annotations/u1/file-1",
+                "selection_kind": "all",
+                "selection_spec": ""
+            }],
+            "config": {
+                "language": "th",
+                "count": 15
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(prepared["config"]["language"], "th");
+    assert_eq!(prepared["config"]["count"], 15);
+    let sid = prepared["study"]["id"].as_str().unwrap();
+
+    // 3. Fresh GET /studies/{id} on the live service returns the durable config.
+    let (st, detail) = call(&app, "GET", &format!("/studies/{sid}"), Some("u1"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(detail["config"]["language"], "th");
+    assert_eq!(detail["config"]["count"], 15);
+
+    // 4. Server restart simulation: fresh app router on the same store.
+    let restarted_app = presentation::router(App {
+        store: store.clone(),
+        settings: settings.clone(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+    let (st, restarted_detail) = call(
+        &restarted_app,
+        "GET",
+        &format!("/studies/{sid}"),
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(restarted_detail["config"]["language"], "th");
+    assert_eq!(restarted_detail["config"]["count"], 15);
+
+    // 5. Cross-owner denial: another user cannot read this study or its config.
+    let (st, _) = call(
+        &restarted_app,
+        "GET",
+        &format!("/studies/{sid}"),
+        Some("u2"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // 6. List studies succeeds and retains study summary.
+    let (st, list) = call(&restarted_app, "GET", "/studies", Some("u1"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    let items = list["items"].as_array().unwrap();
+    assert!(items.iter().any(|item| item["id"] == sid));
+
+    // 7. Prepared study without config defaults to None/null.
+    let (st, prep_no_cfg) = call_with_service_key(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("u1"),
+        Some("ann-svc-key"),
+        Some(json!({
+            "title": "No Config Prep",
+            "sources": [{
+                "filename": "bio.txt",
+                "mime_type": "text/plain",
+                "size_bytes": 42,
+                "fsm_ref": "annotations/u1/file-1"
+            }]
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert!(prep_no_cfg.get("config").is_none() || prep_no_cfg["config"].is_null());
+    let sid_no_cfg = prep_no_cfg["study"]["id"].as_str().unwrap();
+
+    let (st, detail_no_cfg) = call(
+        &app,
+        "GET",
+        &format!("/studies/{sid_no_cfg}"),
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(detail_no_cfg.get("config").is_none() || detail_no_cfg["config"].is_null());
+}
+
+#[tokio::test]
 async fn reports_picker_and_report_source_enforce_permissions_and_unconfigured_503() {
     use certifications_api::{
         core::{Error as CoreError, Result as CoreResult},
-        dal::reports::{BoxFuture, ReportPickerItem, ReportsClient},
+        dal::reports::{
+            BoxFuture, ReadableReportDataset, ReportDatasetMaterial, ReportInputRef, ReportLineage,
+            ReportPickerItem, ReportWatermark, ReportsClient,
+        },
     };
 
     struct MockReports;
@@ -331,6 +691,81 @@ async fn reports_picker_and_report_source_enforce_permissions_and_unconfigured_5
                 }
             })
         }
+        fn list_readable_datasets<'a>(
+            &'a self,
+            user_id: &'a str,
+            project: &'a str,
+            report: &'a str,
+        ) -> BoxFuture<'a, CoreResult<Vec<ReadableReportDataset>>> {
+            Box::pin(async move {
+                if user_id == "u1" && project == "proj1" && report == "rep1" {
+                    Ok(vec![ReadableReportDataset {
+                        project: project.into(),
+                        report: report.into(),
+                        dataset: json!({
+                            "dataset_id": "data1",
+                            "title": "Counts",
+                            "description": "",
+                            "equation": null,
+                            "data_tier": "public",
+                            "fields": [],
+                            "filters": [],
+                            "can_view": true,
+                            "visibility": "public",
+                            "meta": null
+                        }),
+                    }])
+                } else if user_id == "u1" && report == "missing" {
+                    Err(CoreError::missing())
+                } else if user_id == "u2" {
+                    Ok(Vec::new())
+                } else {
+                    Err(CoreError::forbidden(
+                        "report_access_denied: Caller lacks read permission for this report",
+                    ))
+                }
+            })
+        }
+        fn fetch_report_dataset<'a>(
+            &'a self,
+            user_id: &'a str,
+            project: &'a str,
+            report: &'a str,
+            dataset: &'a str,
+        ) -> BoxFuture<'a, CoreResult<ReportDatasetMaterial>> {
+            Box::pin(async move {
+                if user_id == "u1" && project == "proj1" && report == "rep1" && dataset == "data1" {
+                    Ok(ReportDatasetMaterial {
+                        bytes: br#"[{"count":2,"name":"one"}]"#.to_vec(),
+                        is_restricted: true,
+                        row_count: 1,
+                        lineage_sha256: "b".repeat(64),
+                        lineage: ReportLineage {
+                            calculation_id: "calc1".into(),
+                            calculation_version: 1,
+                            inputs: vec![ReportInputRef {
+                                schema: "items".into(),
+                                version: 1,
+                            }],
+                            source_watermark: [(
+                                "items".into(),
+                                ReportWatermark {
+                                    records: 2,
+                                    last_received_at: None,
+                                },
+                            )]
+                            .into(),
+                            filters: json!({}),
+                            calculated_at: "2026-11-24T00:00:00Z".into(),
+                        },
+                    })
+                } else {
+                    Err(CoreError::forbidden(
+                        "report_access_denied: Caller lacks read permission for this dataset",
+                    ))
+                }
+            })
+        }
         fn render_question_visual<'a>(
             &'a self,
             _user_id: &'a str,
@@ -366,6 +801,63 @@ async fn reports_picker_and_report_source_enforce_permissions_and_unconfigured_5
     assert_eq!(st, StatusCode::OK);
     assert_eq!(picker["items"].as_array().unwrap().len(), 1);
     assert_eq!(picker["items"][0]["report"], "rep1");
+    assert!(picker["items"][0]["dataset"].is_null());
+
+    // Existing picker can fetch caller-readable dataset descriptors for one explicit report.
+    let (st, datasets) = call(
+        &app,
+        "GET",
+        "/reports/picker?project=proj1&report=rep1",
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(datasets["items"].as_array().unwrap().len(), 1);
+    assert_eq!(datasets["items"][0]["dataset"]["dataset_id"], "data1");
+    assert_eq!(datasets["items"][0]["project"], "proj1");
+    assert_eq!(datasets["items"][0]["report"], "rep1");
+
+    let (st, no_datasets) = call(
+        &app,
+        "GET",
+        "/reports/picker?project=proj1&report=rep1",
+        Some("u2"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(no_datasets["items"].as_array().unwrap().len(), 0);
+
+    let (st, _) = call(
+        &app,
+        "GET",
+        "/reports/picker?project=proj1&report=missing",
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, _) = call(
+        &app,
+        "GET",
+        "/reports/picker?project=proj1&report=rep1",
+        Some("u3"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, _) = call(&app, "GET", "/reports/picker?report=rep1", Some("u1"), None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, _) = call(
+        &app,
+        "GET",
+        "/reports/picker?project=proj1&report=../rep1",
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
 
     let (_, s1) = call(
         &app,
@@ -384,13 +876,50 @@ async fn reports_picker_and_report_source_enforce_permissions_and_unconfigured_5
         Some(json!({
             "kind": "report",
             "filename": "Q4 Metrics",
-            "external_ref": "proj1/rep1",
+            "external_ref": "proj1/rep1/data1",
             "is_restricted": false
         })),
     )
     .await;
     assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(src["source_kind"], "report");
+    assert_eq!(src["selection_kind"], "all");
+    assert_eq!(src["selection_spec"], "");
     assert_eq!(src["is_restricted"], true);
+    assert_eq!(
+        src["size_bytes"],
+        br#"[{"count":2,"name":"one"}]"#.len() as i64
+    );
+    assert!(!src["sha256"].as_str().unwrap().is_empty());
+
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid1}/sources"),
+        Some("u1"),
+        Some(json!({
+            "kind": "report",
+            "filename": "Invalid",
+            "external_ref": "proj1/../data1"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid1}/sources"),
+        Some("u1"),
+        Some(json!({
+            "kind": "report",
+            "filename": "Invalid",
+            "external_ref": "proj1/rep1/data1",
+            "fsm_ref": "foreign/blob"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
 
     let (_, s2) = call(
         &app,
@@ -409,7 +938,7 @@ async fn reports_picker_and_report_source_enforce_permissions_and_unconfigured_5
         Some(json!({
             "kind": "report",
             "filename": "Q4 Metrics",
-            "external_ref": "proj1/rep1"
+            "external_ref": "proj1/rep1/data1"
         })),
     )
     .await;
@@ -1210,6 +1739,16 @@ fn selection_grammar_validates_pages_passages_and_ms_intervals() {
         )
         .unwrap(),
         "ms:0-100,200-300"
+    );
+    assert!(
+        canonicalize_selection(
+            "intervals",
+            "ms:0-100,ms:200-300",
+            Some("audio/wav"),
+            None,
+            None
+        )
+        .is_err()
     );
     // 2. PDF total selected pages <= 100 (single & multi-range boundary + overflow) and MIME parameter normalization
     assert_eq!(

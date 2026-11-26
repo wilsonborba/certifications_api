@@ -5,11 +5,20 @@ pub mod reports;
 pub mod scanner;
 pub mod schemas;
 
+mod any_query;
+pub(crate) use any_query::AnyQuery;
+
 use crate::core::{Error, Result, Settings};
 use sqlx::{AnyPool, ConnectOptions, any::AnyPoolOptions};
 use std::sync::Arc;
 
-pub const SQLITE_MIGRATIONS: [&str; 8] = [
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DatabaseBackend {
+    Postgres,
+    Sqlite,
+}
+
+pub const SQLITE_MIGRATIONS: [&str; 15] = [
     include_str!("../../migrations/001_v2_schema.sql"),
     include_str!("../../tests/sqlite/002_v2_studies_sources.sql"),
     include_str!("../../tests/sqlite/003_v2_generation_events.sql"),
@@ -17,12 +26,21 @@ pub const SQLITE_MIGRATIONS: [&str; 8] = [
     include_str!("../../tests/sqlite/005_v2_attempt_activity.sql"),
     include_str!("../../tests/sqlite/006_v2_certificates_snapshot.sql"),
     include_str!("../../tests/sqlite/007_v2_drop_legacy_waitlist.sql"),
+    include_str!("../../tests/sqlite/008_v2_quiz_question_provenance.sql"),
+    include_str!("../../tests/sqlite/009_v2_public_question_search.sql"),
     include_str!("../../tests/sqlite/010_v2_source_provenance.sql"),
+    include_str!("../../tests/sqlite/011_v2_study_prepared_config.sql"),
+    include_str!("../../tests/sqlite/012_v2_generation_source_snapshot.sql"),
+    include_str!("../../tests/sqlite/013_v2_generation_source_external_ref.sql"),
+    include_str!("../../tests/sqlite/014_v2_report_source_snapshot.sql"),
+    include_str!("../../tests/sqlite/015_v2_one_active_generation_per_owner.sql"),
 ];
 
 #[derive(Clone)]
 pub struct Store {
     pub db: AnyPool,
+    pub(crate) database_backend: DatabaseBackend,
+    pub(crate) sqlite_worker_lock: Arc<tokio::sync::Mutex<()>>,
     pub docs: documents::Documents,
     pub fsm: Arc<dyn fsm::FsmClient>,
     pub scanner: Arc<dyn scanner::VirusScanner>,
@@ -36,6 +54,16 @@ impl Store {
         if settings.database_url.is_empty() {
             return Err(Error::unavailable());
         }
+        let scheme = settings
+            .database_url
+            .split_once(':')
+            .map(|(scheme, _)| scheme.to_ascii_lowercase())
+            .unwrap_or_default();
+        let database_backend = match scheme.as_str() {
+            "postgres" | "postgresql" => DatabaseBackend::Postgres,
+            "sqlite" => DatabaseBackend::Sqlite,
+            _ => return Err(Error::unavailable()),
+        };
         let db = AnyPoolOptions::new()
             .max_connections(5)
             .connect(&settings.database_url)
@@ -46,6 +74,8 @@ impl Store {
             .map_err(|_| Error::unavailable())?;
         Ok(Self {
             db,
+            database_backend,
+            sqlite_worker_lock: Arc::new(tokio::sync::Mutex::new(())),
             docs: documents::Documents::remote(settings, http.clone()),
             fsm: fsm::HttpFsm::client(&settings.fsm_url, &settings.fsm_key, http.clone()),
             scanner: Arc::new(scanner::ClamScanner::with_runtime(
@@ -75,6 +105,8 @@ impl Store {
         }
         Self {
             db,
+            database_backend: DatabaseBackend::Sqlite,
+            sqlite_worker_lock: Arc::new(tokio::sync::Mutex::new(())),
             docs: documents::Documents::Memory(documents::Documents::memory()),
             fsm: fsm::MemoryFsm::new(),
             scanner: Arc::new(CleanFixtureScanner),

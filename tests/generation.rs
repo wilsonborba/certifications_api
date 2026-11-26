@@ -1,15 +1,22 @@
 use axum::{
-    Router,
+    Json, Router,
     body::Body,
+    extract::{Path, State},
     http::{Request, StatusCode},
+    routing::put,
 };
 use certifications_api::{
     core::{Result as CoreResult, Settings},
     dal::{
         Store,
         cortex::{
-            BoxFuture, CortexClient, CortexJobOutcome, GeneratedAlternative, GeneratedQuestion,
-            GenerationRequest,
+            BoxFuture, CortexClient, GeneratedAlternative, GeneratedQuestion, GenerationRequest,
+            GenerationResult,
+        },
+        fsm::MemoryFsm,
+        reports::{
+            BoxFuture as ReportsFuture, ReadableReportDataset, ReportDatasetMaterial,
+            ReportInputRef, ReportLineage, ReportPickerItem, ReportWatermark, ReportsClient,
         },
         schemas::{self, DraftSchema, SchemaField},
     },
@@ -23,16 +30,195 @@ use certifications_api::{
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use sqlx::{Row, any::AnyPoolOptions};
+use std::collections::HashSet;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+use tokio::sync::{Barrier, Notify};
 use tower::ServiceExt;
+
+const POSTGRES_MIGRATIONS: [&str; 15] = [
+    include_str!("../migrations/001_v2_schema.sql"),
+    include_str!("../migrations/002_v2_studies_sources.sql"),
+    include_str!("../migrations/003_v2_generation_events.sql"),
+    include_str!("../migrations/004_v2_authoring_origin.sql"),
+    include_str!("../migrations/005_v2_attempt_activity.sql"),
+    include_str!("../migrations/006_v2_certificates_snapshot.sql"),
+    include_str!("../migrations/007_v2_drop_legacy_waitlist.sql"),
+    include_str!("../migrations/008_v2_quiz_question_provenance.sql"),
+    include_str!("../migrations/009_v2_public_question_search.sql"),
+    include_str!("../migrations/010_v2_source_provenance.sql"),
+    include_str!("../migrations/011_v2_study_prepared_config.sql"),
+    include_str!("../migrations/012_v2_generation_source_snapshot.sql"),
+    include_str!("../migrations/013_v2_generation_source_external_ref.sql"),
+    include_str!("../migrations/014_v2_report_source_snapshot.sql"),
+    include_str!("../migrations/015_v2_one_active_generation_per_owner.sql"),
+];
+
+struct CortexGate {
+    entered: Notify,
+    release: Notify,
+}
+
+struct ReportFetchGate {
+    entered: Notify,
+    release: Notify,
+    resumed: Notify,
+}
+
+struct MockReportSource {
+    accessible: AtomicBool,
+    bytes: Mutex<Vec<u8>>,
+    fetch_gate: Mutex<Option<Arc<ReportFetchGate>>>,
+}
+
+impl ReportsClient for MockReportSource {
+    fn list_readable_reports<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _project: Option<&'a str>,
+    ) -> ReportsFuture<'a, CoreResult<Vec<ReportPickerItem>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn check_report_access<'a>(
+        &'a self,
+        _user_id: &'a str,
+        project: &'a str,
+        report: &'a str,
+    ) -> ReportsFuture<'a, CoreResult<ReportPickerItem>> {
+        Box::pin(async move {
+            if self.accessible.load(Ordering::SeqCst) && project == "proj" && report == "rep" {
+                Ok(ReportPickerItem {
+                    project: project.into(),
+                    report: report.into(),
+                    title: "Report".into(),
+                    is_restricted: false,
+                })
+            } else {
+                Err(certifications_api::core::Error::forbidden(
+                    "report_access_denied: Caller lacks read permission for this report",
+                ))
+            }
+        })
+    }
+    fn list_readable_datasets<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _project: &'a str,
+        _report: &'a str,
+    ) -> ReportsFuture<'a, CoreResult<Vec<ReadableReportDataset>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn fetch_report_dataset<'a>(
+        &'a self,
+        _user_id: &'a str,
+        project: &'a str,
+        report: &'a str,
+        dataset: &'a str,
+    ) -> ReportsFuture<'a, CoreResult<ReportDatasetMaterial>> {
+        Box::pin(async move {
+            let fetch_gate = self.fetch_gate.lock().unwrap().take();
+            if let Some(fetch_gate) = fetch_gate {
+                fetch_gate.entered.notify_one();
+                fetch_gate.release.notified().await;
+                fetch_gate.resumed.notify_one();
+            }
+            if self.accessible.load(Ordering::SeqCst)
+                && project == "proj"
+                && report == "rep"
+                && dataset == "data"
+            {
+                Ok(ReportDatasetMaterial {
+                    bytes: self.bytes.lock().unwrap().clone(),
+                    is_restricted: false,
+                    row_count: 1,
+                    lineage_sha256: "a".repeat(64),
+                    lineage: ReportLineage {
+                        calculation_id: "calc1".into(),
+                        calculation_version: 1,
+                        inputs: vec![ReportInputRef {
+                            schema: "records".into(),
+                            version: 2,
+                        }],
+                        source_watermark: [(
+                            "records".into(),
+                            ReportWatermark {
+                                records: 1,
+                                last_received_at: Some("2026-11-24T00:00:00Z".into()),
+                            },
+                        )]
+                        .into(),
+                        filters: json!({}),
+                        calculated_at: "2026-11-24T00:00:00Z".into(),
+                    },
+                })
+            } else {
+                Err(certifications_api::core::Error::forbidden(
+                    "report_access_denied: Caller lacks read permission for this dataset",
+                ))
+            }
+        })
+    }
+    fn render_question_visual<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _prompt: &'a str,
+        _visual_spec: &'a Value,
+    ) -> ReportsFuture<'a, CoreResult<certifications_api::dal::reports::RenderedVisual>> {
+        Box::pin(async { Err(certifications_api::core::Error::unavailable()) })
+    }
+}
+
+#[derive(Clone, Default)]
+struct CouchGate {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    completed: Arc<AtomicBool>,
+    documents: Arc<Mutex<std::collections::HashMap<String, Value>>>,
+}
+
+async fn couch_put(
+    State(gate): State<CouchGate>,
+    Path((_database, doc_id)): Path<(String, String)>,
+    Json(mut body): Json<Value>,
+) -> StatusCode {
+    gate.entered.notify_one();
+    gate.release.notified().await;
+    body["_rev"] = json!("test-revision");
+    gate.documents.lock().unwrap().insert(doc_id, body);
+    gate.completed.store(true, Ordering::SeqCst);
+    StatusCode::CREATED
+}
+
+async fn couch_get(
+    State(gate): State<CouchGate>,
+    Path((_database, doc_id)): Path<(String, String)>,
+) -> (StatusCode, Json<Value>) {
+    let body = gate.documents.lock().unwrap().get(&doc_id).cloned();
+    match body {
+        Some(body) => (StatusCode::OK, Json(body)),
+        None => (StatusCode::NOT_FOUND, Json(Value::Null)),
+    }
+}
+
+async fn couch_delete(
+    State(gate): State<CouchGate>,
+    Path((_database, doc_id)): Path<(String, String)>,
+) -> StatusCode {
+    gate.documents.lock().unwrap().remove(&doc_id);
+    StatusCode::OK
+}
 
 struct MockCortex {
     calls: AtomicUsize,
     emit_cjk_first: AtomicBool,
     emit_bad_citation: AtomicBool,
+    source_text: Mutex<String>,
+    source_file: Mutex<Option<certifications_api::dal::cortex::GenerationSource>>,
+    prompt_suffix: Mutex<String>,
+    gate: Mutex<Option<Arc<CortexGate>>>,
 }
 
 impl MockCortex {
@@ -41,6 +227,10 @@ impl MockCortex {
             calls: AtomicUsize::new(0),
             emit_cjk_first: AtomicBool::new(false),
             emit_bad_citation: AtomicBool::new(false),
+            source_text: Mutex::new(String::new()),
+            source_file: Mutex::new(None),
+            prompt_suffix: Mutex::new(String::new()),
+            gate: Mutex::new(None),
         })
     }
 }
@@ -52,50 +242,67 @@ impl CortexClient for MockCortex {
     fn generate_questions<'a>(
         &'a self,
         req: &'a GenerationRequest,
-    ) -> BoxFuture<'a, CoreResult<Vec<GeneratedQuestion>>> {
+    ) -> BoxFuture<'a, CoreResult<GenerationResult>> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            let gate = self.gate.lock().unwrap().clone();
+            if let Some(gate) = gate {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
+            *self.source_text.lock().unwrap() = req
+                .sources
+                .first()
+                .map(|source| String::from_utf8_lossy(&source.bytes).into_owned())
+                .unwrap_or_default();
+            *self.source_file.lock().unwrap() = req.sources.first().cloned();
             let src = if self.emit_bad_citation.load(Ordering::SeqCst) {
                 "fabricated-source".to_string()
             } else {
                 req.source_ids[0].clone()
             };
-            let prompt = if self.emit_cjk_first.load(Ordering::SeqCst) {
+            let base_prompt = if self.emit_cjk_first.load(Ordering::SeqCst) {
                 "อะไรคือ ATP 细胞".to_string()
             } else if req.language == "th" {
                 "อะไรคือ ATP".to_string()
             } else {
                 "What is ATP?".to_string()
             };
-            Ok(vec![GeneratedQuestion {
-                prompt,
-                alternatives: vec![
-                    GeneratedAlternative {
-                        id: "a".into(),
-                        text: if req.language == "th" {
-                            "พลังงาน".into()
-                        } else {
-                            "Energy currency".into()
+            let prompt = format!("{base_prompt}{}", self.prompt_suffix.lock().unwrap());
+            Ok(GenerationResult {
+                questions: vec![GeneratedQuestion {
+                    prompt,
+                    alternatives: vec![
+                        GeneratedAlternative {
+                            id: "a".into(),
+                            text: if req.language == "th" {
+                                "พลังงาน".into()
+                            } else {
+                                "Energy currency".into()
+                            },
                         },
-                    },
-                    GeneratedAlternative {
-                        id: "b".into(),
-                        text: if req.language == "th" {
-                            "น้ำ".into()
-                        } else {
-                            "Water".into()
+                        GeneratedAlternative {
+                            id: "b".into(),
+                            text: if req.language == "th" {
+                                "น้ำ".into()
+                            } else {
+                                "Water".into()
+                            },
                         },
+                    ],
+                    correct_id: "a".into(),
+                    explanation: if req.language == "th" {
+                        "ใช้ในเซลล์".into()
+                    } else {
+                        "Used in cells".into()
                     },
-                ],
-                correct_id: "a".into(),
-                explanation: if req.language == "th" {
-                    "ใช้ในเซลล์".into()
-                } else {
-                    "Used in cells".into()
-                },
-                source_id: src,
-                citation_ref: "p.1".into(),
-            }])
+                    source_id: src,
+                    citation_ref: "p.1".into(),
+                }],
+                session_id: "temporary-session".into(),
+                output_id: "temporary-output".into(),
+                status: "done".into(),
+            })
         })
     }
     fn correct_language<'a>(
@@ -117,12 +324,6 @@ impl CortexClient for MockCortex {
                 })
                 .collect())
         })
-    }
-    fn check_request_outcome<'a>(
-        &'a self,
-        _cortex_job_id: &'a str,
-    ) -> BoxFuture<'a, CoreResult<CortexJobOutcome>> {
-        Box::pin(async { Ok(CortexJobOutcome::NotFound) })
     }
     fn fetch_timing_averages<'a>(
         &'a self,
@@ -225,6 +426,316 @@ async fn call(
     (status, val)
 }
 
+fn multipart_source(boundary: &str, filename: &str, mime: &str, bytes: &[u8]) -> Vec<u8> {
+    let mut body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {mime}\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
+}
+
+async fn call_multipart_source(
+    app: &Router,
+    uri: &str,
+    user: &str,
+    boundary: &str,
+    filename: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(uri)
+                .header("x-uuid", user)
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(multipart_source(
+                    boundary, filename, mime, bytes,
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+async fn wait_for_job_status(app: &Router, job_id: &str, expected: &str) -> Value {
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let (_, job) = call(
+                app,
+                "GET",
+                &format!("/generations/{job_id}"),
+                Some("u1"),
+                None,
+            )
+            .await;
+            if job["status"] == expected {
+                return job;
+            }
+            if matches!(
+                job["status"].as_str(),
+                Some("completed" | "failed" | "cancelled")
+            ) {
+                panic!("job reached unexpected terminal status: {job}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker did not reach the expected job status")
+}
+
+async fn queued_report_generation() -> (
+    Store,
+    Router,
+    Arc<MockCortex>,
+    Arc<MockReportSource>,
+    String,
+) {
+    let mut store = Store::fixture().await;
+    let cortex = MockCortex::new();
+    let reports = Arc::new(MockReportSource {
+        accessible: AtomicBool::new(true),
+        bytes: Mutex::new(br#"[{"value":7}]"#.to_vec()),
+        fetch_gate: Mutex::new(None),
+    });
+    store.cortex = cortex.clone();
+    store.reports = reports.clone();
+    publish_question_schema(&store).await;
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+    let (_, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u1"),
+        Some(json!({"title": "Report study"})),
+    )
+    .await;
+    let study_id = study["id"].as_str().unwrap().to_string();
+    let (source_status, source) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/sources"),
+        Some("u1"),
+        Some(json!({
+            "kind": "report",
+            "filename": "Metrics",
+            "external_ref": "proj/rep/data"
+        })),
+    )
+    .await;
+    assert_eq!(source_status, StatusCode::CREATED);
+    assert_eq!(source["mime_type"], "text/plain");
+    assert_eq!(source["fsm_ref"], "");
+    assert_eq!(source["size_bytes"], 13);
+    assert!(!source["sha256"].as_str().unwrap().is_empty());
+
+    let (job_status, job) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/generations"),
+        Some("u1"),
+        Some(json!({"language": "en", "count": 1, "idempotency_key": "reports-source"})),
+    )
+    .await;
+    assert_eq!(job_status, StatusCode::CREATED);
+    let job_id = job["id"].as_str().unwrap().to_string();
+    (store, app, cortex, reports, job_id)
+}
+
+#[tokio::test]
+async fn report_dataset_rows_are_frozen_and_used_without_fsm_reads() {
+    let (store, app, cortex, _reports, job_id) = queued_report_generation().await;
+    let frozen: (String, String, i64, String, String, String, i64, i64, String) = sqlx::query_as(
+        "SELECT external_ref, source_kind, size_bytes, sha256, selection_kind,
+                report_calculation_id, report_calculation_version, report_row_count, report_lineage_sha256
+         FROM generation_job_sources WHERE job_id = $1",
+    )
+    .bind(&job_id)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(frozen.0, "proj/rep/data");
+    assert_eq!(frozen.1, "report");
+    assert_eq!(frozen.2, 13);
+    assert!(!frozen.3.is_empty());
+    assert_eq!(frozen.4, "all");
+    assert_eq!(frozen.5, "calc1");
+    assert_eq!(frozen.6, 1);
+    assert_eq!(frozen.7, 1);
+    assert_eq!(frozen.8, "a".repeat(64));
+
+    let worker = tokio::spawn(generations::run_queue_worker(store.clone()));
+    let done = wait_for_job_status(&app, &job_id, "completed").await;
+    assert_eq!(done["status"], "completed");
+    assert_eq!(*cortex.source_text.lock().unwrap(), r#"[{"value":7}]"#);
+    worker.abort();
+}
+
+#[tokio::test]
+async fn report_snapshot_survives_stop_resume_and_runs_without_fsm_reads() {
+    let (mut store, app, cortex, _reports, original_job_id) = queued_report_generation().await;
+    let fsm = MemoryFsm::new();
+    store.fsm = fsm.clone();
+    let snapshot: (String, String, i64, String, String, String, i64, i64, String) = sqlx::query_as(
+        "SELECT external_ref, source_kind, size_bytes, sha256, selection_kind,
+                report_calculation_id, report_calculation_version, report_row_count, report_lineage_sha256
+         FROM generation_job_sources WHERE job_id = $1",
+    )
+    .bind(&original_job_id)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+
+    let (stop_status, stopped) = call(
+        &app,
+        "POST",
+        &format!("/generations/{original_job_id}/stop"),
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(stop_status, StatusCode::OK);
+    assert_eq!(stopped["status"], "cancelled");
+    let (resume_status, resumed) = call(
+        &app,
+        "POST",
+        &format!("/generations/{original_job_id}/resume"),
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(resume_status, StatusCode::CREATED);
+    let resumed_job_id = resumed["id"].as_str().unwrap();
+    let resumed_snapshot: (String, String, i64, String, String, String, i64, i64, String) =
+        sqlx::query_as(
+            "SELECT external_ref, source_kind, size_bytes, sha256, selection_kind,
+                    report_calculation_id, report_calculation_version, report_row_count, report_lineage_sha256
+             FROM generation_job_sources WHERE job_id = $1",
+        )
+        .bind(resumed_job_id)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(resumed_snapshot, snapshot);
+
+    let worker = tokio::spawn(generations::run_queue_worker(store.clone()));
+    let done = wait_for_job_status(&app, resumed_job_id, "completed").await;
+    assert_eq!(done["status"], "completed");
+    assert_eq!(*cortex.source_text.lock().unwrap(), r#"[{"value":7}]"#);
+    assert_eq!(fsm.get_count(), 0);
+    worker.abort();
+    let _ = worker.await;
+}
+
+#[tokio::test]
+async fn report_dataset_access_is_rechecked_before_any_cortex_call() {
+    let (store, app, cortex, reports, job_id) = queued_report_generation().await;
+    reports.accessible.store(false, Ordering::SeqCst);
+
+    let worker = tokio::spawn(generations::run_queue_worker(store));
+    let failed = wait_for_job_status(&app, &job_id, "failed").await;
+    assert_eq!(failed["error_code"], "source_unavailable");
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 0);
+    worker.abort();
+}
+
+#[tokio::test]
+async fn report_dataset_content_changes_fail_the_frozen_hash_check_before_cortex() {
+    let (store, app, cortex, reports, job_id) = queued_report_generation().await;
+    *reports.bytes.lock().unwrap() = br#"[{"value":8}]"#.to_vec();
+
+    let worker = tokio::spawn(generations::run_queue_worker(store));
+    let failed = wait_for_job_status(&app, &job_id, "failed").await;
+    assert_eq!(failed["error_code"], "source_integrity_failed");
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 0);
+    worker.abort();
+}
+
+#[tokio::test]
+async fn pdf_selection_reaches_cortex_files_before_extraction() {
+    let mut store = Store::fixture().await;
+    let fsm = MemoryFsm::new();
+    store.fsm = fsm.clone();
+    let cortex = MockCortex::new();
+    store.cortex = cortex.clone();
+    publish_question_schema(&store).await;
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+    let (_, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u1"),
+        Some(json!({"title": "PDF study"})),
+    )
+    .await;
+    let study_id = study["id"].as_str().unwrap();
+    let pdf = b"%PDF-1.4\n% /Type /Page\n1 0 obj<</Type /Catalog /Pages 2 0 R>>endobj\n2 0 obj<</Type /Pages /Count 1 /Kids[3 0 R]>>endobj\n3 0 obj<</Type /Page /Contents 4 0 R>>endobj\n4 0 obj<</Length 15>>stream\n/Type /Page\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%EOF";
+    let (upload_status, source) = call_multipart_source(
+        &app,
+        &format!("/studies/{study_id}/sources"),
+        "u1",
+        "PDF-BOUNDARY",
+        "slides.pdf",
+        "application/pdf",
+        pdf,
+    )
+    .await;
+    assert_eq!(upload_status, StatusCode::CREATED);
+    let source_id = source["id"].as_str().unwrap();
+    let (selection_status, _) = call(
+        &app,
+        "PATCH",
+        &format!("/studies/{study_id}/sources/{source_id}/selection"),
+        Some("u1"),
+        Some(json!({"kind":"pages", "spec":"1"})),
+    )
+    .await;
+    assert_eq!(selection_status, StatusCode::OK);
+    // Selection validation reads the PDF once to check its page bound. The worker
+    // must then read it exactly once when preparing the Cortex file request.
+    let reads_before_generation = fsm.get_count();
+    let (job_status, job) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/generations"),
+        Some("u1"),
+        Some(json!({"language":"en", "count":1, "idempotency_key":"pdf-selection"})),
+    )
+    .await;
+    assert_eq!(job_status, StatusCode::CREATED);
+    let job_id = job["id"].as_str().unwrap();
+
+    let worker = tokio::spawn(generations::run_queue_worker(store.clone()));
+    let done = wait_for_job_status(&app, job_id, "completed").await;
+    assert_eq!(done["status"], "completed");
+    let prepared = cortex.source_file.lock().unwrap().clone().unwrap();
+    assert_eq!(prepared.mime_type, "application/pdf");
+    assert_eq!(prepared.selection_kind, "pages");
+    assert_eq!(prepared.selection_spec, "1");
+    assert_eq!(prepared.bytes, pdf);
+    assert_eq!(fsm.get_count(), reads_before_generation + 1);
+    worker.abort();
+}
+
 #[tokio::test]
 async fn refresh_is_idempotent_second_active_job_blocked_and_stop_resume_requeues() {
     let mut store = Store::fixture().await;
@@ -248,7 +759,7 @@ async fn refresh_is_idempotent_second_active_job_blocked_and_stop_resume_requeue
     )
     .await;
     let sid = study["id"].as_str().unwrap().to_string();
-    call(
+    let (_, source) = call(
         &app,
         "POST",
         &format!("/studies/{sid}/sources"),
@@ -256,6 +767,16 @@ async fn refresh_is_idempotent_second_active_job_blocked_and_stop_resume_requeue
         Some(json!({"filename": "bio.txt", "mime_type": "text/plain", "content_text": "ATP is energy."})),
     )
     .await;
+    let source_id = source["id"].as_str().unwrap().to_string();
+    let (st, _) = call(
+        &app,
+        "PATCH",
+        &format!("/studies/{sid}/sources/{source_id}/selection"),
+        Some("u1"),
+        Some(json!({"kind":"passages","spec":"p1:0-3"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
 
     // Start generation with idempotency_key.
     let (st, job1) = call(
@@ -293,6 +814,17 @@ async fn refresh_is_idempotent_second_active_job_blocked_and_stop_resume_requeue
     .await;
     assert_eq!(st, StatusCode::CONFLICT);
 
+    // Selection edits after queueing do not change the frozen source snapshot.
+    let (st, _) = call(
+        &app,
+        "PATCH",
+        &format!("/studies/{sid}/sources/{source_id}/selection"),
+        Some("u1"),
+        Some(json!({"kind":"passages","spec":"p1:7-13"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
     // Stop and resume requeues cleanly.
     let (st, stopped) = call(
         &app,
@@ -324,11 +856,12 @@ async fn refresh_is_idempotent_second_active_job_blocked_and_stop_resume_requeue
         access_level: 3,
         display_name: None,
     };
-    let done = generations::process_job(&store, &caller, &jid2)
-        .await
-        .unwrap();
+    let worker = tokio::spawn(generations::run_queue_worker(store.clone()));
+    let _ = wait_for_job_status(&app, &jid2, "completed").await;
+    let done = generations::get_job(&store, &caller, &jid2).await.unwrap();
     assert_eq!(done.status, "completed");
     assert_eq!(done.saved_count, 1);
+    assert_eq!(*cortex.source_text.lock().unwrap(), "ATP");
     let qid = done.quiz_id.unwrap();
     let vis: String = sqlx::query_scalar("SELECT visibility FROM quizzes WHERE id = $1")
         .bind(&qid)
@@ -336,6 +869,59 @@ async fn refresh_is_idempotent_second_active_job_blocked_and_stop_resume_requeue
         .await
         .unwrap();
     assert_eq!(vis, "private");
+    let generated_membership = sqlx::query(
+        "SELECT qvq.source_scope, qvq.origin_quiz_id, qvq.origin_quiz_version_id,
+                COUNT(qc.id) AS citation_count
+         FROM quizzes q
+         JOIN quiz_version_questions qvq ON qvq.quiz_version_id = q.active_version_id
+         LEFT JOIN question_citations qc ON qc.question_version_id = qvq.question_version_id
+         WHERE q.id = $1
+         GROUP BY qvq.source_scope, qvq.origin_quiz_id, qvq.origin_quiz_version_id",
+    )
+    .bind(&qid)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        generated_membership.get::<String, _>("source_scope"),
+        "generated_from_current_selected_sources"
+    );
+    assert_eq!(
+        generated_membership.get::<Option<String>, _>("origin_quiz_id"),
+        None
+    );
+    assert_eq!(
+        generated_membership.get::<Option<String>, _>("origin_quiz_version_id"),
+        None
+    );
+    assert_eq!(generated_membership.get::<i64, _>("citation_count"), 1);
+
+    // A corrupted queued integrity snapshot must fail before Cortex is called.
+    let (st, sabotaged) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/generations"),
+        Some("u1"),
+        Some(json!({"language": "en", "count": 1, "idempotency_key": "req-sabotaged"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sabotaged_id = sabotaged["id"].as_str().unwrap();
+    sqlx::query("UPDATE generation_job_sources SET sha256 = 'wrong' WHERE job_id = $1")
+        .bind(sabotaged_id)
+        .execute(&store.db)
+        .await
+        .unwrap();
+    let _ = wait_for_job_status(&app, sabotaged_id, "failed").await;
+    let sabotaged = generations::get_job(&store, &caller, sabotaged_id)
+        .await
+        .unwrap();
+    assert_eq!(sabotaged.status, "failed");
+    assert_eq!(sabotaged.error_code, "source_integrity_failed");
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 1);
+
+    worker.abort();
+    let _ = worker.await;
 
     let sse_resp = app
         .clone()
@@ -419,4 +1005,1224 @@ async fn wrong_script_is_corrected_and_unverified_citation_is_rejected() {
         .await
         .unwrap_err();
     assert_eq!(err.0, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn start_rejects_foreign_other_study_and_public_quiz_targets_and_expired_drafts() {
+    let mut store = Store::fixture().await;
+    let cortex = MockCortex::new();
+    let fsm = certifications_api::dal::fsm::MemoryFsm::new();
+    store.fsm = fsm.clone();
+    store.cortex = cortex.clone();
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+    let (_, first) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u1"),
+        Some(json!({"title": "First"})),
+    )
+    .await;
+    let first_id = first["id"].as_str().unwrap();
+    let (_, second) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u1"),
+        Some(json!({"title": "Second"})),
+    )
+    .await;
+    let second_id = second["id"].as_str().unwrap();
+    let (_, foreign_study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u2"),
+        Some(json!({"title": "Foreign"})),
+    )
+    .await;
+    let foreign_study_id = foreign_study["id"].as_str().unwrap();
+
+    for (quiz_id, owner_id, study_id, visibility) in [
+        ("other-study", "u1", second_id, "private"),
+        ("foreign-owner", "u2", first_id, "private"),
+        ("foreign-study", "u2", foreign_study_id, "private"),
+        ("public-target", "u1", first_id, "public"),
+    ] {
+        sqlx::query(
+            "INSERT INTO quizzes(id, owner_id, study_id, visibility, origin, active_version_id, created_at, updated_at)
+             VALUES($1, $2, $3, $4, 'generated_with_cortex', '', 1, 1)",
+        )
+        .bind(quiz_id)
+        .bind(owner_id)
+        .bind(study_id)
+        .bind(visibility)
+        .execute(&store.db)
+        .await
+        .unwrap();
+        let (status, _) = call(
+            &app,
+            "POST",
+            &format!("/studies/{first_id}/generations"),
+            Some("u1"),
+            Some(json!({"language":"en", "count":1, "quiz_id":quiz_id})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "target {quiz_id}");
+    }
+
+    sqlx::query("UPDATE studies SET expires_at = 0 WHERE id = $1")
+        .bind(first_id)
+        .execute(&store.db)
+        .await
+        .unwrap();
+    let (status, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{first_id}/generations"),
+        Some("u1"),
+        Some(json!({"language":"en", "count":1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE);
+    let study_status: String = sqlx::query_scalar("SELECT status FROM studies WHERE id = $1")
+        .bind(first_id)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(study_status, "expired");
+    let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM generation_jobs")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(jobs, 0);
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fsm.get_count(), 0);
+}
+
+#[tokio::test]
+async fn worker_checks_server_provenance_before_any_fsm_read() {
+    let mut store = Store::fixture().await;
+    let cortex = MockCortex::new();
+    let fsm = certifications_api::dal::fsm::MemoryFsm::new();
+    store.fsm = fsm.clone();
+    store.cortex = cortex.clone();
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+    let (_, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u1"),
+        Some(json!({"title":"Provenance"})),
+    )
+    .await;
+    let study_id = study["id"].as_str().unwrap();
+    let (_, source) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/sources"),
+        Some("u1"),
+        Some(json!({"filename":"source.txt", "mime_type":"text/plain", "content_text":"source text"})),
+    )
+    .await;
+    let source_id = source["id"].as_str().unwrap();
+    sqlx::query("UPDATE sources SET source_provenance = 'unknown' WHERE id = $1")
+        .bind(source_id)
+        .execute(&store.db)
+        .await
+        .unwrap();
+    let (status, job) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/generations"),
+        Some("u1"),
+        Some(json!({"language":"en", "count":1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let job_id = job["id"].as_str().unwrap();
+    let worker = tokio::spawn(generations::run_queue_worker(store.clone()));
+    let failed = wait_for_job_status(&app, job_id, "failed").await;
+    assert_eq!(failed["error_code"], "source_unavailable");
+    assert_eq!(fsm.get_count(), 0);
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 0);
+    worker.abort();
+    let _ = worker.await;
+}
+
+#[tokio::test]
+async fn stop_during_cortex_call_saves_the_current_valid_step_then_stops() {
+    let mut store = Store::fixture().await;
+    let cortex = MockCortex::new();
+    let gate = Arc::new(CortexGate {
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    *cortex.gate.lock().unwrap() = Some(gate.clone());
+    store.cortex = cortex.clone();
+    publish_question_schema(&store).await;
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+    let (_, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u1"),
+        Some(json!({"title":"Stop boundary"})),
+    )
+    .await;
+    let study_id = study["id"].as_str().unwrap();
+    call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/sources"),
+        Some("u1"),
+        Some(json!({"filename":"source.txt", "mime_type":"text/plain", "content_text":"source text"})),
+    )
+    .await;
+    let (status, job) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/generations"),
+        Some("u1"),
+        Some(json!({"language":"en", "count":1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let job_id = job["id"].as_str().unwrap();
+    let docs_before = match &store.docs {
+        certifications_api::dal::documents::Documents::Memory(docs) => docs.len(),
+        certifications_api::dal::documents::Documents::Remote(_) => unreachable!(),
+    };
+    let worker = tokio::spawn(generations::run_queue_worker(store.clone()));
+    tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.notified())
+        .await
+        .expect("worker did not enter Cortex call");
+    let (status, stopped) = call(
+        &app,
+        "POST",
+        &format!("/generations/{job_id}/stop"),
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stopped["status"], "running");
+    assert_eq!(stopped["stop_requested"], true);
+    gate.release.notify_one();
+    let cancelled = wait_for_job_status(&app, job_id, "cancelled").await;
+    assert_eq!(cancelled["status"], "cancelled");
+    assert_eq!(cancelled["saved_count"], 1);
+    let quizzes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quizzes WHERE study_id = $1")
+        .bind(study_id)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(quizzes, 1);
+    let doc_id: String = sqlx::query_scalar(
+        "SELECT qv.couch_doc_id FROM quizzes q JOIN quiz_version_questions qvq ON qvq.quiz_version_id = q.active_version_id
+         JOIN question_versions qv ON qv.id = qvq.question_version_id WHERE q.study_id = $1",
+    )
+    .bind(study_id)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    match &store.docs {
+        certifications_api::dal::documents::Documents::Memory(docs) => {
+            assert!(docs.len() > docs_before);
+            assert!(docs.contains(&doc_id));
+        }
+        certifications_api::dal::documents::Documents::Remote(_) => unreachable!(),
+    }
+    worker.abort();
+    let _ = worker.await;
+}
+
+#[tokio::test]
+async fn stop_racing_with_document_save_commits_the_valid_step_as_cancelled() {
+    let mut store = Store::fixture().await;
+    let cortex = MockCortex::new();
+    store.cortex = cortex;
+    publish_question_schema(&store).await;
+
+    let couch_gate = CouchGate::default();
+    let couch = Router::new()
+        .route(
+            "/{database}/{doc_id}",
+            put(couch_put).get(couch_get).delete(couch_delete),
+        )
+        .with_state(couch_gate.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let couch_server = tokio::spawn(async move {
+        axum::serve(listener, couch).await.unwrap();
+    });
+    let mut settings = test_settings();
+    settings.couch_url = format!("http://{address}");
+    store.docs =
+        certifications_api::dal::documents::Documents::remote(&settings, reqwest::Client::new());
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings,
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+
+    let (_, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u1"),
+        Some(json!({"title":"Stop during save"})),
+    )
+    .await;
+    let study_id = study["id"].as_str().unwrap();
+    call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/sources"),
+        Some("u1"),
+        Some(json!({"filename":"source.txt", "mime_type":"text/plain", "content_text":"source text"})),
+    )
+    .await;
+    let (status, job) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/generations"),
+        Some("u1"),
+        Some(json!({"language":"en", "count":1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let job_id = job["id"].as_str().unwrap();
+    let worker = tokio::spawn(generations::run_queue_worker(store.clone()));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        couch_gate.entered.notified(),
+    )
+    .await
+    .expect("worker did not reach the document save boundary");
+
+    let (status, stopped) = call(
+        &app,
+        "POST",
+        &format!("/generations/{job_id}/stop"),
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stopped["status"], "running");
+    assert_eq!(stopped["stop_requested"], true);
+    couch_gate.release.notify_one();
+    let _ = wait_for_job_status(&app, job_id, "cancelled").await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !couch_gate.completed.load(Ordering::SeqCst)
+            || couch_gate.documents.lock().unwrap().is_empty()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker did not commit the in-flight CouchDB question");
+    let quizzes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quizzes WHERE study_id = $1")
+        .bind(study_id)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(quizzes, 1);
+    worker.abort();
+    let _ = worker.await;
+    couch_server.abort();
+    let _ = couch_server.await;
+}
+
+#[tokio::test]
+async fn extra_round_keeps_existing_quiz_membership() {
+    let mut store = Store::fixture().await;
+    let cortex = MockCortex::new();
+    store.cortex = cortex.clone();
+    publish_question_schema(&store).await;
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+    let (_, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u1"),
+        Some(json!({"title":"Extra round"})),
+    )
+    .await;
+    let study_id = study["id"].as_str().unwrap();
+    call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/sources"),
+        Some("u1"),
+        Some(json!({"filename":"source.txt", "mime_type":"text/plain", "content_text":"source text"})),
+    )
+    .await;
+    let (_, first_job) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/generations"),
+        Some("u1"),
+        Some(json!({"language":"en", "count":1})),
+    )
+    .await;
+    let first_id = first_job["id"].as_str().unwrap();
+    let worker = tokio::spawn(generations::run_queue_worker(store.clone()));
+    let first_done = wait_for_job_status(&app, first_id, "completed").await;
+    let quiz_id = first_done["quiz_id"].as_str().unwrap();
+    let first_version: String =
+        sqlx::query_scalar("SELECT active_version_id FROM quizzes WHERE id = $1")
+            .bind(quiz_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap();
+    let first_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM quiz_version_questions WHERE quiz_version_id = $1",
+    )
+    .bind(&first_version)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(first_count, 1);
+
+    *cortex.prompt_suffix.lock().unwrap() = " Next".into();
+    let (status, second_job) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/generations"),
+        Some("u1"),
+        Some(json!({"language":"en", "count":1, "quiz_id":quiz_id})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let second_id = second_job["id"].as_str().unwrap();
+    let second_done = wait_for_job_status(&app, second_id, "completed").await;
+    assert_eq!(second_done["saved_count"], 1);
+    let active_version: String =
+        sqlx::query_scalar("SELECT active_version_id FROM quizzes WHERE id = $1")
+            .bind(quiz_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap();
+    let active_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM quiz_version_questions WHERE quiz_version_id = $1",
+    )
+    .bind(&active_version)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(active_count, 2);
+    let preserved_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM quiz_version_questions WHERE quiz_version_id = $1",
+    )
+    .bind(&first_version)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(preserved_count, 1);
+    worker.abort();
+    let _ = worker.await;
+}
+
+#[tokio::test]
+async fn worker_marks_guardrail_failure_terminal_instead_of_leaving_running_job() {
+    let mut store = Store::fixture().await;
+    let cortex = MockCortex::new();
+    store.cortex = cortex.clone();
+    publish_question_schema(&store).await;
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+    let (_, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u1"),
+        Some(json!({"title":"Worker failure"})),
+    )
+    .await;
+    let study_id = study["id"].as_str().unwrap();
+    call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/sources"),
+        Some("u1"),
+        Some(json!({"filename":"source.txt", "mime_type":"text/plain", "content_text":"source text"})),
+    )
+    .await;
+    let (_, job) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/generations"),
+        Some("u1"),
+        Some(json!({"language":"en", "count":1})),
+    )
+    .await;
+    let job_id = job["id"].as_str().unwrap();
+    sqlx::query("DELETE FROM schema_versions WHERE schema_name = $1 AND version = $2")
+        .bind(QUESTION_SCHEMA_NAME)
+        .bind(QUESTION_SCHEMA_VERSION)
+        .execute(&store.db)
+        .await
+        .unwrap();
+
+    let worker = tokio::spawn(generations::run_queue_worker(store.clone()));
+    let failed = wait_for_job_status(&app, job_id, "failed").await;
+    assert_eq!(failed["error_code"], "cortex_outcome_unknown");
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 1);
+    let caller = CallerIdentity {
+        user_id: "u1".into(),
+        access_level: 3,
+        display_name: None,
+    };
+    let error = generations::resume_generation(&store, &caller, job_id)
+        .await
+        .unwrap_err();
+    assert_eq!(error.0, StatusCode::CONFLICT);
+    let quiz_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quizzes WHERE study_id = $1")
+        .bind(study_id)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(quiz_count, 0);
+    worker.abort();
+    let _ = worker.await;
+}
+
+#[tokio::test]
+async fn active_queue_positions_follow_remaining_fifo_jobs() {
+    let mut store = Store::fixture().await;
+    store.cortex = MockCortex::new();
+    publish_question_schema(&store).await;
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+
+    let mut jobs = Vec::new();
+    for (user_id, title) in [("u1", "Queue one"), ("u2", "Queue two")] {
+        let (_, study) = call(
+            &app,
+            "POST",
+            "/studies",
+            Some(user_id),
+            Some(json!({"title": title})),
+        )
+        .await;
+        let study_id = study["id"].as_str().unwrap().to_owned();
+        let (source_status, _) = call(
+            &app,
+            "POST",
+            &format!("/studies/{study_id}/sources"),
+            Some(user_id),
+            Some(json!({"filename":"source.txt", "mime_type":"text/plain", "content_text":"ATP source"})),
+        )
+        .await;
+        assert_eq!(source_status, StatusCode::CREATED);
+        let (job_status, job) = call(
+            &app,
+            "POST",
+            &format!("/studies/{study_id}/generations"),
+            Some(user_id),
+            Some(json!({"language":"en", "count":1, "idempotency_key":format!("queue-{user_id}")})),
+        )
+        .await;
+        assert_eq!(job_status, StatusCode::CREATED);
+        jobs.push((user_id, job["id"].as_str().unwrap().to_owned(), 0));
+    }
+    // Re-read both jobs after the second insertion: an earlier response cannot
+    // predict the rank of jobs that arrive later.
+    for job in &mut jobs {
+        let (_, current) = call(
+            &app,
+            "GET",
+            &format!("/generations/{}", job.1),
+            Some(job.0),
+            None,
+        )
+        .await;
+        job.2 = current["queue_position"].as_i64().unwrap();
+    }
+    assert_eq!(
+        jobs.iter().map(|job| job.2).collect::<HashSet<_>>(),
+        HashSet::from([1, 2]),
+        "queue entries: {jobs:?}"
+    );
+
+    let (front_user, front_id, _) = jobs.iter().find(|job| job.2 == 1).unwrap();
+    let (next_user, next_id, _) = jobs.iter().find(|job| job.2 == 2).unwrap();
+    let (stop_status, stopped) = call(
+        &app,
+        "POST",
+        &format!("/generations/{front_id}/stop"),
+        Some(front_user),
+        None,
+    )
+    .await;
+    assert_eq!(stop_status, StatusCode::OK);
+    assert_eq!(stopped["status"], "cancelled");
+    let (_, next) = call(
+        &app,
+        "GET",
+        &format!("/generations/{next_id}"),
+        Some(next_user),
+        None,
+    )
+    .await;
+    assert_eq!(next["queue_position"], 1);
+
+    let (_, stopped) = call(
+        &app,
+        "POST",
+        &format!("/generations/{next_id}/stop"),
+        Some(next_user),
+        None,
+    )
+    .await;
+    assert_eq!(stopped["status"], "cancelled");
+    let (_, terminal) = call(
+        &app,
+        "GET",
+        &format!("/generations/{next_id}"),
+        Some(next_user),
+        None,
+    )
+    .await;
+    assert_eq!(terminal["queue_position"], 0);
+}
+
+#[tokio::test]
+async fn sqlite_rejects_a_second_active_generation_for_the_same_owner() {
+    let (store, _app, _cortex, _reports, job_id) = queued_report_generation().await;
+    let (owner_id, study_id): (String, String) =
+        sqlx::query_as("SELECT owner_id, study_id FROM generation_jobs WHERE id = $1")
+            .bind(&job_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap();
+    let error = sqlx::query(
+        "INSERT INTO generation_jobs(id, owner_id, study_id, status, language, requested_count, queued_at)
+         VALUES('second-active', $1, $2, 'queued', 'en', 1, 9999999999)",
+    )
+    .bind(owner_id)
+    .bind(study_id)
+    .execute(&store.db)
+    .await
+    .unwrap_err();
+    assert!(matches!(error, sqlx::Error::Database(database) if database.is_unique_violation()));
+}
+
+#[tokio::test]
+async fn sqlite_idempotency_key_stays_unique_after_terminal_and_is_scoped() {
+    let (store, app, _cortex, _reports, job_id) = queued_report_generation().await;
+    let (owner_id, study_id): (String, String) =
+        sqlx::query_as("SELECT owner_id, study_id FROM generation_jobs WHERE id = $1")
+            .bind(&job_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE generation_jobs SET status = 'cancelled', finished_at = 10 WHERE id = $1")
+        .bind(&job_id)
+        .execute(&store.db)
+        .await
+        .unwrap();
+
+    let duplicate = sqlx::query(
+        "INSERT INTO generation_jobs(id, owner_id, study_id, status, language, requested_count, idempotency_key, queued_at)
+         VALUES('terminal-duplicate', $1, $2, 'cancelled', 'en', 1, 'reports-source', 20)",
+    )
+    .bind(&owner_id)
+    .bind(&study_id)
+    .execute(&store.db)
+    .await
+    .unwrap_err();
+    assert!(matches!(duplicate, sqlx::Error::Database(database) if database.is_unique_violation()));
+
+    // The same key remains available to another owner or another study.
+    sqlx::query(
+        "INSERT INTO generation_jobs(id, owner_id, study_id, status, language, requested_count, idempotency_key, queued_at)
+         VALUES('other-owner-key', 'u2', $1, 'cancelled', 'en', 1, 'reports-source', 21)",
+    )
+    .bind(&study_id)
+    .execute(&store.db)
+    .await
+    .unwrap();
+    let (_, other_study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some(&owner_id),
+        Some(json!({"title":"Other idempotency scope"})),
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO generation_jobs(id, owner_id, study_id, status, language, requested_count, idempotency_key, queued_at)
+         VALUES('other-study-key', $1, $2, 'cancelled', 'en', 1, 'reports-source', 22)",
+    )
+    .bind(&owner_id)
+    .bind(other_study["id"].as_str().unwrap())
+    .execute(&store.db)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn sqlite_worker_recovery_requeues_pre_cortex_and_fails_uncertain_calls() {
+    let (mut store, app, cortex, reports, pre_call_job) = queued_report_generation().await;
+    let (_, other_study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u2"),
+        Some(json!({"title":"Interrupted generation"})),
+    )
+    .await;
+    let other_study_id = other_study["id"].as_str().unwrap();
+    let (source_status, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{other_study_id}/sources"),
+        Some("u2"),
+        Some(json!({"kind":"report", "filename":"Metrics", "external_ref":"proj/rep/data"})),
+    )
+    .await;
+    assert_eq!(source_status, StatusCode::CREATED);
+    let (job_status, uncertain_job) = call(
+        &app,
+        "POST",
+        &format!("/studies/{other_study_id}/generations"),
+        Some("u2"),
+        Some(json!({"language":"en", "count":1, "idempotency_key":"uncertain"})),
+    )
+    .await;
+    assert_eq!(job_status, StatusCode::CREATED);
+    let uncertain_job_id = uncertain_job["id"].as_str().unwrap();
+    sqlx::query(
+        "UPDATE generation_jobs SET status = 'running', started_at = 10, error_code = '' WHERE id = $1",
+    )
+    .bind(&pre_call_job)
+    .execute(&store.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE generation_jobs SET status = 'running', started_at = 10, error_code = 'cortex_request_in_flight' WHERE id = $1",
+    )
+    .bind(uncertain_job_id)
+    .execute(&store.db)
+    .await
+    .unwrap();
+    store.reports = reports;
+    store.cortex = cortex.clone();
+
+    let worker = tokio::spawn(generations::run_queue_worker(store.clone()));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let recovery_state: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT id, status, error_code FROM generation_jobs ORDER BY queued_at, id")
+            .fetch_all(&store.db)
+            .await
+            .unwrap();
+    assert!(
+        cortex.calls.load(Ordering::SeqCst) > 0,
+        "worker has not reached Cortex: states={recovery_state:?}"
+    );
+    let completed = wait_for_job_status(&app, &pre_call_job, "completed").await;
+    assert_eq!(completed["status"], "completed");
+    let (_, failed) = call(
+        &app,
+        "GET",
+        &format!("/generations/{uncertain_job_id}"),
+        Some("u2"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        failed["status"], "failed",
+        "state={failed}, recovered={recovery_state:?}"
+    );
+    assert_eq!(failed["error_code"], "cortex_outcome_unknown");
+    let recovery_event: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM generation_events WHERE job_id = $1 AND event_type = 'queued'
+           AND message LIKE '%requeued after recovery before contacting Cortex%'",
+    )
+    .bind(&pre_call_job)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(recovery_event, 1);
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 1);
+    worker.abort();
+    let _ = worker.await;
+
+    let (new_status, new_job) = call(
+        &app,
+        "POST",
+        &format!("/studies/{other_study_id}/generations"),
+        Some("u2"),
+        Some(json!({"language":"en", "count":1, "idempotency_key":"after-unknown"})),
+    )
+    .await;
+    assert_eq!(new_status, StatusCode::CREATED, "{new_job}");
+}
+
+#[tokio::test]
+#[ignore = "requires the isolated PostgreSQL test fixture"]
+async fn postgres_concurrent_starts_enforce_owner_singleton_and_idempotency() {
+    let url = std::env::var("CERTIFICATIONS_TEST_DATABASE_URL")
+        .expect("CERTIFICATIONS_TEST_DATABASE_URL must point at the isolated fixture");
+    let socket_dir = std::env::var("CERTIFICATIONS_TEST_SOCKET_DIR")
+        .expect("CERTIFICATIONS_TEST_SOCKET_DIR must name the fixture socket directory");
+    let options = url.parse::<sqlx::any::AnyConnectOptions>().unwrap();
+    let parsed = &options.database_url;
+    assert_eq!(parsed.scheme(), "postgresql");
+    assert_eq!(parsed.username(), "certifications_api_app");
+    assert!(parsed.password().is_none());
+    assert_eq!(parsed.path(), "/certifications_api_test");
+    assert_eq!(parsed.host_str(), Some("localhost"));
+    let dsn_socket = parsed
+        .query_pairs()
+        .find(|(key, _)| key == "host")
+        .map(|(_, value)| value.into_owned())
+        .expect("test DSN must use its private Unix socket");
+    assert_eq!(dsn_socket, socket_dir);
+    assert!(std::path::Path::new(&socket_dir).is_dir());
+
+    sqlx::any::install_default_drivers();
+    let db = AnyPoolOptions::new()
+        .max_connections(16)
+        .connect(&url)
+        .await
+        .unwrap();
+    for migration in POSTGRES_MIGRATIONS {
+        sqlx::raw_sql(migration).execute(&db).await.unwrap();
+    }
+    let mut store = Store::fixture().await;
+    store.db.close().await;
+    store.db = db;
+    store.cortex = MockCortex::new();
+    store.reports = Arc::new(MockReportSource {
+        accessible: AtomicBool::new(true),
+        bytes: Mutex::new(br#"[{"value":7}]"#.to_vec()),
+        fetch_gate: Mutex::new(None),
+    });
+    publish_question_schema(&store).await;
+    let app = Arc::new(presentation::router(App {
+        store: store.clone(),
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    }));
+    let (_, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u1"),
+        Some(json!({"title":"Concurrent generation"})),
+    )
+    .await;
+    let study_id = study["id"].as_str().unwrap().to_owned();
+    let (source_status, source) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/sources"),
+        Some("u1"),
+        Some(json!({"kind":"report", "filename":"Metrics", "external_ref":"proj/rep/data"})),
+    )
+    .await;
+    assert_eq!(
+        source_status,
+        StatusCode::CREATED,
+        "unexpected source response: {source}"
+    );
+
+    let concurrency = 16;
+    let barrier = Arc::new(Barrier::new(concurrency));
+    let mut tasks = Vec::new();
+    for index in 0..concurrency {
+        let app = app.clone();
+        let barrier = barrier.clone();
+        let study_id = study_id.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            call(
+                &app,
+                "POST",
+                &format!("/studies/{study_id}/generations"),
+                Some("u1"),
+                Some(
+                    json!({"language":"en", "count":1, "idempotency_key":format!("racer-{index}")}),
+                ),
+            )
+            .await
+        }));
+    }
+    let mut created = Vec::new();
+    let mut conflicts = 0;
+    for task in tasks {
+        let (status, body) = task.await.unwrap();
+        if status == StatusCode::CREATED {
+            created.push(body["id"].as_str().unwrap().to_owned());
+        } else {
+            assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {body}");
+            conflicts += 1;
+        }
+    }
+    assert_eq!(created.len(), 1);
+    assert_eq!(conflicts, concurrency - 1);
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM generation_jobs WHERE owner_id = 'u1' AND status IN ('queued', 'running')",
+    )
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(active, 1);
+
+    let (stop_status, stopped) = call(
+        &app,
+        "POST",
+        &format!("/generations/{}/stop", created[0]),
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(stop_status, StatusCode::OK);
+    assert_eq!(stopped["status"], "cancelled");
+
+    let barrier = Arc::new(Barrier::new(concurrency));
+    let mut tasks = Vec::new();
+    for _ in 0..concurrency {
+        let app = app.clone();
+        let barrier = barrier.clone();
+        let study_id = study_id.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            call(
+                &app,
+                "POST",
+                &format!("/studies/{study_id}/generations"),
+                Some("u1"),
+                Some(json!({"language":"en", "count":1, "idempotency_key":"same-key"})),
+            )
+            .await
+        }));
+    }
+    let mut same_id = None;
+    for task in tasks {
+        let (status, body) = task.await.unwrap();
+        assert_eq!(status, StatusCode::CREATED, "unexpected response: {body}");
+        let id = body["id"].as_str().unwrap();
+        assert!(same_id.is_none_or(|expected| expected == id));
+        same_id = Some(id.to_owned());
+    }
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM generation_jobs WHERE owner_id = 'u1' AND status IN ('queued', 'running')",
+    )
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(active, 1);
+    store.db.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires the isolated PostgreSQL test fixture"]
+async fn postgres_queue_worker_recovery_is_serialized_and_safe() {
+    let url = std::env::var("CERTIFICATIONS_TEST_DATABASE_URL")
+        .expect("CERTIFICATIONS_TEST_DATABASE_URL must point at the isolated fixture");
+    let socket_dir = std::env::var("CERTIFICATIONS_TEST_SOCKET_DIR")
+        .expect("CERTIFICATIONS_TEST_SOCKET_DIR must name the fixture socket directory");
+    let options = url.parse::<sqlx::any::AnyConnectOptions>().unwrap();
+    let parsed = &options.database_url;
+    assert_eq!(parsed.scheme(), "postgresql");
+    assert_eq!(parsed.username(), "certifications_api_app");
+    assert!(parsed.password().is_none());
+    assert_eq!(parsed.path(), "/certifications_api_test");
+    assert_eq!(parsed.host_str(), Some("localhost"));
+    let dsn_socket = parsed
+        .query_pairs()
+        .find(|(key, _)| key == "host")
+        .map(|(_, value)| value.into_owned())
+        .expect("test DSN must use its private Unix socket");
+    assert_eq!(dsn_socket, socket_dir);
+    assert!(std::path::Path::new(&socket_dir).is_dir());
+
+    let mut settings = test_settings();
+    settings.database_url = url;
+    let mut store_a = Store::connect(&settings).await.unwrap();
+    for migration in POSTGRES_MIGRATIONS {
+        sqlx::raw_sql(migration).execute(&store_a.db).await.unwrap();
+    }
+    publish_question_schema(&store_a).await;
+    let memory_docs = certifications_api::dal::documents::Documents::Memory(
+        certifications_api::dal::documents::Documents::memory(),
+    );
+    let report_gate = Arc::new(ReportFetchGate {
+        entered: Notify::new(),
+        release: Notify::new(),
+        resumed: Notify::new(),
+    });
+    let reports = Arc::new(MockReportSource {
+        accessible: AtomicBool::new(true),
+        bytes: Mutex::new(br#"[{"value":7}]"#.to_vec()),
+        fetch_gate: Mutex::new(None),
+    });
+    let cortex = MockCortex::new();
+    store_a.docs = memory_docs.clone();
+    store_a.reports = reports.clone();
+    store_a.cortex = cortex.clone();
+    store_a.fsm = MemoryFsm::new();
+    let app = Arc::new(presentation::router(App {
+        store: store_a.clone(),
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    }));
+
+    async fn create_report_job(
+        app: &Router,
+        owner: &str,
+        title: &str,
+        key: &str,
+    ) -> (String, String) {
+        let (_, study) = call(
+            app,
+            "POST",
+            "/studies",
+            Some(owner),
+            Some(json!({"title":title})),
+        )
+        .await;
+        let study_id = study["id"].as_str().unwrap().to_owned();
+        let (source_status, source) = call(
+            app,
+            "POST",
+            &format!("/studies/{study_id}/sources"),
+            Some(owner),
+            Some(json!({"kind":"report", "filename":"Metrics", "external_ref":"proj/rep/data"})),
+        )
+        .await;
+        assert_eq!(source_status, StatusCode::CREATED, "source={source}");
+        let (job_status, job) = call(
+            app,
+            "POST",
+            &format!("/studies/{study_id}/generations"),
+            Some(owner),
+            Some(json!({"language":"en", "count":1, "idempotency_key":key})),
+        )
+        .await;
+        assert_eq!(job_status, StatusCode::CREATED, "job={job}");
+        (study_id, job["id"].as_str().unwrap().to_owned())
+    }
+
+    let (study_a, job_a) = create_report_job(&app, "u1", "Pre-call interrupted", "pre-call").await;
+    let (_, job_unknown) = create_report_job(&app, "u2", "Cortex outcome unknown", "unknown").await;
+    sqlx::query(
+        "UPDATE generation_jobs SET status = 'running', started_at = 10, error_code = '' WHERE id = $1",
+    )
+    .bind(&job_a)
+    .execute(&store_a.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE generation_jobs SET status = 'running', started_at = 10, error_code = 'cortex_request_in_flight' WHERE id = $1",
+    )
+    .bind(&job_unknown)
+    .execute(&store_a.db)
+    .await
+    .unwrap();
+    *reports.fetch_gate.lock().unwrap() = Some(report_gate.clone());
+
+    let worker_a = tokio::spawn(generations::run_queue_worker(store_a.clone()));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        report_gate.entered.notified(),
+    )
+    .await
+    .expect("first worker did not reach the gated Reports preparation");
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 0);
+    let unknown: (String, String) =
+        sqlx::query_as("SELECT status, error_code FROM generation_jobs WHERE id = $1")
+            .bind(&job_unknown)
+            .fetch_one(&store_a.db)
+            .await
+            .unwrap();
+    assert_eq!(unknown, ("failed".into(), "cortex_outcome_unknown".into()));
+
+    let (_, job_queued) =
+        create_report_job(&app, "u3", "Arrived while worker is busy", "during-worker").await;
+    let mut store_b = Store::connect(&settings).await.unwrap();
+    store_b.docs = memory_docs;
+    store_b.reports = reports;
+    store_b.cortex = cortex.clone();
+    store_b.fsm = MemoryFsm::new();
+    let worker_b = tokio::spawn(generations::run_queue_worker(store_b.clone()));
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    let queued = generations::get_job(
+        &store_a,
+        &CallerIdentity {
+            user_id: "u3".into(),
+            access_level: 0,
+            display_name: None,
+        },
+        &job_queued,
+    )
+    .await
+    .unwrap();
+    assert_eq!(queued.status, "queued");
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 0);
+
+    let lock_pid: i32 = sqlx::query_scalar(
+        "SELECT activity.pid
+         FROM pg_locks AS locks
+         JOIN pg_stat_activity AS activity ON activity.pid = locks.pid
+         WHERE locks.locktype = 'advisory' AND locks.granted
+           AND locks.classid::bigint = $1 AND locks.objid::bigint = $2
+           AND activity.datname = current_database() AND activity.usename = current_user",
+    )
+    .bind(i64::from(0x43455254_i32))
+    .bind(i64::from(0x47454E31_i32))
+    .fetch_one(&store_a.db)
+    .await
+    .unwrap();
+    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+        .bind(lock_pid)
+        .fetch_one(&store_a.db)
+        .await
+        .unwrap();
+    assert!(
+        terminated,
+        "could not terminate the exact owned advisory-lock backend"
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let (status, error_code): (String, String) =
+                sqlx::query_as("SELECT status, error_code FROM generation_jobs WHERE id = $1")
+                    .bind(&job_a)
+                    .fetch_one(&store_a.db)
+                    .await
+                    .unwrap();
+            if status == "completed" {
+                break;
+            }
+            assert!(
+                matches!(status.as_str(), "queued" | "running"),
+                "recovered pre-call job entered unexpected state: {status}/{error_code}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("replacement worker did not requeue and complete the pre-call job");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM generation_jobs WHERE id = $1")
+                    .bind(&job_queued)
+                    .fetch_one(&store_a.db)
+                    .await
+                    .unwrap();
+            if status == "completed" {
+                break;
+            }
+            assert!(matches!(status.as_str(), "queued" | "running"));
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("replacement worker did not process the queued job after takeover");
+    let recovered_unknown: (String, String) =
+        sqlx::query_as("SELECT status, error_code FROM generation_jobs WHERE id = $1")
+            .bind(&job_unknown)
+            .fetch_one(&store_a.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        recovered_unknown,
+        ("failed".into(), "cortex_outcome_unknown".into())
+    );
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 2);
+
+    report_gate.release.notify_one();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        report_gate.resumed.notified(),
+    )
+    .await
+    .expect("stale Reports preparation did not resume after release");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        cortex.calls.load(Ordering::SeqCst),
+        2,
+        "stale worker dispatched Cortex after losing its lock session"
+    );
+    let job_a_final: (String, String) =
+        sqlx::query_as("SELECT status, error_code FROM generation_jobs WHERE id = $1")
+            .bind(&job_a)
+            .fetch_one(&store_a.db)
+            .await
+            .unwrap();
+    assert_eq!(job_a_final.0, "completed");
+
+    worker_a.abort();
+    let _ = worker_a.await;
+    worker_b.abort();
+    let _ = worker_b.await;
+    let mut probe = store_a.db.acquire().await.unwrap();
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1, $2)")
+        .bind(0x43455254_i32)
+        .bind(0x47454E31_i32)
+        .fetch_one(&mut *probe)
+        .await
+        .unwrap();
+    assert!(
+        acquired,
+        "worker lock remained held after both worker tasks stopped"
+    );
+    let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1, $2)")
+        .bind(0x43455254_i32)
+        .bind(0x47454E31_i32)
+        .fetch_one(&mut *probe)
+        .await
+        .unwrap();
+    assert!(unlocked);
+    probe.close().await.unwrap();
+    let (new_status, new_job) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_a}/generations"),
+        Some("u1"),
+        Some(json!({"language":"en", "count":1, "idempotency_key":"after-recovery"})),
+    )
+    .await;
+    assert_eq!(new_status, StatusCode::CREATED, "job={new_job}");
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 2);
+    store_a.db.close().await;
+    store_b.db.close().await;
 }
