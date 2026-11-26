@@ -1616,6 +1616,60 @@ async fn sqlite_rejects_a_second_active_generation_for_the_same_owner() {
 }
 
 #[tokio::test]
+async fn sqlite_idempotency_key_stays_unique_after_terminal_and_is_scoped() {
+    let (store, app, _cortex, _reports, job_id) = queued_report_generation().await;
+    let (owner_id, study_id): (String, String) =
+        sqlx::query_as("SELECT owner_id, study_id FROM generation_jobs WHERE id = $1")
+            .bind(&job_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE generation_jobs SET status = 'cancelled', finished_at = 10 WHERE id = $1")
+        .bind(&job_id)
+        .execute(&store.db)
+        .await
+        .unwrap();
+
+    let duplicate = sqlx::query(
+        "INSERT INTO generation_jobs(id, owner_id, study_id, status, language, requested_count, idempotency_key, queued_at)
+         VALUES('terminal-duplicate', $1, $2, 'cancelled', 'en', 1, 'reports-source', 20)",
+    )
+    .bind(&owner_id)
+    .bind(&study_id)
+    .execute(&store.db)
+    .await
+    .unwrap_err();
+    assert!(matches!(duplicate, sqlx::Error::Database(database) if database.is_unique_violation()));
+
+    // The same key remains available to another owner or another study.
+    sqlx::query(
+        "INSERT INTO generation_jobs(id, owner_id, study_id, status, language, requested_count, idempotency_key, queued_at)
+         VALUES('other-owner-key', 'u2', $1, 'cancelled', 'en', 1, 'reports-source', 21)",
+    )
+    .bind(&study_id)
+    .execute(&store.db)
+    .await
+    .unwrap();
+    let (_, other_study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some(&owner_id),
+        Some(json!({"title":"Other idempotency scope"})),
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO generation_jobs(id, owner_id, study_id, status, language, requested_count, idempotency_key, queued_at)
+         VALUES('other-study-key', $1, $2, 'cancelled', 'en', 1, 'reports-source', 22)",
+    )
+    .bind(&owner_id)
+    .bind(other_study["id"].as_str().unwrap())
+    .execute(&store.db)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 #[ignore = "requires the isolated PostgreSQL test fixture"]
 async fn postgres_concurrent_starts_enforce_owner_singleton_and_idempotency() {
     let url = std::env::var("CERTIFICATIONS_TEST_DATABASE_URL")
