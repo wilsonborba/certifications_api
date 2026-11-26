@@ -9,8 +9,8 @@ use certifications_api::{
         Store,
         fsm::MemoryFsm,
         reports::{
-            BoxFuture, ReadableReportDataset, RenderedVisual, ReportDatasetMaterial,
-            ReportPickerItem, ReportsClient,
+            BoxFuture, CreateRenderJobInput, ReadableReportDataset, RenderJobDescriptor,
+            RenderedVisual, ReportDatasetMaterial, ReportPickerItem, ReportsClient,
         },
         schemas::{self, DraftSchema, SchemaField},
     },
@@ -74,6 +74,33 @@ impl ReportsClient for MockReports {
                 mime_type: "image/png".into(),
             })
         })
+    }
+    fn create_render_job<'a>(
+        &'a self,
+        _user_id: &'a str,
+        input: &'a CreateRenderJobInput,
+    ) -> BoxFuture<'a, CoreResult<RenderJobDescriptor>> {
+        let desc = RenderJobDescriptor {
+            job_id: "test-render-job-40".into(),
+            template_id: input.template_id.clone(),
+            template_version: input.template_version,
+            mapping: input.mapping.clone(),
+            config: input.config.clone(),
+            rows: input.rows.clone(),
+            width: input.width,
+            height: input.height,
+            scale: input.scale,
+            expires_at: certifications_api::core::now() + 600,
+        };
+        Box::pin(async move { Ok(desc) })
+    }
+    fn delete_render_job<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _job_id: &'a str,
+        _confirmed: bool,
+    ) -> BoxFuture<'a, CoreResult<()>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -191,6 +218,79 @@ async fn call(
     (status, val)
 }
 
+async fn call_raw(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    user: &str,
+    level: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-uuid", user);
+    if let Some(l) = level {
+        req = req.header("x-access-level", l);
+    }
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, headers, bytes)
+}
+
+fn to_base64_str(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = if chunk.len() > 1 {
+            chunk[1] as usize
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            chunk[2] as usize
+        } else {
+            0
+        };
+        out.push(TABLE[b0 >> 2] as char);
+        out.push(TABLE[((b0 & 3) << 4) | (b1 >> 4)] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((b1 & 15) << 2) | (b2 >> 6)] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[b2 & 63] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn make_test_png(width: u32, height: u32) -> String {
+    let img = image::RgbaImage::new(width, height);
+    let mut bytes = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut bytes),
+        image::ImageFormat::Png,
+    )
+    .unwrap();
+    to_base64_str(&bytes)
+}
+
 #[tokio::test]
 async fn manual_authoring_edit_delete_visual_and_origin_guards() {
     let (app, store, fsm) = setup_app().await;
@@ -269,8 +369,8 @@ async fn manual_authoring_edit_delete_visual_and_origin_guards() {
     assert_eq!(q_v2["version_num"], 2);
     assert_eq!(q_v2["origin"], "supplied_by_creator");
 
-    // Render visual in author review flow via Reports temp job and save to FSM.
-    let (st, vis) = call(
+    // Legacy direct visual endpoint is rejected with 422.
+    let (st, _) = call(
         &app,
         "POST",
         &format!("/studies/{sid}/questions/{qid}/visual"),
@@ -279,9 +379,140 @@ async fn manual_authoring_edit_delete_visual_and_origin_guards() {
         Some(json!({ "visual_spec": { "chart": "bar" } })),
     )
     .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Stage 1: Prepare visual render job through Reports descriptor API.
+    let (st, prep) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visual_jobs"),
+        "author-1",
+        None,
+        Some(json!({
+            "template_id": "chart_template",
+            "template_version": 1,
+            "mapping": { "x": ["label"], "y": ["val"] },
+            "config": {},
+            "rows": [{ "label": "A", "val": 10 }],
+            "width": 800,
+            "height": 480,
+            "scale": 2,
+            "ttl_seconds": 600
+        })),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(prep["question_id"], qid);
+    let qv_id = prep["question_version_id"].as_str().unwrap().to_string();
+    assert_eq!(qv_id, q_v2["version_id"].as_str().unwrap());
+    let job_id = prep["render_job"]["job_id"].as_str().unwrap().to_string();
+
+    // Stage 2a: Decoded dimension mismatch rejected with 422 (100x100 vs expected 1600x960).
+    let bad_png = make_test_png(100, 100);
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-1",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": bad_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Stage 2b: Valid PNG upload persists to FSM and records in question_visuals.
+    let valid_png = make_test_png(1600, 960);
+    let (st, vis) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-1",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let vis_id = vis["id"].as_str().unwrap().to_string();
     let fsm_ref = vis["fsm_ref"].as_str().unwrap().to_string();
     assert!(fsm.has_blob(&fsm_ref));
+
+    // Stage 2c: Idempotent replay returns same visual descriptor.
+    let (st, vis_retry) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-1",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(vis_retry["id"], vis_id);
+    assert_eq!(vis_retry["fsm_ref"], fsm_ref);
+
+    // Stage 3a: Author reads visual preview bytes.
+    let (st, headers, body_bytes) = call_raw(
+        &app,
+        "GET",
+        &format!("/studies/{sid}/questions/{qid}/visuals/{vis_id}"),
+        "author-1",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(headers.get("content-type").unwrap(), "image/png");
+    assert!(!body_bytes.is_empty());
+
+    // Stage 3b: Unauthorized caller receives FORBIDDEN.
+    let (st, _, _) = call_raw(
+        &app,
+        "GET",
+        &format!("/studies/{sid}/questions/{qid}/visuals/{vis_id}"),
+        "author-2",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // Conflict: Stale or mismatched question version ID is rejected with 409.
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-1",
+        None,
+        Some(json!({
+            "question_version_id": "stale-version-id",
+            "render_job_id": "other-job",
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
 
     // Quiz id for admin origin override.
     let quiz_id: String = sqlx::query_scalar("SELECT quiz_id FROM studies WHERE id = $1")

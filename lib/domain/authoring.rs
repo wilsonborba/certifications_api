@@ -753,8 +753,10 @@ pub async fn create_question(
     });
     write_new_quiz_version(store, &quiz_id, &existing_items).await?;
 
-    if let Some(spec) = input.visual_spec {
-        render_question_visual(store, caller, study_id, &question_id, spec).await?;
+    if input.visual_spec.is_some() {
+        return Err(Error::unprocessable(
+            "visual_spec_unsupported: inline visual_spec is obsolete; use visual jobs workflow",
+        ));
     }
 
     load_question_detail(store, &question_id, &qv_id).await
@@ -1046,13 +1048,33 @@ pub async fn import_csv(
     })
 }
 
-pub async fn render_question_visual(
+#[derive(Clone, Debug, Deserialize)]
+pub struct PrepareVisualJobInput {
+    pub template_id: String,
+    pub template_version: i64,
+    pub mapping: std::collections::BTreeMap<String, Vec<String>>,
+    pub config: Value,
+    pub rows: Vec<Value>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub scale: Option<i64>,
+    pub ttl_seconds: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PreparedVisualJobResult {
+    pub question_id: String,
+    pub question_version_id: String,
+    pub render_job: crate::dal::reports::RenderJobDescriptor,
+}
+
+pub async fn prepare_question_visual_job(
     store: &Store,
     caller: &CallerIdentity,
     study_id: &str,
     question_id: &str,
-    visual_spec: Value,
-) -> Result<QuestionVisual> {
+    input: PrepareVisualJobInput,
+) -> Result<PreparedVisualJobResult> {
     let (_owner_id, existing_quiz) = load_owned_study_quiz(store, caller, study_id).await?;
     let quiz_id = existing_quiz.ok_or_else(Error::missing)?;
     let (_, items) = current_quiz_version_questions(store, &quiz_id).await?;
@@ -1066,34 +1088,296 @@ pub async fn render_question_visual(
         ));
     }
     let qv_id = item.question_version_id.clone();
-    let detail = load_question_detail(store, question_id, &qv_id).await?;
 
-    let rendered = store
+    let width = input.width.unwrap_or(800);
+    let height = input.height.unwrap_or(480);
+    let scale = input.scale.unwrap_or(2);
+    let ttl_seconds = input.ttl_seconds.unwrap_or(900);
+
+    if !(200..=2400).contains(&width) || !(200..=2400).contains(&height) {
+        return Err(Error::unprocessable(
+            "invalid_dimensions: width and height must be between 200 and 2400",
+        ));
+    }
+    if !(1..=3).contains(&scale) {
+        return Err(Error::unprocessable(
+            "invalid_scale: scale must be between 1 and 3",
+        ));
+    }
+    if width * scale > 4096 || height * scale > 4096 {
+        return Err(Error::unprocessable(
+            "invalid_dimensions: width*scale and height*scale must not exceed 4096",
+        ));
+    }
+    if !(60..=3600).contains(&ttl_seconds) {
+        return Err(Error::unprocessable(
+            "invalid_ttl: ttl_seconds must be between 60 and 3600",
+        ));
+    }
+
+    let job_input = crate::dal::reports::CreateRenderJobInput {
+        template_id: input.template_id,
+        template_version: input.template_version,
+        mapping: input.mapping,
+        config: input.config,
+        rows: input.rows,
+        width,
+        height,
+        scale,
+        ttl_seconds: Some(ttl_seconds),
+        originating_scope: Some(format!("certifications:question:{}", qv_id)),
+    };
+
+    let render_job = store
         .reports
-        .render_question_visual(&caller.user_id, &detail.prompt, &visual_spec)
+        .create_render_job(&caller.user_id, &job_input)
         .await?;
+
+    Ok(PreparedVisualJobResult {
+        question_id: question_id.to_string(),
+        question_version_id: qv_id,
+        render_job,
+    })
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct UploadVisualInput {
+    pub question_version_id: String,
+    pub render_job_id: String,
+    pub expected_width: i64,
+    pub expected_height: i64,
+    pub expected_scale: i64,
+    pub png_base64: String,
+}
+
+pub async fn upload_question_visual(
+    store: &Store,
+    caller: &CallerIdentity,
+    study_id: &str,
+    question_id: &str,
+    input: UploadVisualInput,
+) -> Result<QuestionVisual> {
+    if input.render_job_id.trim().is_empty() {
+        return Err(Error::unprocessable(
+            "render_job_id_required: render_job_id is required",
+        ));
+    }
+    if input.png_base64.len() > 6 * 1024 * 1024 {
+        return Err(Error::unprocessable(
+            "payload_too_large: PNG base64 exceeds maximum allowed size",
+        ));
+    }
+
+    fn from_base64(input: &str) -> Option<Vec<u8>> {
+        let s = input.trim();
+        if s.is_empty() {
+            return Some(Vec::new());
+        }
+        if !s.len().is_multiple_of(4) {
+            return None;
+        }
+        let decode_char = |b: u8| -> Option<u8> {
+            match b {
+                b'A'..=b'Z' => Some(b - b'A'),
+                b'a'..=b'z' => Some(b - b'a' + 26),
+                b'0'..=b'9' => Some(b - b'0' + 52),
+                b'+' => Some(62),
+                b'/' => Some(63),
+                _ => None,
+            }
+        };
+
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity((s.len() / 4) * 3);
+        for chunk in bytes.chunks_exact(4) {
+            let (c0, c1, c2, c3) = (chunk[0], chunk[1], chunk[2], chunk[3]);
+            let d0 = decode_char(c0)?;
+            let d1 = decode_char(c1)?;
+            if c2 == b'=' {
+                if c3 != b'=' {
+                    return None;
+                }
+                out.push((d0 << 2) | (d1 >> 4));
+            } else if c3 == b'=' {
+                let d2 = decode_char(c2)?;
+                out.push((d0 << 2) | (d1 >> 4));
+                out.push(((d1 & 0x0f) << 4) | (d2 >> 2));
+            } else {
+                let d2 = decode_char(c2)?;
+                let d3 = decode_char(c3)?;
+                out.push((d0 << 2) | (d1 >> 4));
+                out.push(((d1 & 0x0f) << 4) | (d2 >> 2));
+                out.push(((d2 & 0x03) << 6) | d3);
+            }
+        }
+        Some(out)
+    }
+
+    let raw_bytes = from_base64(&input.png_base64)
+        .ok_or_else(|| Error::unprocessable("invalid_png: base64 decode failed"))?;
+
+    if raw_bytes.len() > 4 * 1024 * 1024 {
+        return Err(Error::unprocessable(
+            "invalid_png: PNG raw size exceeds 4MiB limit",
+        ));
+    }
+
+    let img = image::load_from_memory_with_format(&raw_bytes, image::ImageFormat::Png)
+        .map_err(|_| Error::unprocessable("invalid_png: Not a valid decodable PNG image"))?;
+
+    let (w, h) = image::GenericImageView::dimensions(&img);
+    let expected_w = (input.expected_width * input.expected_scale) as u32;
+    let expected_h = (input.expected_height * input.expected_scale) as u32;
+
+    if w != expected_w || h != expected_h {
+        return Err(Error::unprocessable(format!(
+            "invalid_dimensions: Decoded PNG dimensions ({}x{}) do not match expected descriptor bounds ({}x{})",
+            w, h, expected_w, expected_h
+        )));
+    }
+    if (w as u64) * (h as u64) > 4096 * 4096 {
+        return Err(Error::unprocessable(
+            "invalid_dimensions: Total decoded pixels exceed 4096*4096",
+        ));
+    }
+
+    let (_owner_id, existing_quiz) = load_owned_study_quiz(store, caller, study_id).await?;
+    let quiz_id = existing_quiz.ok_or_else(Error::missing)?;
+    let (_, items) = current_quiz_version_questions(store, &quiz_id).await?;
+    let item = items
+        .iter()
+        .find(|item| item.question_id == question_id)
+        .ok_or_else(Error::missing)?;
+    if item.source_scope == REUSED_PUBLIC_VERSION {
+        return Err(Error::conflict(
+            "reused_question_immutable: Visuals cannot be added to a publicly reused question version",
+        ));
+    }
+    let qv_id = item.question_version_id.clone();
+    if input.question_version_id != qv_id {
+        return Err(Error::conflict(
+            "conflict: question_version_id does not match current question version",
+        ));
+    }
+
+    let visual_id = format!("vis_{}", input.render_job_id);
+    let existing: Option<QuestionVisual> = sqlx::query(
+        "SELECT id, question_version_id, fsm_ref, mime_type, created_at FROM question_visuals WHERE id = $1",
+    )
+    .bind(&visual_id)
+    .fetch_optional(&store.db)
+    .await?
+    .map(|r| QuestionVisual {
+        id: r.get("id"),
+        fsm_ref: r.get("fsm_ref"),
+        mime_type: r.get("mime_type"),
+        created_at: r.get("created_at"),
+    });
+
+    if let Some(existing_visual) = existing {
+        let existing_qv: String =
+            sqlx::query_scalar("SELECT question_version_id FROM question_visuals WHERE id = $1")
+                .bind(&visual_id)
+                .fetch_one(&store.db)
+                .await?;
+        if existing_qv == qv_id {
+            let _ = store
+                .reports
+                .delete_render_job(&caller.user_id, &input.render_job_id, true)
+                .await;
+            return Ok(existing_visual);
+        } else {
+            return Err(Error::conflict(
+                "conflict: render_job_id already used for different question version",
+            ));
+        }
+    }
+
     let ref_key = format!("visuals/{qv_id}/{}.png", new_id());
-    let fsm_ref = store.fsm.put_bytes(&ref_key, &rendered.bytes).await?;
-    let id = new_id();
+    let fsm_ref = store.fsm.put_bytes(&ref_key, &raw_bytes).await?;
+
     let ts = now();
-    sqlx::query(
+    let insert_res = sqlx::query(
         "INSERT INTO question_visuals(id, question_version_id, fsm_ref, mime_type, created_at)
          VALUES($1, $2, $3, $4, $5)",
     )
-    .bind(&id)
+    .bind(&visual_id)
     .bind(&qv_id)
     .bind(&fsm_ref)
-    .bind(&rendered.mime_type)
+    .bind("image/png")
     .bind(ts)
     .execute(&store.db)
-    .await?;
+    .await;
+
+    if let Err(err) = insert_res {
+        let _ = store.fsm.delete_ref(&fsm_ref).await;
+        return Err(Error::bad(format!("visual_insert_failed: {}", err)));
+    }
+
+    let _ = store
+        .reports
+        .delete_render_job(&caller.user_id, &input.render_job_id, true)
+        .await;
 
     Ok(QuestionVisual {
-        id,
+        id: visual_id,
         fsm_ref,
-        mime_type: rendered.mime_type,
+        mime_type: "image/png".into(),
         created_at: ts,
     })
+}
+
+pub async fn get_question_visual(
+    store: &Store,
+    caller: &CallerIdentity,
+    study_id: &str,
+    question_id: &str,
+    visual_id: &str,
+) -> Result<(Vec<u8>, String)> {
+    let (_owner_id, existing_quiz) = load_owned_study_quiz(store, caller, study_id).await?;
+    let quiz_id = existing_quiz.ok_or_else(Error::missing)?;
+    let (_, items) = current_quiz_version_questions(store, &quiz_id).await?;
+    let item = items
+        .iter()
+        .find(|item| item.question_id == question_id)
+        .ok_or_else(Error::missing)?;
+    let qv_id = &item.question_version_id;
+
+    let row = sqlx::query(
+        "SELECT fsm_ref, mime_type FROM question_visuals WHERE id = $1 AND question_version_id = $2",
+    )
+    .bind(visual_id)
+    .bind(qv_id)
+    .fetch_optional(&store.db)
+    .await?
+    .ok_or_else(Error::missing)?;
+
+    let fsm_ref: String = row.get("fsm_ref");
+    let mime_type: String = row.get("mime_type");
+    let bytes = store.fsm.get_bytes(&fsm_ref).await?;
+
+    Ok((bytes, mime_type))
+}
+
+pub async fn check_reused_question_rejection(
+    store: &Store,
+    caller: &CallerIdentity,
+    study_id: &str,
+    question_id: &str,
+) -> Result<()> {
+    let (_owner_id, existing_quiz) = load_owned_study_quiz(store, caller, study_id).await?;
+    let quiz_id = existing_quiz.ok_or_else(Error::missing)?;
+    let (_, items) = current_quiz_version_questions(store, &quiz_id).await?;
+    let item = items
+        .iter()
+        .find(|item| item.question_id == question_id)
+        .ok_or_else(Error::missing)?;
+    if item.source_scope == REUSED_PUBLIC_VERSION {
+        return Err(Error::conflict(
+            "reused_question_immutable: Visuals cannot be added to a publicly reused question version",
+        ));
+    }
+    Ok(())
 }
 
 pub async fn admin_override_quiz_origin(

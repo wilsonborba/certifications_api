@@ -25,6 +25,34 @@ pub struct ReadableReportDataset {
     pub dataset: Value,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateRenderJobInput {
+    pub template_id: String,
+    pub template_version: i64,
+    pub mapping: BTreeMap<String, Vec<String>>,
+    pub config: Value,
+    pub rows: Vec<Value>,
+    pub width: i64,
+    pub height: i64,
+    pub scale: i64,
+    pub ttl_seconds: Option<i64>,
+    pub originating_scope: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RenderJobDescriptor {
+    pub job_id: String,
+    pub template_id: String,
+    pub template_version: i64,
+    pub mapping: BTreeMap<String, Vec<String>>,
+    pub config: Value,
+    pub rows: Vec<Value>,
+    pub width: i64,
+    pub height: i64,
+    pub scale: i64,
+    pub expires_at: i64,
+}
+
 #[derive(Clone, Debug)]
 pub struct RenderedVisual {
     pub bytes: Vec<u8>,
@@ -135,10 +163,29 @@ pub trait ReportsClient: Send + Sync {
 
     fn render_question_visual<'a>(
         &'a self,
-        user_id: &'a str,
-        prompt: &'a str,
-        visual_spec: &'a Value,
-    ) -> BoxFuture<'a, Result<RenderedVisual>>;
+        _user_id: &'a str,
+        _prompt: &'a str,
+        _visual_spec: &'a Value,
+    ) -> BoxFuture<'a, Result<RenderedVisual>> {
+        Box::pin(async { Err(Error::unavailable()) })
+    }
+
+    fn create_render_job<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _input: &'a CreateRenderJobInput,
+    ) -> BoxFuture<'a, Result<RenderJobDescriptor>> {
+        Box::pin(async { Err(Error::unavailable()) })
+    }
+
+    fn delete_render_job<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _job_id: &'a str,
+        _confirmed: bool,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Err(Error::unavailable()) })
+    }
 }
 
 pub struct DisabledReports;
@@ -590,40 +637,50 @@ impl ReportsClient for HttpReports {
         Box::pin(async move { self.fetch_dataset(user_id, project, report, dataset).await })
     }
 
-    fn render_question_visual<'a>(
+    fn create_render_job<'a>(
         &'a self,
         user_id: &'a str,
-        prompt: &'a str,
-        visual_spec: &'a Value,
-    ) -> BoxFuture<'a, Result<RenderedVisual>> {
+        input: &'a CreateRenderJobInput,
+    ) -> BoxFuture<'a, Result<RenderJobDescriptor>> {
         Box::pin(async move {
             let resp = self
                 .http
-                .post(format!("{}/jobs/temporary-render", self.base_url))
+                .post(format!("{}/render_jobs", self.base_url))
                 .header("x-uuid", user_id)
-                .json(&serde_json::json!({
-                    "kind": "question_visual",
-                    "prompt": prompt,
-                    "spec": visual_spec,
-                }))
+                .json(input)
                 .send()
                 .await
                 .map_err(|_| Error::unavailable())?;
             if !resp.status().is_success() {
                 return Err(Error::unavailable());
             }
-            let mime_type = resp
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("image/png")
-                .to_string();
-            let bytes = resp
-                .bytes()
+            resp.json::<RenderJobDescriptor>()
                 .await
-                .map_err(|_| Error::unavailable())?
-                .to_vec();
-            Ok(RenderedVisual { bytes, mime_type })
+                .map_err(|_| Error::unavailable())
+        })
+    }
+
+    fn delete_render_job<'a>(
+        &'a self,
+        user_id: &'a str,
+        job_id: &'a str,
+        confirmed: bool,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let resp = self
+                .http
+                .delete(format!(
+                    "{}/render_jobs/{}?confirmed={}",
+                    self.base_url, job_id, confirmed
+                ))
+                .header("x-uuid", user_id)
+                .send()
+                .await
+                .map_err(|_| Error::unavailable())?;
+            if !resp.status().is_success() && resp.status() != StatusCode::NOT_FOUND {
+                return Err(Error::unavailable());
+            }
+            Ok(())
         })
     }
 }
