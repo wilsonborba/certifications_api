@@ -1523,6 +1523,7 @@ async fn test_visual_replay_scoping_and_draft_expiry_regressions() {
     assert_eq!(status_still_draft, "draft");
 
     let fsm_blobs_before = fsm.blob_count();
+    let fsm_puts_before = fsm.put_count();
 
     // Directly call upload without calling prepare after expiry
     let (st, direct_exp_upload) = call(
@@ -1549,8 +1550,9 @@ async fn test_visual_replay_scoping_and_draft_expiry_regressions() {
             .contains("study_expired")
     );
 
-    // Assert zero new FSM blobs created
+    // Assert zero new FSM blobs created and zero attempted FSM puts
     assert_eq!(fsm.blob_count(), fsm_blobs_before);
+    assert_eq!(fsm.put_count(), fsm_puts_before);
 
     // Assert status transitioned from 'draft' to 'expired' directly by upload
     let status_after: String = sqlx::query_scalar("SELECT status FROM studies WHERE id = $1")
