@@ -1852,6 +1852,51 @@ async fn streamed_analysis_reports_nullable_measurements_and_stops_reading_when_
         gets_before_stale,
         "stale source metadata must be rechecked before reading bytes"
     );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/studies/analysis-stream-study/analysis/stream")
+                .header("x-uuid", "owner-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut chunks = response.into_body().into_data_stream();
+    let first = chunks.next().await.unwrap().unwrap();
+    assert!(
+        std::str::from_utf8(&first)
+            .unwrap()
+            .contains("event: stage")
+    );
+    let reads_before_expiry = fsm.get_count();
+    sqlx::query(
+        "UPDATE studies SET status = 'draft', expires_at = $1 WHERE id = 'analysis-stream-study'",
+    )
+    .bind(chrono::Utc::now().timestamp() - 1)
+    .execute(&store.db)
+    .await
+    .unwrap();
+    let mut expired_payload = String::new();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while let Some(chunk) = chunks.next().await {
+            expired_payload.push_str(std::str::from_utf8(&chunk.unwrap()).unwrap());
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !expired_payload.contains("event: source_inspected"),
+        "a draft that expired after stream preflight must not be inspected"
+    );
+    assert_eq!(
+        fsm.get_count(),
+        reads_before_expiry,
+        "draft expiry must be checked again before source access"
+    );
 }
 
 #[derive(Default)]

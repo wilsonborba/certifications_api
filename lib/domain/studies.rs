@@ -271,6 +271,11 @@ async fn current_analysis_source_row(
     study_id: &str,
     source: &SourceSummary,
 ) -> std::result::Result<AnyRow, &'static str> {
+    // A stream can outlive its preflight. Reuse the normal draft-expiry and
+    // ownership checks before each read and before returning inspected data.
+    let _ = load_owned_study(store, caller, study_id)
+        .await
+        .map_err(|_| "source_unavailable")?;
     let current = sqlx::query(
         "SELECT s.owner_id, st.owner_id AS study_owner_id, s.status, s.source_kind, s.mime_type, s.size_bytes, s.sha256, s.fsm_ref, s.selection_kind, s.selection_spec, s.is_restricted, s.external_ref, s.report_calculation_id, s.report_calculation_version, s.report_row_count, s.report_lineage_sha256 FROM sources s JOIN studies st ON st.id = s.study_id WHERE s.id = $1 AND s.study_id = $2",
     )
