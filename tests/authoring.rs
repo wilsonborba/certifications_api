@@ -291,6 +291,17 @@ fn make_test_png(width: u32, height: u32) -> String {
     to_base64_str(&bytes)
 }
 
+fn make_colored_test_png(width: u32, height: u32, color: [u8; 4]) -> String {
+    let img = image::RgbaImage::from_pixel(width, height, image::Rgba(color));
+    let mut bytes = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut bytes),
+        image::ImageFormat::Png,
+    )
+    .unwrap();
+    to_base64_str(&bytes)
+}
+
 #[tokio::test]
 async fn manual_authoring_edit_delete_visual_and_origin_guards() {
     let (app, store, fsm) = setup_app().await;
@@ -504,7 +515,7 @@ async fn manual_authoring_edit_delete_visual_and_origin_guards() {
         None,
         Some(json!({
             "question_version_id": "stale-version-id",
-            "render_job_id": "other-job",
+            "render_job_id": job_id,
             "png_base64": valid_png,
             "expected_width": 800,
             "expected_height": 480,
@@ -513,6 +524,64 @@ async fn manual_authoring_edit_delete_visual_and_origin_guards() {
     )
     .await;
     assert_eq!(st, StatusCode::CONFLICT);
+
+    // Conflict: Conflicting PNG payload for same render_job_id is rejected with 409.
+    let conflicting_png = make_colored_test_png(1600, 960, [255, 0, 0, 255]);
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-1",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": conflicting_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+
+    // Unprocessable: Unknown render job ID is rejected with 422.
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-1",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": "unknown-nonexistent-job",
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Forbidden: Upload by non-owner is rejected with 403.
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-2",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
 
     // Quiz id for admin origin override.
     let quiz_id: String = sqlx::query_scalar("SELECT quiz_id FROM studies WHERE id = $1")
@@ -640,4 +709,86 @@ en,Capital of France?,Paris,Lyon,Nice,Marseille,a,Paris is the capital,p.1
     assert_eq!(imported["preview_only"], false);
     assert_eq!(imported["imported_count"], 1);
     assert_eq!(imported["questions"][0]["origin"], "supplied_by_creator");
+}
+
+#[tokio::test]
+async fn create_question_rejects_visual_spec_without_side_effects() {
+    let (app, store, _) = setup_app().await;
+
+    let (st, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        "author-side-effects",
+        None,
+        Some(json!({ "title": "Side Effects Guard Study" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sid = study["id"].as_str().unwrap().to_string();
+
+    let q_count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM questions")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let qv_count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM question_versions")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let quiz_count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quizzes")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let qver_count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quiz_versions")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions"),
+        "author-side-effects",
+        None,
+        Some(json!({
+            "prompt": "What is 2 + 2?",
+            "alternatives": [
+                { "id": "a", "text": "4" },
+                { "id": "b", "text": "5" }
+            ],
+            "correct_id": "a",
+            "explanation": "Basic math",
+            "visual_spec": { "chart": "bar" }
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let q_count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM questions")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let qv_count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM question_versions")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let quiz_count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quizzes")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let qver_count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quiz_versions")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+
+    assert_eq!(q_count_before, q_count_after, "no question rows created");
+    assert_eq!(
+        qv_count_before, qv_count_after,
+        "no question_version rows created"
+    );
+    assert_eq!(quiz_count_before, quiz_count_after, "no quiz rows created");
+    assert_eq!(
+        qver_count_before, qver_count_after,
+        "no quiz_version rows created"
+    );
 }
