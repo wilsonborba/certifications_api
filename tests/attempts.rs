@@ -406,6 +406,73 @@ async fn taking_never_leaks_keys_grading_and_activity_are_idempotent_with_three_
     .await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
 
+    // Status filter: completed only
+    let (st, completed_only) =
+        call(&app, "GET", "/attempts?status=completed", "learner-1", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(completed_only["total"], 2);
+    let comp_items = completed_only["items"].as_array().unwrap();
+    assert_eq!(comp_items.len(), 2);
+    assert!(comp_items.iter().all(|item| item["status"] == "completed"));
+    let mut comp_seqs: Vec<i64> = comp_items
+        .iter()
+        .map(|item| item["attempt_sequence"].as_i64().unwrap())
+        .collect();
+    comp_seqs.sort();
+    assert_eq!(comp_seqs.len(), 2);
+
+    // Status filter: in_progress only
+    let (st, in_progress_only) = call(
+        &app,
+        "GET",
+        "/attempts?status=in_progress",
+        "learner-1",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(in_progress_only["total"], 1);
+    let in_prog_items = in_progress_only["items"].as_array().unwrap();
+    assert_eq!(in_prog_items.len(), 1);
+    assert_eq!(in_prog_items[0]["status"], "in_progress");
+    let in_prog_seq = in_prog_items[0]["attempt_sequence"].as_i64().unwrap();
+    assert!(!comp_seqs.contains(&in_prog_seq));
+    let mut all_seqs = comp_seqs.clone();
+    all_seqs.push(in_prog_seq);
+    all_seqs.sort();
+    assert_eq!(all_seqs, vec![1, 2, 3]);
+
+    // Status filter: paginated completed
+    let (st, comp_page) = call(
+        &app,
+        "GET",
+        "/attempts?status=completed&limit=1&offset=0",
+        "learner-1",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(comp_page["total"], 2);
+    assert_eq!(comp_page["items"].as_array().unwrap().len(), 1);
+    assert!(comp_seqs.contains(&comp_page["items"][0]["attempt_sequence"].as_i64().unwrap()));
+
+    // Status filter: invalid status returns 422
+    let (st, invalid_status) = call(
+        &app,
+        "GET",
+        "/attempts?status=invalid_val",
+        "learner-1",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        invalid_status["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid_status")
+    );
+
     let (st, own_stats) = call(&app, "GET", "/attempts/overview", "learner-1", None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(own_stats["created_quiz_count"], 0);

@@ -55,6 +55,15 @@ pub struct PublicQuizStats {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct OwnerQuizSummary {
+    pub quiz_id: String,
+    pub active_version_id: Option<String>,
+    pub title: Option<String>,
+    pub question_count: Option<i64>,
+    pub subject: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct ScoreBandCount {
     pub score_band: String,
     pub attempt_count: i64,
@@ -719,6 +728,63 @@ pub async fn get_owner_quiz_statistics(
         "restricted"
     };
     calculate_quiz_statistics(store, quiz_id, language, report_visibility).await
+}
+
+pub async fn get_owner_quiz_summary(
+    store: &Store,
+    caller: &CallerIdentity,
+    quiz_id: &str,
+) -> Result<OwnerQuizSummary> {
+    let row = sqlx::query("SELECT owner_id, active_version_id FROM quizzes WHERE id = $1")
+        .bind(quiz_id)
+        .fetch_optional(&store.db)
+        .await?
+        .ok_or_else(Error::missing)?;
+
+    let owner_id: String = row.try_get("owner_id")?;
+    require_owner_or_admin(caller, &owner_id)?;
+
+    let active_vid_raw: String = row.try_get("active_version_id")?;
+    if active_vid_raw.is_empty() {
+        return Ok(OwnerQuizSummary {
+            quiz_id: quiz_id.to_string(),
+            active_version_id: None,
+            title: None,
+            question_count: None,
+            subject: None,
+        });
+    }
+
+    let version_row = sqlx::query(
+        "SELECT qv.title, (SELECT COUNT(*) FROM quiz_version_questions qvq WHERE qvq.quiz_version_id = qv.id) AS question_count
+         FROM quiz_versions qv
+         WHERE qv.id = $1 AND qv.quiz_id = $2",
+    )
+    .bind(&active_vid_raw)
+    .bind(quiz_id)
+    .fetch_optional(&store.db)
+    .await?;
+
+    match version_row {
+        Some(v) => {
+            let title: String = v.try_get("title")?;
+            let question_count: i64 = v.try_get("question_count")?;
+            Ok(OwnerQuizSummary {
+                quiz_id: quiz_id.to_string(),
+                active_version_id: Some(active_vid_raw),
+                title: Some(title),
+                question_count: Some(question_count),
+                subject: None,
+            })
+        }
+        None => Ok(OwnerQuizSummary {
+            quiz_id: quiz_id.to_string(),
+            active_version_id: None,
+            title: None,
+            question_count: None,
+            subject: None,
+        }),
+    }
 }
 
 pub async fn get_public_quiz(

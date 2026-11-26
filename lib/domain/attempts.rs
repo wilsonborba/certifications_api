@@ -65,6 +65,7 @@ pub struct AttemptHistoryFilter {
     pub started_to: Option<i64>,
     pub quiz_id: Option<String>,
     pub tag: Option<String>,
+    pub status: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -384,11 +385,23 @@ pub async fn list_my_attempts(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
+    let status = filter
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(status) = status
+        && !matches!(status, "in_progress" | "completed" | "abandoned")
+    {
+        return Err(Error::unprocessable(
+            "invalid_status: status must be one of 'in_progress', 'completed', 'abandoned'",
+        ));
+    }
     let mut count = AnyQuery::new(
         "SELECT COUNT(*) FROM attempts a JOIN quiz_versions qv ON qv.id = a.quiz_version_id WHERE a.owner_id = ",
     );
     count.push_bind_text(caller.user_id.clone());
-    push_history_filters(&mut count, filter, search, quiz_id, tag);
+    push_history_filters(&mut count, filter, search, quiz_id, tag, status);
     let total: i64 = count.query().fetch_one(&store.db).await?.try_get(0)?;
 
     let limit = limit.clamp(1, 50);
@@ -410,7 +423,7 @@ pub async fn list_my_attempts(
          FROM sequenced a JOIN quiz_versions qv ON qv.id = a.quiz_version_id
          JOIN quizzes q ON q.id = a.quiz_id WHERE 1 = 1",
     );
-    push_history_filters(&mut query, filter, search, quiz_id, tag);
+    push_history_filters(&mut query, filter, search, quiz_id, tag, status);
     query
         .push(" ORDER BY a.started_at DESC, a.id DESC LIMIT ")
         .push_bind_i64(limit)
@@ -465,7 +478,13 @@ fn push_history_filters(
     search: Option<&str>,
     quiz_id: Option<&str>,
     tag: Option<&str>,
+    status: Option<&str>,
 ) {
+    if let Some(status) = status {
+        query
+            .push(" AND a.status = ")
+            .push_bind_text(status.to_owned());
+    }
     if let Some(search) = search {
         query
             .push(" AND LOWER(qv.title) LIKE LOWER(")

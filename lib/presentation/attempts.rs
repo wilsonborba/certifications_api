@@ -24,6 +24,7 @@ struct ListParams {
     started_to: Option<i64>,
     quiz_id: Option<String>,
     tag: Option<String>,
+    status: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -74,6 +75,7 @@ async fn list_attempts(
             started_to: q.started_to,
             quiz_id: q.quiz_id,
             tag: q.tag,
+            status: q.status,
         },
         q.limit.unwrap_or(20),
         q.offset.unwrap_or(0),

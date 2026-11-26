@@ -110,6 +110,7 @@ async fn seed_and_exercise(store: &Store) {
             started_to: Some(200),
             quiz_id: Some("compat-quiz".into()),
             tag: Some("science".into()),
+            status: None,
         },
         1,
         1,

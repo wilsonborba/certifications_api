@@ -1529,3 +1529,207 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     assert_eq!(private_admin_stats, expected_private_stats);
     assert_eq!(reports.calls(), reports_calls_before_private_stats);
 }
+
+#[tokio::test]
+async fn test_owner_quiz_summary() {
+    let reports = MockReports::new(false);
+    let (app, store) = setup_app(reports).await;
+
+    // 1. Create a quiz with active version and 2 questions.
+    let quiz_id = new_id();
+    let version_id = new_id();
+    let q1_id = new_id();
+    let q1_vid = new_id();
+    let q2_id = new_id();
+    let q2_vid = new_id();
+
+    sqlx::query(
+        "INSERT INTO quizzes(id, owner_id, study_id, visibility, active_version_id, created_at, updated_at)
+         VALUES($1, 'owner-52', NULL, 'private', $2, 1000, 1000)",
+    )
+    .bind(&quiz_id)
+    .bind(&version_id)
+    .execute(&store.db)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO quiz_versions(id, quiz_id, version_num, title, created_at)
+         VALUES($1, $2, 1, 'Private Cardiology Self-Assessment', 1000)",
+    )
+    .bind(&version_id)
+    .bind(&quiz_id)
+    .execute(&store.db)
+    .await
+    .unwrap();
+
+    for (pos, qid, qvid) in [(0, &q1_id, &q1_vid), (1, &q2_id, &q2_vid)] {
+        sqlx::query(
+            "INSERT INTO questions(id, owner_id, origin, created_at) VALUES($1, 'owner-52', 'supplied_by_creator', 1000)",
+        )
+        .bind(qid)
+        .execute(&store.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO question_versions(id, question_id, version_num, language, schema_name, schema_version, couch_doc_id, created_at)
+             VALUES($1, $2, 1, 'en', $3, $4, 'doc-dummy', 1000)",
+        )
+        .bind(qvid)
+        .bind(qid)
+        .bind(QUESTION_SCHEMA_NAME)
+        .bind(QUESTION_SCHEMA_VERSION)
+        .execute(&store.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO quiz_version_questions(quiz_version_id, position, question_version_id)
+             VALUES($1, $2, $3)",
+        )
+        .bind(&version_id)
+        .bind(pos)
+        .bind(qvid)
+        .execute(&store.db)
+        .await
+        .unwrap();
+    }
+
+    // A. Authenticated owner can read summary.
+    let (st, summary) = call(
+        &app,
+        "GET",
+        &format!("/me/quizzes/{quiz_id}/summary"),
+        Some("owner-52"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(summary["quiz_id"], quiz_id);
+    assert_eq!(summary["active_version_id"], version_id);
+    assert_eq!(summary["title"], "Private Cardiology Self-Assessment");
+    assert_eq!(summary["question_count"], 2);
+    assert!(summary["subject"].is_null());
+
+    // Leaks no questions, answers, explanations, documents or sensitive fields.
+    let text = summary.to_string();
+    for forbidden in [
+        "correct_id",
+        "prompt",
+        "alternatives",
+        "explanation",
+        "citation_ref",
+        "couch_doc_id",
+        "sources",
+    ] {
+        assert!(!text.contains(forbidden));
+    }
+
+    // B. Admin can read summary.
+    let (st, admin_summary) = call_with_access_level(
+        &app,
+        &format!("/me/quizzes/{quiz_id}/summary"),
+        "admin-user",
+        1,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(admin_summary["quiz_id"], quiz_id);
+    assert_eq!(admin_summary["question_count"], 2);
+
+    // C. Other owner is forbidden (403).
+    let (st, other_body) = call(
+        &app,
+        "GET",
+        &format!("/me/quizzes/{quiz_id}/summary"),
+        Some("other-user"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert!(other_body["quiz_id"].is_null());
+
+    // D. Anonymous is unauthorized (401).
+    let (st, _) = call(
+        &app,
+        "GET",
+        &format!("/me/quizzes/{quiz_id}/summary"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+    // E. Non-existent quiz returns 404.
+    let (st, _) = call(
+        &app,
+        "GET",
+        "/me/quizzes/nonexistent-quiz-id/summary",
+        Some("owner-52"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    // F. Quiz with 0 questions in active version returns question_count: 0.
+    let empty_quiz_id = new_id();
+    let empty_vid = new_id();
+    sqlx::query(
+        "INSERT INTO quizzes(id, owner_id, study_id, visibility, active_version_id, created_at, updated_at)
+         VALUES($1, 'owner-52', NULL, 'private', $2, 2000, 2000)",
+    )
+    .bind(&empty_quiz_id)
+    .bind(&empty_vid)
+    .execute(&store.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO quiz_versions(id, quiz_id, version_num, title, created_at)
+         VALUES($1, $2, 1, 'Empty Quiz', 2000)",
+    )
+    .bind(&empty_vid)
+    .bind(&empty_quiz_id)
+    .execute(&store.db)
+    .await
+    .unwrap();
+
+    let (st, empty_summary) = call(
+        &app,
+        "GET",
+        &format!("/me/quizzes/{empty_quiz_id}/summary"),
+        Some("owner-52"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(empty_summary["quiz_id"], empty_quiz_id);
+    assert_eq!(empty_summary["active_version_id"], empty_vid);
+    assert_eq!(empty_summary["title"], "Empty Quiz");
+    assert_eq!(empty_summary["question_count"], 0);
+    assert!(empty_summary["subject"].is_null());
+
+    // G. Quiz with no active version (active_version_id = '') returns nulls.
+    let no_ver_quiz_id = new_id();
+    sqlx::query(
+        "INSERT INTO quizzes(id, owner_id, study_id, visibility, active_version_id, created_at, updated_at)
+         VALUES($1, 'owner-52', NULL, 'private', '', 3000, 3000)",
+    )
+    .bind(&no_ver_quiz_id)
+    .execute(&store.db)
+    .await
+    .unwrap();
+
+    let (st, no_ver_summary) = call(
+        &app,
+        "GET",
+        &format!("/me/quizzes/{no_ver_quiz_id}/summary"),
+        Some("owner-52"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(no_ver_summary["quiz_id"], no_ver_quiz_id);
+    assert!(no_ver_summary["active_version_id"].is_null());
+    assert!(no_ver_summary["title"].is_null());
+    assert!(no_ver_summary["question_count"].is_null());
+    assert!(no_ver_summary["subject"].is_null());
+}
