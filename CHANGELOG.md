@@ -16,30 +16,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(studies)* Add studies, multi-source FSM uploads, prepared study reuse, and quota meter (#35) ([`b7674d0`](https://github.com/wilsonborba/certifications_api/commit/b7674d0b90baa158d3576feed5132b9e11cfaf7b))
 - *(deletion)* Remove deleted content immediately with deferred FSM cleanup (#37) ([`a37fea8`](https://github.com/wilsonborba/certifications_api/commit/a37fea8940980ab73c0e8238985ebc4d173a1421))
 - *(generation)* Add durable per-user generation queue on Cortex T0 Easy (#38) ([`67b82a0`](https://github.com/wilsonborba/certifications_api/commit/67b82a01c123f384008ca3e20ca7d55b5be3b1e8))
-- *(generation)* Bridge selected Reports and media sources with frozen source snapshots (#38) ([`bb92ad5`](https://github.com/wilsonborba/certifications_api/commit/bb92ad5d8c464275a0177cfb26a7684096f4f454))
 - *(estimates)* Add generation step timing, estimation statistics, and estimate endpoint (#39) ([`7b443c0`](https://github.com/wilsonborba/certifications_api/commit/7b443c0efb2e16e6e4a55b05f95a7aa3aa53c2c4))
 - *(authoring)* Add question review, manual creation, CSV import, visual rendering, and origin guards (#40) ([`6100b83`](https://github.com/wilsonborba/certifications_api/commit/6100b835652f6470e75fb34d8e9a5ad6fb8dc764))
 - *(catalog)* Add public discovery, quiz detail, tags, and restricted-report publication guard (#41) ([`0d1e8d5`](https://github.com/wilsonborba/certifications_api/commit/0d1e8d5c669f22853dc628172b555eb70b302f61))
 - *(attempts)* Add version-locked attempts, grading, three-group stats, and deduplicated activity events (#42) ([`63d19fc`](https://github.com/wilsonborba/certifications_api/commit/63d19fc0ac81c0601cd7dafad4da6990248afb5d))
 - *(certificates)* Add holder identity, idempotent issuance, FSM files, verification, and revocation (#44) ([`8f867a2`](https://github.com/wilsonborba/certifications_api/commit/8f867a2ca52816b66a383ac19a484ddf9500933b))
 - *(admin)* Add admin settings, schema versions CRUD/publish/retire, and statistics routes (#45) ([`07b0fa8`](https://github.com/wilsonborba/certifications_api/commit/07b0fa8d27d8f938e0e2da024bdf2dd6472822e3))
+- *(certifications)* Add statistics history routes ([`35684a7`](https://github.com/wilsonborba/certifications_api/commit/35684a709d7af29442e8beb83e20c7e9b6ab67f1))
 - *(certifications_api#35)* Add multipart binary/audio uploads, Range content stream, and cheap preview metadata ([`475a637`](https://github.com/wilsonborba/certifications_api/commit/475a637d83809cf59ecc7a9376c3dbdd7a1fbcca))
+- Add public question version reuse flow ([`2803170`](https://github.com/wilsonborba/certifications_api/commit/2803170737704a5324171276599e3c6e681e6f36))
+- *(certifications)* Dispatch generation through temporary Cortex chats ([`7dda14c`](https://github.com/wilsonborba/certifications_api/commit/7dda14ca830710d742a14d4e44b7d44a7d8986e2))
+- *(#35)* Add migration 010 for server-only source_provenance ([`511e7b7`](https://github.com/wilsonborba/certifications_api/commit/511e7b79a2d1d42ac4028029ac4b1fe51445e4e1))
+- *(generation)* Bridge selected reports and media sources (#38) ([`bb92ad5`](https://github.com/wilsonborba/certifications_api/commit/bb92ad5d8c464275a0177cfb26a7684096f4f454))
 - *(#35)* Add migration 010 for server-only source_provenance ([`a841e6a`](https://github.com/wilsonborba/certifications_api/commit/a841e6a2f88fca4957d6c27f97a4678e58038c75))
 - *(#35)* Enforce canonical selection grammar and persist legacy provenance regression ([`b14fa20`](https://github.com/wilsonborba/certifications_api/commit/b14fa201700453c0330938bc330c5baf49c6e0eb))
 - *(#35)* Align MAX_SELECTION_RANGES to 100 with Cortex #136 ([`d5962fb`](https://github.com/wilsonborba/certifications_api/commit/d5962fba03b4351a2968b8929d54748d7b2de660))
-- *(certifications)* Add statistics history routes ([`35684a7`](https://github.com/wilsonborba/certifications_api/commit/35684a709d7af29442e8beb83e20c7e9b6ab67f1))
 - *(certifications)* Integrate history and statistics (#43) ([`69c4196`](https://github.com/wilsonborba/certifications_api/commit/69c41966dace392e25b017e011e618a8ac4c24aa))
-- Add public question version reuse flow ([`2803170`](https://github.com/wilsonborba/certifications_api/commit/2803170737704a5324171276599e3c6e681e6f36))
 - *(catalog)* Add bounded search projection rebuild (#49) ([`32e5037`](https://github.com/wilsonborba/certifications_api/commit/32e5037db366d3989c14a92306ef479db01d4ba4))
 - *(certifications)* Integrate explicit public question reuse (#49) ([`93e8a11`](https://github.com/wilsonborba/certifications_api/commit/93e8a1141ee5591937a97975005b7ec3b8c5d2ca))
 - *(studies)* Persist normalized prepared study config in study_configs table (#35) ([`87c79de`](https://github.com/wilsonborba/certifications_api/commit/87c79deb77d0b306cb8ede11cad950411f86ab9c))
 - *(studies)* Integrate durable prepared study configuration ([`19c442c`](https://github.com/wilsonborba/certifications_api/commit/19c442cc99ffcc5b95fb60969d0f8340e51c5849))
 - Authorize private quiz statistics ([`60b90c1`](https://github.com/wilsonborba/certifications_api/commit/60b90c11eb1f3347e554ff929201c3a64a81c19f))
 - Paginate and filter study history ([`4fc2ddc`](https://github.com/wilsonborba/certifications_api/commit/4fc2ddcd57ccfb2063e8d30780e1ea0a9cb70ff6))
+- *(generation)* Integrate reviewed durable queue and source bridge (#38) ([`fa3090d`](https://github.com/wilsonborba/certifications_api/commit/fa3090dc3f80ed245eebe715031703cbad4e70b9))
 
 ### 🐛 Bug Fixes
-
-- *(generation)* Enforce generation target ownership and safe worker outcomes (#38) ([`4f166fc`](https://github.com/wilsonborba/certifications_api/commit/4f166fcb1c566b64a55d97c18748c857bcd03ff2))
 
 - Remove daily generation quota system entirely ([`39bc644`](https://github.com/wilsonborba/certifications_api/commit/39bc644501b82fe854dfa2680153c2bfdcc0670b))
 - Stop chunk loop at the real question cap, not just a fixed target ([`f3bec8c`](https://github.com/wilsonborba/certifications_api/commit/f3bec8ca1bef71e42390ca586d5e1e993f973db7))
@@ -50,12 +51,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(security)* Supervise freshclam, expose signature health in /ready, and add ignored real clamscan test (#36) ([`669ebad`](https://github.com/wilsonborba/certifications_api/commit/669ebad42b4d55f0d2404740001c0b66df2d8264))
 - *(studies)* Wire Reports picker and source access check to real Reports routes (#35) ([`7db68fb`](https://github.com/wilsonborba/certifications_api/commit/7db68fb129ca0cd4e7f43bcae84263851b8b6daa))
 - *(catalog)* Use source_kind/external_ref columns and default published title to study title (#41) ([`ae7b76e`](https://github.com/wilsonborba/certifications_api/commit/ae7b76ee515fa2fe8b4398d17a24563a114a4d56))
+- *(certifications)* Add provenance to attempt statistics ([`8a568fc`](https://github.com/wilsonborba/certifications_api/commit/8a568fc0a1f0a8f8671678771cff2770668cffff))
+- *(certifications)* Validate reuse lifecycle and bound public search ([`19a0491`](https://github.com/wilsonborba/certifications_api/commit/19a04913c13e82114e41bec24f645909e39f62b3))
+- *(certifications_api#35)* Enforce fsm_ref ownership, bounded uploads, PDF structure count, and bounded FSM reads ([`ca134c4`](https://github.com/wilsonborba/certifications_api/commit/ca134c4bbc555002b53fabc7ad50eea3c1af3ad0))
+- *(#35)* Fail closed on unproven legacy fsm_ref rows and test ObjStm null page_count ([`89bb145`](https://github.com/wilsonborba/certifications_api/commit/89bb1455741c10aa62f9d373d2472d956d0789f6))
+- *(generation)* Enforce target and worker safety ([`4f166fc`](https://github.com/wilsonborba/certifications_api/commit/4f166fcb1c566b64a55d97c18748c857bcd03ff2))
 - *(certifications_api#35)* Enforce fsm_ref ownership, bounded uploads, PDF structure count, and bounded FSM reads ([`216efa2`](https://github.com/wilsonborba/certifications_api/commit/216efa2f66a9d36eb5634df8e2502e8d2242c03d))
 - *(#35)* Fail closed on unproven legacy fsm_ref rows and test ObjStm null page_count ([`e4a90c0`](https://github.com/wilsonborba/certifications_api/commit/e4a90c0662f44ba13a85ce93d80cd0c010a736de))
 - *(studies)* Enforce 100-page PDF total cap and text-only passages selection ([`b993c3d`](https://github.com/wilsonborba/certifications_api/commit/b993c3d000e972db1c6ac19f1686e316ec91b76a))
-- *(certifications)* Add provenance to attempt statistics ([`8a568fc`](https://github.com/wilsonborba/certifications_api/commit/8a568fc0a1f0a8f8671678771cff2770668cffff))
 - *(certifications)* Include score chart template definition ([`81fd5a1`](https://github.com/wilsonborba/certifications_api/commit/81fd5a105a754def1886692de58d870340bcffe1))
-- *(certifications)* Validate reuse lifecycle and bound public search ([`19a0491`](https://github.com/wilsonborba/certifications_api/commit/19a04913c13e82114e41bec24f645909e39f62b3))
 - *(certifications)* Hide private citation in reused quiz results ([`b596ba7`](https://github.com/wilsonborba/certifications_api/commit/b596ba7be2b1cc0301a89cda050b0597afa3be4a))
 - *(catalog)* Retain rebuild cursor on batch failure (#49) ([`33890b0`](https://github.com/wilsonborba/certifications_api/commit/33890b094951e7821aa054ce2d8b9dea0d1bb443))
 - Pin unicode normalization version ([`89c4286`](https://github.com/wilsonborba/certifications_api/commit/89c428602514f76cd3cd0f99f3cd9472fbf8ad67))
@@ -69,6 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(statistics)* Integrate canonical Reports data tier ([`3c0934e`](https://github.com/wilsonborba/certifications_api/commit/3c0934ed58e2fd0fecd31a00129f372cd97f9642))
 - Localize statistics measure axis label ([`aa4d12a`](https://github.com/wilsonborba/certifications_api/commit/aa4d12a5c6fa0ed2df50f30f310e1c90550a9b5c))
 - *(statistics)* Integrate dimensionless localized attempt counts ([`61972f9`](https://github.com/wilsonborba/certifications_api/commit/61972f96a6a62d751eeb92a52c07570ec7c66d60))
+- *(generation)* Pin T0 and preserve report snapshots on resume ([`1c763f8`](https://github.com/wilsonborba/certifications_api/commit/1c763f855c3c0f7d3d5bb4af3495c5019b55feed))
+- *(generation)* Enforce single active job per owner ([`4129ee0`](https://github.com/wilsonborba/certifications_api/commit/4129ee016be8250b2b27f40794ac149e78cd7149))
+- *(generation)* Retain terminal idempotency keys ([`94e4224`](https://github.com/wilsonborba/certifications_api/commit/94e4224983c2b0f57b070b9c22fb1f5c7f7d832d))
+- *(runtime)* Recover interrupted generation workers safely ([`701d2aa`](https://github.com/wilsonborba/certifications_api/commit/701d2aa644c5c545343da453b3c9a2183d1a1b90))
 
 ### 💼 Other Changes
 
@@ -96,8 +104,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Merge chore/47-app-owned-clamav into feature/main (#47) ([`2593dc4`](https://github.com/wilsonborba/certifications_api/commit/2593dc42c5d8e7c860ac3c3da4f1c9f454a95270))
 - Merge fix/47-fmt: cargo fmt for certifications_api#47 ([`ac2887f`](https://github.com/wilsonborba/certifications_api/commit/ac2887f15e840cfe4a2dd6238a4ccbb9bf5b6257))
 - Merge feature/35-binary-uploads-preview: binary/audio upload, Range content, preview metadata (#35) ([`c50749c`](https://github.com/wilsonborba/certifications_api/commit/c50749c00d66f523c98ae06ec4f78cbf8fc1ee36))
-- Merge fix/35-auth-bounds-pdf-range: enforce source ownership and selection bounds ([`94db564`](https://github.com/wilsonborba/certifications_api/commit/94db564dd9bfd20c6912507b1662dff1566ed472))
 - Merge feature/main into Certifications43 correction branch ([`1219516`](https://github.com/wilsonborba/certifications_api/commit/1219516036ba822ee2f99fcb589f7a64526362ae))
+- Merge fix/35-auth-bounds-pdf-range: enforce source ownership and selection bounds ([`94db564`](https://github.com/wilsonborba/certifications_api/commit/94db564dd9bfd20c6912507b1662dff1566ed472))
+- Align cert 38 with source contract 35 ([`b0c2684`](https://github.com/wilsonborba/certifications_api/commit/b0c268463ee562cf03ff730731b9ad2c6122858c))
+- Merge commit '1f152afb7590e94e377ad5d457c7f168b0d8b4e8' into bonsai-eval/38-generation-bridge
+
+# Conflicts:
+#	CHANGELOG.md
+#	lib/dal/mod.rs
+#	lib/main.rs ([`4f25200`](https://github.com/wilsonborba/certifications_api/commit/4f25200f0702710df38bfa35a7a0a3dbc4940e12))
 
 ### 🚜 Refactor
 
@@ -113,6 +128,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(changelog)* Record prepared settings and PostgreSQL history fixes ([`b10e505`](https://github.com/wilsonborba/certifications_api/commit/b10e505ac35ac8f2f6b0fb10ef98fc1e5691cadb))
 - *(changelog)* Record verified Rust service preparation ([`f7afd15`](https://github.com/wilsonborba/certifications_api/commit/f7afd1516a0a5968d2e947544fca773855bcef25))
 - *(changelog)* Record real aggregate Reports metadata ([`a95ef10`](https://github.com/wilsonborba/certifications_api/commit/a95ef10dfe0cce5ed8e8601ca21b36efbedf85d2))
+- *(changelog)* Record localized dimensionless attempt counts ([`1f152af`](https://github.com/wilsonborba/certifications_api/commit/1f152afb7590e94e377ad5d457c7f168b0d8b4e8))
 
 ### 🎨 Styling
 
@@ -122,12 +138,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Keep PostgreSQL fixture identity portable ([`d161e34`](https://github.com/wilsonborba/certifications_api/commit/d161e3436491519465cb15e01a4cbe1f2c2c3bbf))
 - Extend installer negative package coverage ([`7f7e06f`](https://github.com/wilsonborba/certifications_api/commit/7f7e06f8ad876f0946bdf2b0e58d0ca59aff5968))
+- *(generation)* Assert queue ranks after enqueue batch ([`72518ae`](https://github.com/wilsonborba/certifications_api/commit/72518aea08acfbd0ddd6f85799ac60eb5d487492))
 
 ### ⚙️ Miscellaneous Tasks
 
 - *(release)* Sync release/v1.0.0 back to feature/main ([`b014731`](https://github.com/wilsonborba/certifications_api/commit/b014731f5f5218f649958c424d281d595b21f826))
 - *(security)* Add app-owned ClamAV runtime without system service (#47) ([`17ff9bc`](https://github.com/wilsonborba/certifications_api/commit/17ff9bcf9633f7eecdbf1d723d31d24d9b8d0f66))
 - Remove ignored docs artifact from public branch ([`c44b9cb`](https://github.com/wilsonborba/certifications_api/commit/c44b9cb866d2546e93a4fe59c311cb1d3fd679ef))
+- Refresh unreleased changelog ([`8454b79`](https://github.com/wilsonborba/certifications_api/commit/8454b791dc43117e806f313f18820f408775973b))
+- Refresh unreleased changelog ([`b4b6412`](https://github.com/wilsonborba/certifications_api/commit/b4b64127f97f64fb4d9d867511b6922dc057191d))
 - Refresh unreleased changelog ([`71844ee`](https://github.com/wilsonborba/certifications_api/commit/71844ee70b5cfc6bf2ddc4f26b9289b254136fe4))
 - Refresh unreleased changelog ([`c0a85dc`](https://github.com/wilsonborba/certifications_api/commit/c0a85dcae7dbde82713bdd501a8cf33a9a68d93a))
 - Package Rust service with safe dry-run ([`6ec2834`](https://github.com/wilsonborba/certifications_api/commit/6ec283416a690483e951df62f41c7cc9e5927f60))
