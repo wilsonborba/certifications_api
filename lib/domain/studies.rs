@@ -10,7 +10,7 @@ use crate::{
 };
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
+use sqlx::{Row, any::AnyRow};
 
 pub const STUDY_DRAFT_TTL_SECONDS: i64 = 1800;
 pub const MAX_PAGE_LIMIT: i64 = 50;
@@ -174,6 +174,7 @@ async fn inspect_analysis_source_bytes(
     study_id: &str,
     source: &SourceSummary,
 ) -> std::result::Result<(Option<usize>, Option<u32>, Option<f64>), &'static str> {
+    let current = current_analysis_source_row(store, caller, study_id, source).await?;
     if source.size_bytes < 0 || source.size_bytes as usize > MAX_ANALYSIS_SOURCE_BYTES {
         return Err("source_size_unsupported");
     }
@@ -190,17 +191,11 @@ async fn inspect_analysis_source_bytes(
             .fetch_report_dataset(&caller.user_id, project, report, dataset)
             .await
             .map_err(|_| "source_unavailable")?;
-        let row = sqlx::query(
-            "SELECT is_restricted, report_calculation_id, report_calculation_version, report_row_count, report_lineage_sha256 FROM sources WHERE id = $1 AND study_id = $2 AND owner_id = $3 AND status = 'ready'",
-        )
-        .bind(&source.id).bind(study_id).bind(&caller.user_id)
-        .fetch_optional(&store.db).await.map_err(|_| "source_unavailable")?
-        .ok_or("source_unavailable")?;
-        let expected_restricted = row.get::<i64, _>("is_restricted") != 0;
-        let expected_calculation: String = row.get("report_calculation_id");
-        let expected_version: i64 = row.get("report_calculation_version");
-        let expected_rows: i64 = row.get("report_row_count");
-        let expected_lineage: String = row.get("report_lineage_sha256");
+        let expected_restricted = current.get::<i64, _>("is_restricted") != 0;
+        let expected_calculation: String = current.get("report_calculation_id");
+        let expected_version: i64 = current.get("report_calculation_version");
+        let expected_rows: i64 = current.get("report_row_count");
+        let expected_lineage: String = current.get("report_lineage_sha256");
         if (checked.is_restricted || material.is_restricted) != expected_restricted
             || material.lineage.calculation_id != expected_calculation
             || material.lineage.calculation_version != expected_version
@@ -226,6 +221,19 @@ async fn inspect_analysis_source_bytes(
     if bytes.len() != source.size_bytes as usize
         || source.sha256.trim().is_empty()
         || sha256_hex(&bytes) != source.sha256
+    {
+        return Err("source_integrity_failed");
+    }
+    let latest = current_analysis_source_row(store, caller, study_id, source).await?;
+    if source.source_kind == "report"
+        && (latest.get::<String, _>("report_calculation_id")
+            != current.get::<String, _>("report_calculation_id")
+            || latest.get::<i64, _>("report_calculation_version")
+                != current.get::<i64, _>("report_calculation_version")
+            || latest.get::<i64, _>("report_row_count")
+                != current.get::<i64, _>("report_row_count")
+            || latest.get::<String, _>("report_lineage_sha256")
+                != current.get::<String, _>("report_lineage_sha256"))
     {
         return Err("source_integrity_failed");
     }
@@ -255,6 +263,44 @@ async fn inspect_analysis_source_bytes(
     .then(|| cheap_wav_duration_seconds(&bytes))
     .flatten();
     Ok((text_char_count, page_count, duration_seconds))
+}
+
+async fn current_analysis_source_row(
+    store: &Store,
+    caller: &CallerIdentity,
+    study_id: &str,
+    source: &SourceSummary,
+) -> std::result::Result<AnyRow, &'static str> {
+    let current = sqlx::query(
+        "SELECT s.owner_id, st.owner_id AS study_owner_id, s.status, s.source_kind, s.mime_type, s.size_bytes, s.sha256, s.fsm_ref, s.selection_kind, s.selection_spec, s.is_restricted, s.external_ref, s.report_calculation_id, s.report_calculation_version, s.report_row_count, s.report_lineage_sha256 FROM sources s JOIN studies st ON st.id = s.study_id WHERE s.id = $1 AND s.study_id = $2",
+    )
+    .bind(&source.id)
+    .bind(study_id)
+    .fetch_optional(&store.db)
+    .await
+    .map_err(|_| "source_unavailable")?
+    .ok_or("source_unavailable")?;
+    if current.get::<String, _>("owner_id") != caller.user_id
+        || current.get::<String, _>("study_owner_id") != caller.user_id
+    {
+        return Err("source_access_denied");
+    }
+    if current.get::<String, _>("status") != "ready" {
+        return Err("source_unavailable");
+    }
+    if current.get::<String, _>("source_kind") != source.source_kind
+        || current.get::<String, _>("mime_type") != source.mime_type
+        || current.get::<i64, _>("size_bytes") != source.size_bytes
+        || current.get::<String, _>("sha256") != source.sha256
+        || current.get::<String, _>("fsm_ref") != source.fsm_ref
+        || current.get::<String, _>("selection_kind") != source.selection_kind
+        || current.get::<String, _>("selection_spec") != source.selection_spec
+        || (current.get::<i64, _>("is_restricted") != 0) != source.is_restricted
+        || current.get::<String, _>("external_ref") != source.external_ref
+    {
+        return Err("source_integrity_failed");
+    }
+    Ok(current)
 }
 
 #[derive(Deserialize)]

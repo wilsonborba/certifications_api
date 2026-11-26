@@ -1815,6 +1815,43 @@ async fn streamed_analysis_reports_nullable_measurements_and_stops_reading_when_
     assert_eq!(status, StatusCode::OK);
     assert_eq!(summary["total_sources"], 5);
     assert_eq!(summary["ready_sources"], 5);
+
+    let caller = certifications_api::domain::auth::CallerIdentity {
+        user_id: "owner-a".into(),
+        access_level: 0,
+        display_name: None,
+    };
+    let prepared = certifications_api::domain::studies::prepare_analysis_inspection(
+        &store,
+        &caller,
+        "analysis-stream-study",
+    )
+    .await
+    .unwrap();
+    let stale_source = prepared
+        .sources
+        .iter()
+        .find(|source| source.id == "src-second")
+        .unwrap();
+    sqlx::query("UPDATE sources SET sha256 = 'changed-after-preflight' WHERE id = 'src-second'")
+        .execute(&store.db)
+        .await
+        .unwrap();
+    let gets_before_stale = fsm.get_count();
+    let stale_event = certifications_api::domain::studies::inspect_analysis_source(
+        &store,
+        &caller,
+        "analysis-stream-study",
+        stale_source,
+    )
+    .await;
+    assert_eq!(stale_event.event, "error");
+    assert_eq!(stale_event.data["code"], "source_integrity_failed");
+    assert_eq!(
+        fsm.get_count(),
+        gets_before_stale,
+        "stale source metadata must be rechecked before reading bytes"
+    );
 }
 
 #[derive(Default)]
