@@ -81,7 +81,7 @@ impl ReportsClient for MockReports {
         input: &'a CreateRenderJobInput,
     ) -> BoxFuture<'a, CoreResult<RenderJobDescriptor>> {
         let desc = RenderJobDescriptor {
-            job_id: "test-render-job-40".into(),
+            job_id: format!("test-render-job-{}", certifications_api::dal::new_id()),
             template_id: input.template_id.clone(),
             template_version: input.template_version,
             mapping: input.mapping.clone(),
@@ -935,7 +935,12 @@ async fn test_visual_publication_serialization_and_rejection() {
     )
     .await;
     assert_eq!(st, StatusCode::CONFLICT);
-    assert!(resp["error"].as_str().unwrap_or_default().contains("quiz_already_published"));
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("quiz_already_published")
+    );
 
     // Stage 2 visual upload must also fail with 409 quiz_already_published
     let valid_png = make_test_png(1600, 960);
@@ -956,7 +961,12 @@ async fn test_visual_publication_serialization_and_rejection() {
     )
     .await;
     assert_eq!(st, StatusCode::CONFLICT);
-    assert!(resp["error"].as_str().unwrap_or_default().contains("quiz_already_published"));
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("quiz_already_published")
+    );
 }
 
 #[tokio::test]
@@ -1171,7 +1181,7 @@ async fn test_visual_fsm_compensation_outside_sql_transaction() {
 
 #[tokio::test]
 async fn test_visual_replay_scoping_and_draft_expiry_regressions() {
-    let (app, store, _) = setup_app().await;
+    let (app, store, fsm) = setup_app().await;
 
     // 1. Setup Study A with Question A1 and Question A2
     let (st, study_a) = call(
@@ -1244,7 +1254,10 @@ async fn test_visual_replay_scoping_and_draft_expiry_regressions() {
     )
     .await;
     assert_eq!(st, StatusCode::CREATED);
-    let job_id_a1 = prep_a1["render_job"]["job_id"].as_str().unwrap().to_string();
+    let job_id_a1 = prep_a1["render_job"]["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let valid_png = make_test_png(1600, 960);
     let (st, _) = call(
@@ -1364,7 +1377,9 @@ async fn test_visual_replay_scoping_and_draft_expiry_regressions() {
         })),
     )
     .await;
-    assert!(st == StatusCode::CONFLICT || st == StatusCode::FORBIDDEN || st == StatusCode::NOT_FOUND);
+    assert!(
+        st == StatusCode::CONFLICT || st == StatusCode::FORBIDDEN || st == StatusCode::NOT_FOUND
+    );
 
     // Negative Regression 4: Timestamp-expired draft
     let past_ts = chrono::Utc::now().timestamp() - 1000;
@@ -1396,7 +1411,12 @@ async fn test_visual_replay_scoping_and_draft_expiry_regressions() {
     )
     .await;
     assert_eq!(st, StatusCode::GONE);
-    assert!(exp_prep["error"].as_str().unwrap_or_default().contains("study_expired"));
+    assert!(
+        exp_prep["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("study_expired")
+    );
 
     // Upload on expired draft must return 410 GONE
     let (st, exp_upload) = call(
@@ -1416,5 +1436,127 @@ async fn test_visual_replay_scoping_and_draft_expiry_regressions() {
     )
     .await;
     assert_eq!(st, StatusCode::GONE);
-    assert!(exp_upload["error"].as_str().unwrap_or_default().contains("study_expired"));
+    assert!(
+        exp_upload["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("study_expired")
+    );
+
+    // Direct upload on timestamp-expired draft regression:
+    // Setup Study C with Question C while draft is valid
+    let (st, study_c) = call(
+        &app,
+        "POST",
+        "/studies",
+        "author-c",
+        None,
+        Some(json!({ "title": "Study C" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sid_c = study_c["id"].as_str().unwrap().to_string();
+
+    let (st, q_c) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_c}/questions"),
+        "author-c",
+        None,
+        Some(json!({
+            "language": "en",
+            "prompt": "Q C",
+            "alternatives": [{ "id": "a", "text": "1" }, { "id": "b", "text": "2" }],
+            "correct_id": "a",
+            "explanation": "Exp"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let qid_c = q_c["id"].as_str().unwrap().to_string();
+    let qv_c = q_c["version_id"].as_str().unwrap().to_string();
+
+    // Prepare a valid visual job while Study C is valid draft
+    let (st, prep_c) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_c}/questions/{qid_c}/visual_jobs"),
+        "author-c",
+        None,
+        Some(json!({
+            "template_id": "chart_template",
+            "template_version": 1,
+            "mapping": {},
+            "config": {},
+            "rows": [],
+            "width": 800,
+            "height": 480,
+            "scale": 2,
+            "ttl_seconds": 600
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let job_id_c = prep_c["render_job"]["job_id"].as_str().unwrap().to_string();
+
+    // Verify stored status is 'draft' before expiry mutation
+    let status_before: String = sqlx::query_scalar("SELECT status FROM studies WHERE id = $1")
+        .bind(&sid_c)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(status_before, "draft");
+
+    // Mutate expires_at to past while status is STILL draft
+    sqlx::query("UPDATE studies SET expires_at = $1 WHERE id = $2")
+        .bind(past_ts)
+        .bind(&sid_c)
+        .execute(&store.db)
+        .await
+        .unwrap();
+
+    let status_still_draft: String = sqlx::query_scalar("SELECT status FROM studies WHERE id = $1")
+        .bind(&sid_c)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(status_still_draft, "draft");
+
+    let fsm_blobs_before = fsm.blob_count();
+
+    // Directly call upload without calling prepare after expiry
+    let (st, direct_exp_upload) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_c}/questions/{qid_c}/visuals"),
+        "author-c",
+        None,
+        Some(json!({
+            "question_version_id": qv_c,
+            "render_job_id": job_id_c,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::GONE);
+    assert!(
+        direct_exp_upload["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("study_expired")
+    );
+
+    // Assert zero new FSM blobs created
+    assert_eq!(fsm.blob_count(), fsm_blobs_before);
+
+    // Assert status transitioned from 'draft' to 'expired' directly by upload
+    let status_after: String = sqlx::query_scalar("SELECT status FROM studies WHERE id = $1")
+        .bind(&sid_c)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(status_after, "expired");
 }
