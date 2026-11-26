@@ -336,6 +336,8 @@ pub struct PreparedSourceRef {
     pub selection_kind: String,
     #[serde(default)]
     pub selection_spec: String,
+    #[serde(default)]
+    pub external_ref: String,
 }
 
 #[derive(Deserialize)]
@@ -925,6 +927,11 @@ pub async fn create_prepared_study(
                 "invalid_source: Prepared source requires filename, fsm_ref, and non-negative size",
             ));
         }
+        if s.external_ref.chars().count() > 255 {
+            return Err(Error::unprocessable(
+                "invalid_source: external_ref exceeds maximum length of 255 characters",
+            ));
+        }
         let canon = canonicalize_selection(
             &s.selection_kind,
             &s.selection_spec,
@@ -980,7 +987,7 @@ pub async fn create_prepared_study(
         let source_id = new_id();
         sqlx::query(
             "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, source_provenance, created_at, updated_at)
-             VALUES($1, $2, $3, $4, $5, $6, $7, $8, 'fsm_ref', 'ready', $9, $10, 0, '', $11, $12, $12)",
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8, 'fsm_ref', 'ready', $9, $10, 0, $11, $12, $13, $13)",
         )
         .bind(&source_id)
         .bind(&caller.user_id)
@@ -992,6 +999,7 @@ pub async fn create_prepared_study(
         .bind(s.fsm_ref.trim())
         .bind(s.selection_kind)
         .bind(canon_spec)
+        .bind(s.external_ref.trim())
         .bind(provenance)
         .bind(ts)
         .execute(&mut *tx)
