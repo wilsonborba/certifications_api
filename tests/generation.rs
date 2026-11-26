@@ -30,13 +30,32 @@ use certifications_api::{
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use sqlx::Row;
+use sqlx::{Row, any::AnyPoolOptions};
+use std::collections::HashSet;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use tokio::sync::Notify;
+use tokio::sync::{Barrier, Notify};
 use tower::ServiceExt;
+
+const POSTGRES_MIGRATIONS: [&str; 15] = [
+    include_str!("../migrations/001_v2_schema.sql"),
+    include_str!("../migrations/002_v2_studies_sources.sql"),
+    include_str!("../migrations/003_v2_generation_events.sql"),
+    include_str!("../migrations/004_v2_authoring_origin.sql"),
+    include_str!("../migrations/005_v2_attempt_activity.sql"),
+    include_str!("../migrations/006_v2_certificates_snapshot.sql"),
+    include_str!("../migrations/007_v2_drop_legacy_waitlist.sql"),
+    include_str!("../migrations/008_v2_quiz_question_provenance.sql"),
+    include_str!("../migrations/009_v2_public_question_search.sql"),
+    include_str!("../migrations/010_v2_source_provenance.sql"),
+    include_str!("../migrations/011_v2_study_prepared_config.sql"),
+    include_str!("../migrations/012_v2_generation_source_snapshot.sql"),
+    include_str!("../migrations/013_v2_generation_source_external_ref.sql"),
+    include_str!("../migrations/014_v2_report_source_snapshot.sql"),
+    include_str!("../migrations/015_v2_one_active_generation_per_owner.sql"),
+];
 
 struct CortexGate {
     entered: Notify,
@@ -1479,4 +1498,277 @@ async fn worker_marks_guardrail_failure_terminal_instead_of_leaving_running_job(
     assert_eq!(quiz_count, 0);
     worker.abort();
     let _ = worker.await;
+}
+
+#[tokio::test]
+async fn active_queue_positions_follow_remaining_fifo_jobs() {
+    let mut store = Store::fixture().await;
+    store.cortex = MockCortex::new();
+    publish_question_schema(&store).await;
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+
+    let mut jobs = Vec::new();
+    for (user_id, title) in [("u1", "Queue one"), ("u2", "Queue two")] {
+        let (_, study) = call(
+            &app,
+            "POST",
+            "/studies",
+            Some(user_id),
+            Some(json!({"title": title})),
+        )
+        .await;
+        let study_id = study["id"].as_str().unwrap().to_owned();
+        let (source_status, _) = call(
+            &app,
+            "POST",
+            &format!("/studies/{study_id}/sources"),
+            Some(user_id),
+            Some(json!({"filename":"source.txt", "mime_type":"text/plain", "content_text":"ATP source"})),
+        )
+        .await;
+        assert_eq!(source_status, StatusCode::CREATED);
+        let (job_status, job) = call(
+            &app,
+            "POST",
+            &format!("/studies/{study_id}/generations"),
+            Some(user_id),
+            Some(json!({"language":"en", "count":1, "idempotency_key":format!("queue-{user_id}")})),
+        )
+        .await;
+        assert_eq!(job_status, StatusCode::CREATED);
+        jobs.push((
+            user_id,
+            job["id"].as_str().unwrap().to_owned(),
+            job["queue_position"].as_i64().unwrap(),
+        ));
+    }
+    assert_eq!(
+        jobs.iter().map(|job| job.2).collect::<HashSet<_>>(),
+        HashSet::from([1, 2])
+    );
+
+    let (front_user, front_id, _) = jobs.iter().find(|job| job.2 == 1).unwrap();
+    let (next_user, next_id, _) = jobs.iter().find(|job| job.2 == 2).unwrap();
+    let (stop_status, stopped) = call(
+        &app,
+        "POST",
+        &format!("/generations/{front_id}/stop"),
+        Some(front_user),
+        None,
+    )
+    .await;
+    assert_eq!(stop_status, StatusCode::OK);
+    assert_eq!(stopped["status"], "cancelled");
+    let (_, next) = call(
+        &app,
+        "GET",
+        &format!("/generations/{next_id}"),
+        Some(next_user),
+        None,
+    )
+    .await;
+    assert_eq!(next["queue_position"], 1);
+
+    let (_, stopped) = call(
+        &app,
+        "POST",
+        &format!("/generations/{next_id}/stop"),
+        Some(next_user),
+        None,
+    )
+    .await;
+    assert_eq!(stopped["status"], "cancelled");
+    let (_, terminal) = call(
+        &app,
+        "GET",
+        &format!("/generations/{next_id}"),
+        Some(next_user),
+        None,
+    )
+    .await;
+    assert_eq!(terminal["queue_position"], 0);
+}
+
+#[tokio::test]
+async fn sqlite_rejects_a_second_active_generation_for_the_same_owner() {
+    let (store, _app, _cortex, _reports, job_id) = queued_report_generation().await;
+    let (owner_id, study_id): (String, String) =
+        sqlx::query_as("SELECT owner_id, study_id FROM generation_jobs WHERE id = $1")
+            .bind(&job_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap();
+    let error = sqlx::query(
+        "INSERT INTO generation_jobs(id, owner_id, study_id, status, language, requested_count, queued_at)
+         VALUES('second-active', $1, $2, 'queued', 'en', 1, 9999999999)",
+    )
+    .bind(owner_id)
+    .bind(study_id)
+    .execute(&store.db)
+    .await
+    .unwrap_err();
+    assert!(matches!(error, sqlx::Error::Database(database) if database.is_unique_violation()));
+}
+
+#[tokio::test]
+#[ignore = "requires the isolated PostgreSQL test fixture"]
+async fn postgres_concurrent_starts_enforce_owner_singleton_and_idempotency() {
+    let url = std::env::var("CERTIFICATIONS_TEST_DATABASE_URL")
+        .expect("CERTIFICATIONS_TEST_DATABASE_URL must point at the isolated fixture");
+    let socket_dir = std::env::var("CERTIFICATIONS_TEST_SOCKET_DIR")
+        .expect("CERTIFICATIONS_TEST_SOCKET_DIR must name the fixture socket directory");
+    let options = url.parse::<sqlx::any::AnyConnectOptions>().unwrap();
+    let parsed = &options.database_url;
+    assert_eq!(parsed.scheme(), "postgresql");
+    assert_eq!(parsed.username(), "certifications_api_app");
+    assert!(parsed.password().is_none());
+    assert_eq!(parsed.path(), "/certifications_api_test");
+    assert_eq!(parsed.host_str(), Some("localhost"));
+    let dsn_socket = parsed
+        .query_pairs()
+        .find(|(key, _)| key == "host")
+        .map(|(_, value)| value.into_owned())
+        .expect("test DSN must use its private Unix socket");
+    assert_eq!(dsn_socket, socket_dir);
+    assert!(std::path::Path::new(&socket_dir).is_dir());
+
+    sqlx::any::install_default_drivers();
+    let db = AnyPoolOptions::new()
+        .max_connections(16)
+        .connect(&url)
+        .await
+        .unwrap();
+    for migration in POSTGRES_MIGRATIONS {
+        sqlx::raw_sql(migration).execute(&db).await.unwrap();
+    }
+    let mut store = Store::fixture().await;
+    store.db.close().await;
+    store.db = db;
+    store.cortex = MockCortex::new();
+    store.reports = Arc::new(MockReportSource {
+        accessible: AtomicBool::new(true),
+        bytes: Mutex::new(br#"[{"value":7}]"#.to_vec()),
+    });
+    publish_question_schema(&store).await;
+    let app = Arc::new(presentation::router(App {
+        store: store.clone(),
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    }));
+    let (_, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u1"),
+        Some(json!({"title":"Concurrent generation"})),
+    )
+    .await;
+    let study_id = study["id"].as_str().unwrap().to_owned();
+    let (source_status, source) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/sources"),
+        Some("u1"),
+        Some(json!({"kind":"report", "filename":"Metrics", "external_ref":"proj/rep/data"})),
+    )
+    .await;
+    assert_eq!(
+        source_status,
+        StatusCode::CREATED,
+        "unexpected source response: {source}"
+    );
+
+    let concurrency = 16;
+    let barrier = Arc::new(Barrier::new(concurrency));
+    let mut tasks = Vec::new();
+    for index in 0..concurrency {
+        let app = app.clone();
+        let barrier = barrier.clone();
+        let study_id = study_id.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            call(
+                &app,
+                "POST",
+                &format!("/studies/{study_id}/generations"),
+                Some("u1"),
+                Some(
+                    json!({"language":"en", "count":1, "idempotency_key":format!("racer-{index}")}),
+                ),
+            )
+            .await
+        }));
+    }
+    let mut created = Vec::new();
+    let mut conflicts = 0;
+    for task in tasks {
+        let (status, body) = task.await.unwrap();
+        if status == StatusCode::CREATED {
+            created.push(body["id"].as_str().unwrap().to_owned());
+        } else {
+            assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {body}");
+            conflicts += 1;
+        }
+    }
+    assert_eq!(created.len(), 1);
+    assert_eq!(conflicts, concurrency - 1);
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM generation_jobs WHERE owner_id = 'u1' AND status IN ('queued', 'running')",
+    )
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(active, 1);
+
+    let (stop_status, stopped) = call(
+        &app,
+        "POST",
+        &format!("/generations/{}/stop", created[0]),
+        Some("u1"),
+        None,
+    )
+    .await;
+    assert_eq!(stop_status, StatusCode::OK);
+    assert_eq!(stopped["status"], "cancelled");
+
+    let barrier = Arc::new(Barrier::new(concurrency));
+    let mut tasks = Vec::new();
+    for _ in 0..concurrency {
+        let app = app.clone();
+        let barrier = barrier.clone();
+        let study_id = study_id.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            call(
+                &app,
+                "POST",
+                &format!("/studies/{study_id}/generations"),
+                Some("u1"),
+                Some(json!({"language":"en", "count":1, "idempotency_key":"same-key"})),
+            )
+            .await
+        }));
+    }
+    let mut same_id = None;
+    for task in tasks {
+        let (status, body) = task.await.unwrap();
+        assert_eq!(status, StatusCode::CREATED, "unexpected response: {body}");
+        let id = body["id"].as_str().unwrap();
+        assert!(same_id.is_none_or(|expected| expected == id));
+        same_id = Some(id.to_owned());
+    }
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM generation_jobs WHERE owner_id = 'u1' AND status IN ('queued', 'running')",
+    )
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(active, 1);
+    store.db.close().await;
 }

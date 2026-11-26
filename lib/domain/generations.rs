@@ -142,8 +142,17 @@ pub async fn get_job(
     job_id: &str,
 ) -> Result<GenerationJobSummary> {
     let row = sqlx::query(
-        "SELECT id, owner_id, study_id, quiz_id, status, language, requested_count, queue_position, saved_count, stopped_reason, error_code, queued_at, started_at, finished_at
-         FROM generation_jobs WHERE id = $1",
+        "SELECT job.id, job.owner_id, job.study_id, job.quiz_id, job.status, job.language,
+                job.requested_count,
+                CASE WHEN job.status IN ('queued', 'running') THEN (
+                    SELECT COUNT(*) FROM generation_jobs AS active
+                    WHERE active.status IN ('queued', 'running')
+                      AND (active.queued_at < job.queued_at
+                           OR (active.queued_at = job.queued_at AND active.id <= job.id))
+                ) ELSE 0 END AS queue_position,
+                job.saved_count, job.stopped_reason, job.error_code, job.queued_at,
+                job.started_at, job.finished_at
+         FROM generation_jobs AS job WHERE job.id = $1",
     )
     .bind(job_id)
     .fetch_optional(&store.db)
@@ -166,6 +175,18 @@ pub async fn get_job(
         started_at: row.get("started_at"),
         finished_at: row.get("finished_at"),
     })
+}
+
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(database) if database.is_unique_violation())
+}
+
+fn active_generation_conflict() -> Error {
+    Error(
+        StatusCode::CONFLICT,
+        "generation_already_active: Only one queued or running generation per user is allowed"
+            .into(),
+    )
 }
 
 pub async fn start_generation(
@@ -263,11 +284,19 @@ pub async fn start_generation(
     .fetch_one(&store.db)
     .await?;
     if active_count > 0 {
-        return Err(Error(
-            StatusCode::CONFLICT,
-            "generation_already_active: Only one queued or running generation per user is allowed"
-                .into(),
-        ));
+        if !idem.is_empty()
+            && let Some(existing_id) = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM generation_jobs WHERE owner_id = $1 AND study_id = $2 AND idempotency_key = $3",
+            )
+            .bind(&caller.user_id)
+            .bind(study_id)
+            .bind(idem)
+            .fetch_optional(&store.db)
+            .await?
+        {
+            return get_job(store, caller, &existing_id).await;
+        }
+        return Err(active_generation_conflict());
     }
 
     let mut tx = store.db.begin().await?;
@@ -293,7 +322,7 @@ pub async fn start_generation(
 
     let job_id = new_id();
     let ts = now();
-    sqlx::query(
+    let insert = sqlx::query(
         "INSERT INTO generation_jobs(id, owner_id, study_id, quiz_id, status, language, requested_count, idempotency_key, queue_position, saved_count, queued_at)
          VALUES($1, $2, $3, $4, 'queued', $5, $6, $7, $8, 0, $9)",
     )
@@ -307,7 +336,26 @@ pub async fn start_generation(
     .bind(queue_position)
     .bind(ts)
     .execute(&mut *tx)
-    .await?;
+    .await;
+    if let Err(error) = insert {
+        if is_unique_violation(&error) {
+            tx.rollback().await?;
+            if !idem.is_empty()
+                && let Some(existing_id) = sqlx::query_scalar::<_, String>(
+                    "SELECT id FROM generation_jobs WHERE owner_id = $1 AND study_id = $2 AND idempotency_key = $3",
+                )
+                .bind(&caller.user_id)
+                .bind(study_id)
+                .bind(idem)
+                .fetch_optional(&store.db)
+                .await?
+            {
+                return get_job(store, caller, &existing_id).await;
+            }
+            return Err(active_generation_conflict());
+        }
+        return Err(error.into());
+    }
 
     for source in source_rows {
         sqlx::query(
@@ -1604,7 +1652,7 @@ pub async fn resume_generation(
     let new_job_id = new_id();
     let ts = now();
     let mut tx = store.db.begin().await?;
-    sqlx::query(
+    let insert = sqlx::query(
         "INSERT INTO generation_jobs(id, owner_id, study_id, quiz_id, status, language, requested_count, idempotency_key, queue_position, saved_count, queued_at)
          VALUES($1, $2, $3, $4, 'queued', $5, $6, '', $7, $8, $9)",
     )
@@ -1618,7 +1666,14 @@ pub async fn resume_generation(
     .bind(prev.saved_count)
     .bind(ts)
     .execute(&mut *tx)
-    .await?;
+    .await;
+    if let Err(error) = insert {
+        if is_unique_violation(&error) {
+            tx.rollback().await?;
+            return Err(active_generation_conflict());
+        }
+        return Err(error.into());
+    }
     sqlx::query(
         "INSERT INTO generation_job_sources
          (job_id, source_id, filename, mime_type, size_bytes, sha256, source_kind, selection_kind, selection_spec,

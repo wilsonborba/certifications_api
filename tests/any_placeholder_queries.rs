@@ -11,7 +11,7 @@ use certifications_api::{
 use serde_json::json;
 use sqlx::any::AnyPoolOptions;
 
-const POSTGRES_MIGRATIONS: [&str; 11] = [
+const POSTGRES_MIGRATIONS: [&str; 15] = [
     include_str!("../migrations/001_v2_schema.sql"),
     include_str!("../migrations/002_v2_studies_sources.sql"),
     include_str!("../migrations/003_v2_generation_events.sql"),
@@ -23,6 +23,10 @@ const POSTGRES_MIGRATIONS: [&str; 11] = [
     include_str!("../migrations/009_v2_public_question_search.sql"),
     include_str!("../migrations/010_v2_source_provenance.sql"),
     include_str!("../migrations/011_v2_study_prepared_config.sql"),
+    include_str!("../migrations/012_v2_generation_source_snapshot.sql"),
+    include_str!("../migrations/013_v2_generation_source_external_ref.sql"),
+    include_str!("../migrations/014_v2_report_source_snapshot.sql"),
+    include_str!("../migrations/015_v2_one_active_generation_per_owner.sql"),
 ];
 
 async fn seed_and_exercise(store: &Store) {
