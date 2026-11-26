@@ -1757,6 +1757,7 @@ async fn streamed_analysis_reports_nullable_measurements_and_stops_reading_when_
     assert!(payload.contains("event: stage"));
     assert!(payload.contains("event: source_inspected"));
     assert!(payload.contains("event: complete"));
+    assert!(payload.contains("\"inspected_sources\":4"));
     assert!(payload.contains("\"text_char_count\":6"));
     assert!(payload.contains("\"page_count\":null"));
     assert!(payload.contains("\"duration_seconds\":null"));

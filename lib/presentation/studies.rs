@@ -580,9 +580,9 @@ async fn stream_analysis(
     let ready_sources = inspection.total_ready_sources;
     let total_bytes = inspection.total_bytes;
     let stream = stream::unfold(
-        (Some((store, caller, inspection, 0usize)), true),
+        (Some((store, caller, inspection, 0usize, 0usize)), true),
         move |(state, stage_pending)| async move {
-            let (store, caller, inspection, index) = state?;
+            let (store, caller, inspection, index, inspected_count) = state?;
             if stage_pending {
                 let data = serde_json::json!({
                     "study_id": inspection.study_id,
@@ -596,7 +596,10 @@ async fn stream_analysis(
                 let event = Event::default().event("stage").data(data.to_string());
                 return Some((
                     Ok::<_, Infallible>(event),
-                    (Some((store, caller, inspection, index)), false),
+                    (
+                        Some((store, caller, inspection, index, inspected_count)),
+                        false,
+                    ),
                 ));
             }
             if index < inspection.sources.len() {
@@ -607,15 +610,20 @@ async fn stream_analysis(
                 let event = Event::default()
                     .event(result.event)
                     .data(result.data.to_string());
+                let inspected_count =
+                    inspected_count + (result.event == "source_inspected") as usize;
                 return Some((
                     Ok::<_, Infallible>(event),
-                    (Some((store, caller, inspection, index + 1)), false),
+                    (
+                        Some((store, caller, inspection, index + 1, inspected_count)),
+                        false,
+                    ),
                 ));
             }
             let data = serde_json::json!({
                 "study_id": inspection.study_id,
                 "stage": "ready",
-                "inspected_sources": index,
+                "inspected_sources": inspected_count,
                 "total_ready_sources": inspection.total_ready_sources,
             });
             let event = Event::default().event("complete").data(data.to_string());
