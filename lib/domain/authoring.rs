@@ -1,8 +1,8 @@
 use crate::{
-    core::{Error, Result, now},
-    dal::{Store, new_id},
+    core::{now, Error, Result},
+    dal::{new_id, Store},
     domain::{
-        auth::{CallerIdentity, require_owner},
+        auth::{require_owner, CallerIdentity},
         catalog::{self, public_question_version_sources_in_tx},
         generations::{QUESTION_SCHEMA_NAME, QUESTION_SCHEMA_VERSION},
         guardrail,
@@ -10,7 +10,7 @@ use crate::{
     },
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sqlx::Row;
 use std::collections::HashSet;
 
@@ -1074,13 +1074,12 @@ pub async fn prepare_question_visual_job(
     question_id: &str,
     input: PrepareVisualJobInput,
 ) -> Result<PreparedVisualJobResult> {
-    let lifecycle = sqlx::query(
-        "SELECT owner_id, quiz_id, status, expires_at FROM studies WHERE id = $1",
-    )
-    .bind(study_id)
-    .fetch_optional(&store.db)
-    .await?
-    .ok_or_else(Error::missing)?;
+    let lifecycle =
+        sqlx::query("SELECT owner_id, quiz_id, status, expires_at FROM studies WHERE id = $1")
+            .bind(study_id)
+            .fetch_optional(&store.db)
+            .await?
+            .ok_or_else(Error::missing)?;
     let owner_id: String = lifecycle.get("owner_id");
     require_owner(caller, &owner_id)?;
     let status: String = lifecycle.get("status");
@@ -1101,7 +1100,11 @@ pub async fn prepare_question_visual_job(
             "study_expired: Abandoned pre-generation study draft expired".into(),
         ));
     }
-    let quiz_id = match lifecycle.try_get::<String, _>("quiz_id").ok().filter(|s| !s.is_empty()) {
+    let quiz_id = match lifecycle
+        .try_get::<String, _>("quiz_id")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
         Some(qid) => qid,
         None => return Err(Error::missing()),
     };
@@ -1331,16 +1334,18 @@ pub async fn upload_question_visual(
     .await?;
 
     if let Some((ex_id, ex_qv, ex_fsm, ex_mime, ex_hash, ex_ts)) = existing_visual {
-        let study_row = sqlx::query(
-            "SELECT owner_id, quiz_id, status FROM studies WHERE id = $1",
-        )
-        .bind(study_id)
-        .fetch_optional(&store.db)
-        .await?
-        .ok_or_else(Error::missing)?;
+        let study_row = sqlx::query("SELECT owner_id, quiz_id, status FROM studies WHERE id = $1")
+            .bind(study_id)
+            .fetch_optional(&store.db)
+            .await?
+            .ok_or_else(Error::missing)?;
         let study_owner: String = study_row.get("owner_id");
         require_owner(caller, &study_owner)?;
-        let quiz_id: String = match study_row.try_get::<String, _>("quiz_id").ok().filter(|s| !s.is_empty()) {
+        let quiz_id: String = match study_row
+            .try_get::<String, _>("quiz_id")
+            .ok()
+            .filter(|s| !s.is_empty())
+        {
             Some(qid) => qid,
             None => return Err(Error::missing()),
         };
@@ -1362,11 +1367,12 @@ pub async fn upload_question_visual(
             .ok_or_else(Error::missing)?;
         require_owner(caller, &q_owner)?;
 
-        let qv_qid: String = sqlx::query_scalar("SELECT question_id FROM question_versions WHERE id = $1")
-            .bind(&ex_qv)
-            .fetch_optional(&store.db)
-            .await?
-            .ok_or_else(Error::missing)?;
+        let qv_qid: String =
+            sqlx::query_scalar("SELECT question_id FROM question_versions WHERE id = $1")
+                .bind(&ex_qv)
+                .fetch_optional(&store.db)
+                .await?
+                .ok_or_else(Error::missing)?;
         if qv_qid != question_id {
             return Err(Error::conflict(
                 "question_mismatch: Visual question version belongs to a different question",
@@ -1383,7 +1389,9 @@ pub async fn upload_question_visual(
                 "reused_question_immutable: Visuals cannot be added to a publicly reused question version",
             ));
         }
-        if item.question_version_id != ex_qv || item.question_version_id != input.question_version_id {
+        if item.question_version_id != ex_qv
+            || item.question_version_id != input.question_version_id
+        {
             return Err(Error::conflict(
                 "conflict: render_job_id already used for different question version",
             ));
@@ -1414,13 +1422,12 @@ pub async fn upload_question_visual(
     }
 
     // 2. Validate study status and expiration before job inspection
-    let study_pre = sqlx::query(
-        "SELECT owner_id, quiz_id, status, expires_at FROM studies WHERE id = $1",
-    )
-    .bind(study_id)
-    .fetch_optional(&store.db)
-    .await?
-    .ok_or_else(Error::missing)?;
+    let study_pre =
+        sqlx::query("SELECT owner_id, quiz_id, status, expires_at FROM studies WHERE id = $1")
+            .bind(study_id)
+            .fetch_optional(&store.db)
+            .await?
+            .ok_or_else(Error::missing)?;
     let pre_owner: String = study_pre.get("owner_id");
     require_owner(caller, &pre_owner)?;
     let pre_status: String = study_pre.get("status");
@@ -1554,7 +1561,11 @@ pub async fn upload_question_visual(
         ));
     }
 
-    let quiz_id = match lifecycle.try_get::<String, _>("quiz_id").ok().filter(|s| !s.is_empty()) {
+    let quiz_id = match lifecycle
+        .try_get::<String, _>("quiz_id")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
         Some(qid) => qid,
         None => return Err(Error::missing()),
     };
@@ -1685,9 +1696,13 @@ pub async fn upload_question_visual(
                     created_at: ex_ts,
                 });
             }
-            return Err(Error::conflict("visual_conflict: Conflicting visual payload or version"));
+            return Err(Error::conflict(
+                "visual_conflict: Conflicting visual payload or version",
+            ));
         }
-        return Err(Error::bad("visual_insert_failed: Could not persist question visual"));
+        return Err(Error::bad(
+            "visual_insert_failed: Could not persist question visual",
+        ));
     }
 
     if let Err(commit_err) = tx.commit().await {
