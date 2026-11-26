@@ -350,6 +350,7 @@ async fn selections_survive_refresh_and_prepared_studies_reuse_fsm_without_uploa
     .await;
     assert_eq!(st, StatusCode::CREATED);
     assert_eq!(fsm.put_count(), 0);
+    assert_eq!(prepared["sources"][0]["external_ref"], "");
     let sid = prepared["study"]["id"].as_str().unwrap();
     let src_id = prepared["sources"][0]["id"].as_str().unwrap();
 
@@ -2138,4 +2139,72 @@ fn selection_grammar_validates_pages_passages_and_ms_intervals() {
         .unwrap(),
         ""
     );
+}
+
+#[tokio::test]
+async fn prepared_study_preserves_external_ref_and_rejects_oversized() {
+    let mut store = Store::fixture().await;
+    let fsm = MemoryFsm::new();
+    fsm.seed("annotations/u1/file-ext", b"sample content for external ref test");
+    store.fsm = fsm.clone() as Arc<dyn certifications_api::dal::fsm::FsmClient>;
+
+    let mut settings = test_settings();
+    settings.certifications_service_key = "ann-svc-key".into();
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings,
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+
+    // Valid external_ref round-trips
+    let canonical_ref = "annotations:note:018f9210e7b47000832049e29a990001:typed:018f9210e7b47000832049e29a990002";
+    let (st, prepared) = call_with_service_key(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("u1"),
+        Some("ann-svc-key"),
+        Some(json!({
+            "title": "Origin Provenance Study",
+            "sources": [{
+                "filename": "note-typed.txt",
+                "mime_type": "text/plain",
+                "size_bytes": 38,
+                "fsm_ref": "annotations/u1/file-ext",
+                "external_ref": canonical_ref
+            }]
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(prepared["sources"][0]["external_ref"], canonical_ref);
+
+    let sid = prepared["study"]["id"].as_str().unwrap();
+    let (st, fetched) = call(&app, "GET", &format!("/studies/{sid}"), Some("u1"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(fetched["sources"][0]["external_ref"], canonical_ref);
+
+    // Oversized external_ref (> 255 chars) is rejected with 422
+    let oversized_ref = "a".repeat(256);
+    let (st_err, body) = call_with_service_key(
+        &app,
+        "POST",
+        "/studies/prepared",
+        Some("u1"),
+        Some("ann-svc-key"),
+        Some(json!({
+            "title": "Oversized Study",
+            "sources": [{
+                "filename": "note-typed.txt",
+                "mime_type": "text/plain",
+                "size_bytes": 38,
+                "fsm_ref": "annotations/u1/file-ext",
+                "external_ref": oversized_ref
+            }]
+        })),
+    )
+    .await;
+    assert_eq!(st_err, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body["error"].as_str().unwrap().contains("invalid_source"));
 }
