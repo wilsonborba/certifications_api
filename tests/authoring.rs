@@ -960,7 +960,7 @@ async fn test_visual_publication_serialization_and_rejection() {
 }
 
 #[tokio::test]
-async fn test_visual_concurrent_identical_replay_without_active_job() {
+async fn test_visual_durable_identical_replay_without_active_job() {
     let (app, store, _) = setup_app().await;
 
     let (st, study) = call(
@@ -1160,10 +1160,261 @@ async fn test_visual_fsm_compensation_outside_sql_transaction() {
     // Verify FSM put was attempted, but compensated (deleted) so no orphan blob remains
     let puts_after = fsm.put_count();
     assert_eq!(puts_after, puts_before + 1);
+    assert_eq!(fsm.blob_count(), 0);
 
     // Drop trigger
     sqlx::query("DROP TRIGGER abort_qv_insert;")
         .execute(&store.db)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn test_visual_replay_scoping_and_draft_expiry_regressions() {
+    let (app, store, _) = setup_app().await;
+
+    // 1. Setup Study A with Question A1 and Question A2
+    let (st, study_a) = call(
+        &app,
+        "POST",
+        "/studies",
+        "author-a",
+        None,
+        Some(json!({ "title": "Study A" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sid_a = study_a["id"].as_str().unwrap().to_string();
+
+    let (st, q_a1) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_a}/questions"),
+        "author-a",
+        None,
+        Some(json!({
+            "language": "en",
+            "prompt": "Q A1",
+            "alternatives": [{ "id": "a", "text": "1" }, { "id": "b", "text": "2" }],
+            "correct_id": "a",
+            "explanation": "Exp"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let qid_a1 = q_a1["id"].as_str().unwrap().to_string();
+    let qv_a1 = q_a1["version_id"].as_str().unwrap().to_string();
+
+    let (st, q_a2) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_a}/questions"),
+        "author-a",
+        None,
+        Some(json!({
+            "language": "en",
+            "prompt": "Q A2",
+            "alternatives": [{ "id": "a", "text": "1" }, { "id": "b", "text": "2" }],
+            "correct_id": "a",
+            "explanation": "Exp"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let qid_a2 = q_a2["id"].as_str().unwrap().to_string();
+
+    // Prepare and upload visual for Question A1
+    let (st, prep_a1) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_a}/questions/{qid_a1}/visual_jobs"),
+        "author-a",
+        None,
+        Some(json!({
+            "template_id": "chart_template",
+            "template_version": 1,
+            "mapping": {},
+            "config": {},
+            "rows": [],
+            "width": 800,
+            "height": 480,
+            "scale": 2,
+            "ttl_seconds": 600
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let job_id_a1 = prep_a1["render_job"]["job_id"].as_str().unwrap().to_string();
+
+    let valid_png = make_test_png(1600, 960);
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_a}/questions/{qid_a1}/visuals"),
+        "author-a",
+        None,
+        Some(json!({
+            "question_version_id": qv_a1,
+            "render_job_id": job_id_a1,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+
+    // Negative Regression 1: Wrong question path (replaying A1 receipt on A2)
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_a}/questions/{qid_a2}/visuals"),
+        "author-a",
+        None,
+        Some(json!({
+            "question_version_id": qv_a1,
+            "render_job_id": job_id_a1,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert!(st == StatusCode::CONFLICT || st == StatusCode::NOT_FOUND);
+
+    // Setup Study A2 (second study owned by Author A)
+    let (st, study_a2) = call(
+        &app,
+        "POST",
+        "/studies",
+        "author-a",
+        None,
+        Some(json!({ "title": "Study A2" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sid_a2 = study_a2["id"].as_str().unwrap().to_string();
+
+    // Negative Regression 2: Wrong owned study (calling Study A2 with Question A1 and A1 receipt)
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_a2}/questions/{qid_a1}/visuals"),
+        "author-a",
+        None,
+        Some(json!({
+            "question_version_id": qv_a1,
+            "render_job_id": job_id_a1,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert!(st == StatusCode::NOT_FOUND || st == StatusCode::CONFLICT);
+
+    // Setup Study B owned by User B with Question B
+    let (st, study_b) = call(
+        &app,
+        "POST",
+        "/studies",
+        "author-b",
+        None,
+        Some(json!({ "title": "Study B" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sid_b = study_b["id"].as_str().unwrap().to_string();
+
+    let (st, q_b) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_b}/questions"),
+        "author-b",
+        None,
+        Some(json!({
+            "language": "en",
+            "prompt": "Q B",
+            "alternatives": [{ "id": "a", "text": "1" }, { "id": "b", "text": "2" }],
+            "correct_id": "a",
+            "explanation": "Exp"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let qid_b = q_b["id"].as_str().unwrap().to_string();
+
+    // Negative Regression 3: B-study with A-receipt (User B attempts to replay User A's visual receipt)
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_b}/questions/{qid_b}/visuals"),
+        "author-b",
+        None,
+        Some(json!({
+            "question_version_id": qv_a1,
+            "render_job_id": job_id_a1,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert!(st == StatusCode::CONFLICT || st == StatusCode::FORBIDDEN || st == StatusCode::NOT_FOUND);
+
+    // Negative Regression 4: Timestamp-expired draft
+    let past_ts = chrono::Utc::now().timestamp() - 1000;
+    sqlx::query("UPDATE studies SET expires_at = $1 WHERE id = $2")
+        .bind(past_ts)
+        .bind(&sid_b)
+        .execute(&store.db)
+        .await
+        .unwrap();
+
+    // Prepare on expired draft must return 410 GONE
+    let (st, exp_prep) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_b}/questions/{qid_b}/visual_jobs"),
+        "author-b",
+        None,
+        Some(json!({
+            "template_id": "chart_template",
+            "template_version": 1,
+            "mapping": {},
+            "config": {},
+            "rows": [],
+            "width": 800,
+            "height": 480,
+            "scale": 2,
+            "ttl_seconds": 600
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::GONE);
+    assert!(exp_prep["error"].as_str().unwrap_or_default().contains("study_expired"));
+
+    // Upload on expired draft must return 410 GONE
+    let (st, exp_upload) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_b}/questions/{qid_b}/visuals"),
+        "author-b",
+        None,
+        Some(json!({
+            "question_version_id": "nonexistent_qv",
+            "render_job_id": "new_job_id",
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::GONE);
+    assert!(exp_upload["error"].as_str().unwrap_or_default().contains("study_expired"));
 }

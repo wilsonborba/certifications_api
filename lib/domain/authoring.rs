@@ -1074,8 +1074,37 @@ pub async fn prepare_question_visual_job(
     question_id: &str,
     input: PrepareVisualJobInput,
 ) -> Result<PreparedVisualJobResult> {
-    let (_owner_id, existing_quiz) = load_owned_study_quiz(store, caller, study_id).await?;
-    let quiz_id = existing_quiz.ok_or_else(Error::missing)?;
+    let lifecycle = sqlx::query(
+        "SELECT owner_id, quiz_id, status, expires_at FROM studies WHERE id = $1",
+    )
+    .bind(study_id)
+    .fetch_optional(&store.db)
+    .await?
+    .ok_or_else(Error::missing)?;
+    let owner_id: String = lifecycle.get("owner_id");
+    require_owner(caller, &owner_id)?;
+    let status: String = lifecycle.get("status");
+    let expires_at: Option<i64> = lifecycle.get("expires_at");
+    if status == "draft" && expires_at.is_some_and(|expires| now() > expires) {
+        sqlx::query("UPDATE studies SET status = 'expired' WHERE id = $1 AND status = 'draft'")
+            .bind(study_id)
+            .execute(&store.db)
+            .await?;
+        return Err(Error(
+            axum::http::StatusCode::GONE,
+            "study_expired: Abandoned pre-generation study draft expired".into(),
+        ));
+    }
+    if status == "expired" {
+        return Err(Error(
+            axum::http::StatusCode::GONE,
+            "study_expired: Abandoned pre-generation study draft expired".into(),
+        ));
+    }
+    let quiz_id = match lifecycle.try_get::<String, _>("quiz_id").ok().filter(|s| !s.is_empty()) {
+        Some(qid) => qid,
+        None => return Err(Error::missing()),
+    };
     let quiz_visibility: String =
         sqlx::query_scalar("SELECT visibility FROM quizzes WHERE id = $1")
             .bind(&quiz_id)
@@ -1302,9 +1331,59 @@ pub async fn upload_question_visual(
     .await?;
 
     if let Some((ex_id, ex_qv, ex_fsm, ex_mime, ex_hash, ex_ts)) = existing_visual {
-        let (owner_id, _) = load_owned_study_quiz(store, caller, study_id).await?;
-        require_owner(caller, &owner_id)?;
-        if ex_qv != input.question_version_id {
+        let study_row = sqlx::query(
+            "SELECT owner_id, quiz_id, status FROM studies WHERE id = $1",
+        )
+        .bind(study_id)
+        .fetch_optional(&store.db)
+        .await?
+        .ok_or_else(Error::missing)?;
+        let study_owner: String = study_row.get("owner_id");
+        require_owner(caller, &study_owner)?;
+        let quiz_id: String = match study_row.try_get::<String, _>("quiz_id").ok().filter(|s| !s.is_empty()) {
+            Some(qid) => qid,
+            None => return Err(Error::missing()),
+        };
+
+        let quiz_row = sqlx::query(
+            "SELECT owner_id, visibility, active_version_id FROM quizzes WHERE id = $1",
+        )
+        .bind(&quiz_id)
+        .fetch_optional(&store.db)
+        .await?
+        .ok_or_else(Error::missing)?;
+        let quiz_owner: String = quiz_row.get("owner_id");
+        require_owner(caller, &quiz_owner)?;
+
+        let q_owner: String = sqlx::query_scalar("SELECT owner_id FROM questions WHERE id = $1")
+            .bind(question_id)
+            .fetch_optional(&store.db)
+            .await?
+            .ok_or_else(Error::missing)?;
+        require_owner(caller, &q_owner)?;
+
+        let qv_qid: String = sqlx::query_scalar("SELECT question_id FROM question_versions WHERE id = $1")
+            .bind(&ex_qv)
+            .fetch_optional(&store.db)
+            .await?
+            .ok_or_else(Error::missing)?;
+        if qv_qid != question_id {
+            return Err(Error::conflict(
+                "question_mismatch: Visual question version belongs to a different question",
+            ));
+        }
+
+        let (_, items) = current_quiz_version_questions(store, &quiz_id).await?;
+        let item = items
+            .iter()
+            .find(|item| item.question_id == question_id)
+            .ok_or_else(Error::missing)?;
+        if item.source_scope == REUSED_PUBLIC_VERSION {
+            return Err(Error::conflict(
+                "reused_question_immutable: Visuals cannot be added to a publicly reused question version",
+            ));
+        }
+        if item.question_version_id != ex_qv || item.question_version_id != input.question_version_id {
             return Err(Error::conflict(
                 "conflict: render_job_id already used for different question version",
             ));
@@ -1334,7 +1413,36 @@ pub async fn upload_question_visual(
         });
     }
 
-    // 2. Validate prepared render job descriptor
+    // 2. Validate study status and expiration before job inspection
+    let study_pre = sqlx::query(
+        "SELECT owner_id, quiz_id, status, expires_at FROM studies WHERE id = $1",
+    )
+    .bind(study_id)
+    .fetch_optional(&store.db)
+    .await?
+    .ok_or_else(Error::missing)?;
+    let pre_owner: String = study_pre.get("owner_id");
+    require_owner(caller, &pre_owner)?;
+    let pre_status: String = study_pre.get("status");
+    let pre_expires: Option<i64> = study_pre.get("expires_at");
+    if pre_status == "draft" && pre_expires.is_some_and(|expires| now() > expires) {
+        sqlx::query("UPDATE studies SET status = 'expired' WHERE id = $1 AND status = 'draft'")
+            .bind(study_id)
+            .execute(&store.db)
+            .await?;
+        return Err(Error(
+            axum::http::StatusCode::GONE,
+            "study_expired: Abandoned pre-generation study draft expired".into(),
+        ));
+    }
+    if pre_status == "expired" {
+        return Err(Error(
+            axum::http::StatusCode::GONE,
+            "study_expired: Abandoned pre-generation study draft expired".into(),
+        ));
+    }
+
+    // 3. Validate prepared render job descriptor
     let job_row = sqlx::query(
         "SELECT owner_id, study_id, question_id, question_version_id, width, height, scale, expires_at
          FROM question_visual_jobs WHERE render_job_id = $1",
@@ -1427,10 +1535,22 @@ pub async fn upload_question_visual(
     let owner_id: String = lifecycle.get("owner_id");
     require_owner(caller, &owner_id)?;
     let study_status: String = lifecycle.get("status");
+    let expires_at: Option<i64> = lifecycle.get("expires_at");
+    if study_status == "draft" && expires_at.is_some_and(|expires| now() > expires) {
+        sqlx::query("UPDATE studies SET status = 'expired' WHERE id = $1 AND status = 'draft'")
+            .bind(study_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        return Err(Error(
+            axum::http::StatusCode::GONE,
+            "study_expired: Abandoned pre-generation study draft expired".into(),
+        ));
+    }
     if study_status == "expired" {
         return Err(Error(
             axum::http::StatusCode::GONE,
-            "study_expired: Study draft expired".into(),
+            "study_expired: Abandoned pre-generation study draft expired".into(),
         ));
     }
 

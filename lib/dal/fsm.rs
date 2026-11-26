@@ -44,6 +44,9 @@ impl MemoryFsm {
     pub fn has_blob(&self, ref_key: &str) -> bool {
         self.blobs.lock().unwrap().contains_key(ref_key)
     }
+    pub fn blob_count(&self) -> usize {
+        self.blobs.lock().unwrap().len()
+    }
     pub fn seed(&self, ref_key: &str, bytes: &[u8]) {
         self.blobs
             .lock()
