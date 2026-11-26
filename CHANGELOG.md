@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(studies)* Add studies, multi-source FSM uploads, prepared study reuse, and quota meter (#35) ([`b7674d0`](https://github.com/wilsonborba/certifications_api/commit/b7674d0b90baa158d3576feed5132b9e11cfaf7b))
 - *(deletion)* Remove deleted content immediately with deferred FSM cleanup (#37) ([`a37fea8`](https://github.com/wilsonborba/certifications_api/commit/a37fea8940980ab73c0e8238985ebc4d173a1421))
 - *(generation)* Add durable per-user generation queue on Cortex T0 Easy (#38) ([`67b82a0`](https://github.com/wilsonborba/certifications_api/commit/67b82a01c123f384008ca3e20ca7d55b5be3b1e8))
+- *(generation)* Bridge selected Reports and media sources with frozen source snapshots (#38) ([`bb92ad5`](https://github.com/wilsonborba/certifications_api/commit/bb92ad5d8c464275a0177cfb26a7684096f4f454))
 - *(estimates)* Add generation step timing, estimation statistics, and estimate endpoint (#39) ([`7b443c0`](https://github.com/wilsonborba/certifications_api/commit/7b443c0efb2e16e6e4a55b05f95a7aa3aa53c2c4))
 - *(authoring)* Add question review, manual creation, CSV import, visual rendering, and origin guards (#40) ([`6100b83`](https://github.com/wilsonborba/certifications_api/commit/6100b835652f6470e75fb34d8e9a5ad6fb8dc764))
 - *(catalog)* Add public discovery, quiz detail, tags, and restricted-report publication guard (#41) ([`0d1e8d5`](https://github.com/wilsonborba/certifications_api/commit/0d1e8d5c669f22853dc628172b555eb70b302f61))
@@ -37,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Paginate and filter study history ([`4fc2ddc`](https://github.com/wilsonborba/certifications_api/commit/4fc2ddcd57ccfb2063e8d30780e1ea0a9cb70ff6))
 
 ### 🐛 Bug Fixes
+
+- *(generation)* Enforce generation target ownership and safe worker outcomes (#38) ([`4f166fc`](https://github.com/wilsonborba/certifications_api/commit/4f166fcb1c566b64a55d97c18748c857bcd03ff2))
 
 - Remove daily generation quota system entirely ([`39bc644`](https://github.com/wilsonborba/certifications_api/commit/39bc644501b82fe854dfa2680153c2bfdcc0670b))
 - Stop chunk loop at the real question cap, not just a fixed target ([`f3bec8c`](https://github.com/wilsonborba/certifications_api/commit/f3bec8ca1bef71e42390ca586d5e1e993f973db7))

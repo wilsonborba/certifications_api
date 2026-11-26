@@ -126,6 +126,28 @@ pub async fn record_step(store: &Store, job_id: &str, step: &StepMeasurement) ->
     Ok(())
 }
 
+pub(crate) async fn record_step_on_connection(
+    connection: &mut sqlx::AnyConnection,
+    job_id: &str,
+    step: &StepMeasurement,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO generation_steps(id, job_id, step_name, status, wait_ms, process_ms, started_at, finished_at)
+         VALUES($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(new_id())
+    .bind(job_id)
+    .bind(&step.step_name)
+    .bind(&step.status)
+    .bind(step.wait_ms.max(0))
+    .bind(step.process_ms.max(0))
+    .bind(step.started_at)
+    .bind(step.finished_at)
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn record_estimation_sample(
     store: &Store,

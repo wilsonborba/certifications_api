@@ -8,8 +8,8 @@ use certifications_api::{
     dal::{
         Store,
         cortex::{
-            BoxFuture, CortexClient, CortexJobOutcome, GeneratedAlternative, GeneratedQuestion,
-            GenerationRequest, TimingAverage,
+            BoxFuture, CortexClient, GeneratedAlternative, GeneratedQuestion, GenerationRequest,
+            GenerationResult, TimingAverage,
         },
         fsm::MemoryFsm,
         schemas::{self, DraftSchema, SchemaField},
@@ -51,32 +51,37 @@ impl CortexClient for MockCortex {
     fn generate_questions<'a>(
         &'a self,
         req: &'a GenerationRequest,
-    ) -> BoxFuture<'a, CoreResult<Vec<GeneratedQuestion>>> {
+    ) -> BoxFuture<'a, CoreResult<GenerationResult>> {
         Box::pin(async move {
             let sid = req
                 .source_ids
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "missing".into());
-            Ok((0..req.count)
-                .map(|idx| GeneratedQuestion {
-                    prompt: format!("Estimate test question {idx}?"),
-                    alternatives: vec![
-                        GeneratedAlternative {
-                            id: "a".into(),
-                            text: "Answer A".into(),
-                        },
-                        GeneratedAlternative {
-                            id: "b".into(),
-                            text: "Answer B".into(),
-                        },
-                    ],
-                    correct_id: "a".into(),
-                    explanation: "Verified explanation".into(),
-                    source_id: sid.clone(),
-                    citation_ref: format!("p. {}", idx + 1),
-                })
-                .collect())
+            Ok(GenerationResult {
+                questions: (0..req.count)
+                    .map(|idx| GeneratedQuestion {
+                        prompt: format!("Estimate test question {idx}?"),
+                        alternatives: vec![
+                            GeneratedAlternative {
+                                id: "a".into(),
+                                text: "Answer A".into(),
+                            },
+                            GeneratedAlternative {
+                                id: "b".into(),
+                                text: "Answer B".into(),
+                            },
+                        ],
+                        correct_id: "a".into(),
+                        explanation: "Verified explanation".into(),
+                        source_id: sid.clone(),
+                        citation_ref: format!("p. {}", idx + 1),
+                    })
+                    .collect(),
+                session_id: "temporary-session".into(),
+                output_id: "temporary-output".into(),
+                status: "done".into(),
+            })
         })
     }
 
@@ -87,13 +92,6 @@ impl CortexClient for MockCortex {
         questions: &'a [GeneratedQuestion],
     ) -> BoxFuture<'a, CoreResult<Vec<GeneratedQuestion>>> {
         Box::pin(async move { Ok(questions.to_vec()) })
-    }
-
-    fn check_request_outcome<'a>(
-        &'a self,
-        _external_id: &'a str,
-    ) -> BoxFuture<'a, CoreResult<CortexJobOutcome>> {
-        Box::pin(async move { Ok(CortexJobOutcome::NotFound) })
     }
 
     fn fetch_timing_averages<'a>(&'a self) -> BoxFuture<'a, CoreResult<Vec<TimingAverage>>> {

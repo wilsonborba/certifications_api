@@ -9,7 +9,10 @@ use certifications_api::{
         Store,
         fsm::MemoryFsm,
         memory_docs, new_id,
-        reports::{BoxFuture, RenderedVisual, ReportPickerItem, ReportsClient},
+        reports::{
+            BoxFuture, ReadableReportDataset, RenderedVisual, ReportDatasetMaterial, ReportLineage,
+            ReportPickerItem, ReportsClient,
+        },
         schemas::{self, DraftSchema, SchemaField},
     },
     domain::{
@@ -69,6 +72,39 @@ impl ReportsClient for MockReports {
                 report: report.to_string(),
                 title: "Safety Report".into(),
                 is_restricted: restricted,
+            })
+        })
+    }
+    fn list_readable_datasets<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _project: &'a str,
+        _report: &'a str,
+    ) -> BoxFuture<'a, CoreResult<Vec<ReadableReportDataset>>> {
+        Box::pin(async { Err(CoreError::missing()) })
+    }
+    fn fetch_report_dataset<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _project: &'a str,
+        _report: &'a str,
+        _dataset: &'a str,
+    ) -> BoxFuture<'a, CoreResult<ReportDatasetMaterial>> {
+        let restricted = self.restricted.load(Ordering::SeqCst);
+        Box::pin(async move {
+            Ok(ReportDatasetMaterial {
+                bytes: b"[]".to_vec(),
+                is_restricted: restricted,
+                row_count: 0,
+                lineage: ReportLineage {
+                    calculation_id: "calc-1".into(),
+                    calculation_version: 1,
+                    inputs: Vec::new(),
+                    source_watermark: Default::default(),
+                    filters: Value::Null,
+                    calculated_at: "2026-01-01T00:00:00Z".into(),
+                },
+                lineage_sha256: "lineage-hash".into(),
             })
         })
     }
@@ -275,7 +311,7 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
             "kind": "report",
             "filename": "Safety Report",
             "mime_type": "application/json",
-            "external_ref": "clinical/restricted-metrics"
+            "external_ref": "clinical/restricted-metrics/summary"
         })),
     )
     .await;
