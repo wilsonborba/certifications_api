@@ -1,10 +1,3 @@
-# Changelog
-
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
 ## [unreleased]
 
 ### 🚀 Features
@@ -46,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(quizzes)* Add authenticated owner summary endpoint GET /me/quizzes/:id/summary (#52) ([`eb64a1b`](https://github.com/wilsonborba/certifications_api/commit/eb64a1b0737f787bdb9ff0623ccdebaa10287376))
 - Combine reviewed attempt filters and owner summaries (#43) ([`8795386`](https://github.com/wilsonborba/certifications_api/commit/8795386234ad3eb1320ad07ba68b2c96ff351866))
 - Integrate reviewed history filters and owner summaries (#43) ([`8aca524`](https://github.com/wilsonborba/certifications_api/commit/8aca52456028e4fb9661ffea8790c89e15618d32))
+- *(authoring)* Align question visuals with Reports render job workflow (#40) ([`ac1e5d3`](https://github.com/wilsonborba/certifications_api/commit/ac1e5d3ba257508b8005304d8f1dd3dc6c1715a9))
 
 ### 🐛 Bug Fixes
 
@@ -92,6 +86,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(certificates)* Exact dependency pins and deterministic language rendering ([`dc21970`](https://github.com/wilsonborba/certifications_api/commit/dc219708a10f7c6dd1fa16419313c4fcfd74bdaa))
 - *(certificates)* Measured font layout, emergency unbroken wrap and vertical page budget ([`1131ba9`](https://github.com/wilsonborba/certifications_api/commit/1131ba9d40658f0cc09778dffe865836ef06297b))
 - *(certificates)* Apply purple branding, embed asodya logo, and localize activity disclaimer ([`7024201`](https://github.com/wilsonborba/certifications_api/commit/70242013c46b065e379a8f013d12795dcf1b61ff))
+- *(authoring)* Enforce prepared job bounds, idempotence, and visual spec guards (#40) ([`10cea66`](https://github.com/wilsonborba/certifications_api/commit/10cea665d610816c82baacb491a8c7310b9252a0))
+- *(authoring)* Restore migration 004, add migration 016, publication locks, and trusted auth (#40) ([`19d03d5`](https://github.com/wilsonborba/certifications_api/commit/19d03d54e5255306d145682dea95b2c196f0144d))
+- *(authoring)* Enforce durable replay authorization, draft expiry, and negative regressions (#40) ([`2ae816c`](https://github.com/wilsonborba/certifications_api/commit/2ae816cd550ba1339f18aebb9b665e8a6376714a))
+- *(studies)* Preserve source external_ref on prepared studies and enforce 255 character limit ([`4dc8497`](https://github.com/wilsonborba/certifications_api/commit/4dc8497df98d6253903b4052a7d53486c0355c93))
 
 ### 💼 Other Changes
 
@@ -128,6 +126,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #	CHANGELOG.md
 #	lib/dal/mod.rs
 #	lib/main.rs ([`4f25200`](https://github.com/wilsonborba/certifications_api/commit/4f25200f0702710df38bfa35a7a0a3dbc4940e12))
+- Review durable question visual admission and lifecycle ([`aab59af`](https://github.com/wilsonborba/certifications_api/commit/aab59af2dfc454ca6953181a61855ee966a1d14f))
+- Review prepared note origin preservation ([`56ab882`](https://github.com/wilsonborba/certifications_api/commit/56ab882364810edf0246beab6b2c2af13e6ad556))
 
 ### 🚜 Refactor
 
@@ -147,16 +147,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(changelog)* Record reviewed durable generation delivery ([`378f6e7`](https://github.com/wilsonborba/certifications_api/commit/378f6e7b9d5086d380ed68dce9e6fb1ea9967728))
 - *(changelog)* Record optional source inspection stream ([`e591b0e`](https://github.com/wilsonborba/certifications_api/commit/e591b0e05fc3138c3351492ffe822af64baeb018))
 - *(changelog)* Record reviewed certificate artifacts (#44) ([`aecfc75`](https://github.com/wilsonborba/certifications_api/commit/aecfc7532fa0b49ccdf0903f2434326fce9c20c3))
+- *(changelog)* Record reviewed history filter and quiz summary ([`e83263c`](https://github.com/wilsonborba/certifications_api/commit/e83263cdec8c7b32144ea41292b06430215e50e5))
 
 ### 🎨 Styling
 
 - *(certifications_api#47)* Run cargo fmt ([`38189ac`](https://github.com/wilsonborba/certifications_api/commit/38189ac904c9669b91e795d0a0e407113722d126))
+- *(authoring)* Apply rustfmt to authoring domain source (#40) ([`7ebb69b`](https://github.com/wilsonborba/certifications_api/commit/7ebb69b383f727828c5416136158db2ab08f289e))
+- *(authoring)* Format combined visual and prepared-source changes ([`225189a`](https://github.com/wilsonborba/certifications_api/commit/225189acd39ba89f2e8516a8069819601f039147))
 
 ### 🧪 Testing
 
 - Keep PostgreSQL fixture identity portable ([`d161e34`](https://github.com/wilsonborba/certifications_api/commit/d161e3436491519465cb15e01a4cbe1f2c2c3bbf))
 - Extend installer negative package coverage ([`7f7e06f`](https://github.com/wilsonborba/certifications_api/commit/7f7e06f8ad876f0946bdf2b0e58d0ca59aff5968))
 - *(generation)* Assert queue ranks after enqueue batch ([`72518ae`](https://github.com/wilsonborba/certifications_api/commit/72518aea08acfbd0ddd6f85799ac60eb5d487492))
+- Add direct upload regression for timestamp-expired study draft ([`ec33652`](https://github.com/wilsonborba/certifications_api/commit/ec33652ffac90971e8fb26f80c8e06cf502b6954))
+- Assert zero attempted FSM puts on direct draft expiry upload ([`03f08d7`](https://github.com/wilsonborba/certifications_api/commit/03f08d72e410f4933403efe0554ccad041b147f2))
 
 ### ⚙️ Miscellaneous Tasks
 
@@ -170,6 +175,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Package Rust service with safe dry-run ([`6ec2834`](https://github.com/wilsonborba/certifications_api/commit/6ec283416a690483e951df62f41c7cc9e5927f60))
 - *(installer)* Integrate verified Rust preparation and asset fingerprints ([`23c5118`](https://github.com/wilsonborba/certifications_api/commit/23c51183d1273fe25bd1a95645b5f5aed0fb242a))
 - *(merge)* Forward merge accepted feature/main 378f6e7 ([`aac20f2`](https://github.com/wilsonborba/certifications_api/commit/aac20f269bb042e11bdb748ad7ad65cb0018113d))
+<!-- generated by git-cliff -->
+
 ## [1.0.0] - 2026-09-08
 
 ### 🚀 Features
