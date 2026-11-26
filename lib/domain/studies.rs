@@ -90,6 +90,173 @@ pub struct AnalysisSummary {
     pub updated_at: i64,
 }
 
+#[derive(Clone, Debug)]
+pub struct AnalysisStreamEvent {
+    pub event: &'static str,
+    pub data: serde_json::Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct AnalysisInspection {
+    pub study_id: String,
+    pub total_sources: usize,
+    pub total_ready_sources: usize,
+    pub total_bytes: i64,
+    pub sources: Vec<SourceSummary>,
+}
+
+const MAX_ANALYSIS_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+
+pub async fn prepare_analysis_inspection(
+    store: &Store,
+    caller: &CallerIdentity,
+    study_id: &str,
+) -> Result<AnalysisInspection> {
+    let _ = load_owned_study(store, caller, study_id).await?;
+    let all = load_sources(store, study_id).await?;
+    let ready: Vec<_> = all
+        .iter()
+        .filter(|source| source.status == "ready")
+        .cloned()
+        .collect();
+    let total_bytes = all.iter().try_fold(0i64, |sum, source| {
+        sum.checked_add(source.size_bytes.max(0))
+            .ok_or_else(Error::unavailable)
+    })?;
+    Ok(AnalysisInspection {
+        study_id: study_id.to_string(),
+        total_sources: all.len(),
+        total_ready_sources: ready.len(),
+        total_bytes,
+        sources: ready,
+    })
+}
+
+pub async fn inspect_analysis_source(
+    store: &Store,
+    caller: &CallerIdentity,
+    study_id: &str,
+    source: &SourceSummary,
+) -> AnalysisStreamEvent {
+    let started = std::time::Instant::now();
+    let inspected = inspect_analysis_source_bytes(store, caller, study_id, source).await;
+    match inspected {
+        Ok((text_char_count, page_count, duration_seconds)) => AnalysisStreamEvent {
+            event: "source_inspected",
+            data: serde_json::json!({
+                "stage": "inspecting_source",
+                "source_id": source.id,
+                "source_kind": source.source_kind,
+                "mime_type": source.mime_type,
+                "selection_kind": source.selection_kind,
+                "selection_spec": source.selection_spec,
+                "size_bytes": source.size_bytes,
+                "page_count": page_count,
+                "duration_seconds": duration_seconds,
+                "text_char_count": text_char_count,
+                "elapsed_ms": started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+            }),
+        },
+        Err(code) => AnalysisStreamEvent {
+            event: "error",
+            data: serde_json::json!({
+                "stage": "source_error",
+                "source_id": source.id,
+                "code": code,
+            }),
+        },
+    }
+}
+
+async fn inspect_analysis_source_bytes(
+    store: &Store,
+    caller: &CallerIdentity,
+    study_id: &str,
+    source: &SourceSummary,
+) -> std::result::Result<(Option<usize>, Option<u32>, Option<f64>), &'static str> {
+    if source.size_bytes < 0 || source.size_bytes as usize > MAX_ANALYSIS_SOURCE_BYTES {
+        return Err("source_size_unsupported");
+    }
+    let bytes = if source.source_kind == "report" {
+        let (project, report, dataset) =
+            parse_report_external_ref(&source.external_ref).map_err(|_| "source_access_denied")?;
+        let checked = store
+            .reports
+            .check_report_access(&caller.user_id, project, report)
+            .await
+            .map_err(|_| "source_access_denied")?;
+        let material = store
+            .reports
+            .fetch_report_dataset(&caller.user_id, project, report, dataset)
+            .await
+            .map_err(|_| "source_unavailable")?;
+        let row = sqlx::query(
+            "SELECT is_restricted, report_calculation_id, report_calculation_version, report_row_count, report_lineage_sha256 FROM sources WHERE id = $1 AND study_id = $2 AND owner_id = $3 AND status = 'ready'",
+        )
+        .bind(&source.id).bind(study_id).bind(&caller.user_id)
+        .fetch_optional(&store.db).await.map_err(|_| "source_unavailable")?
+        .ok_or("source_unavailable")?;
+        let expected_restricted = row.get::<i64, _>("is_restricted") != 0;
+        let expected_calculation: String = row.get("report_calculation_id");
+        let expected_version: i64 = row.get("report_calculation_version");
+        let expected_rows: i64 = row.get("report_row_count");
+        let expected_lineage: String = row.get("report_lineage_sha256");
+        if (checked.is_restricted || material.is_restricted) != expected_restricted
+            || material.lineage.calculation_id != expected_calculation
+            || material.lineage.calculation_version != expected_version
+            || material.row_count != expected_rows
+            || material.lineage_sha256 != expected_lineage
+        {
+            return Err("source_integrity_failed");
+        }
+        material.bytes
+    } else {
+        if ensure_source_blob_readable(store, caller, study_id, source)
+            .await
+            .is_err()
+        {
+            return Err("source_access_denied");
+        }
+        store
+            .fsm
+            .get_bytes_bounded(&source.fsm_ref, MAX_ANALYSIS_SOURCE_BYTES)
+            .await
+            .map_err(|_| "source_unavailable")?
+    };
+    if bytes.len() != source.size_bytes as usize
+        || source.sha256.trim().is_empty()
+        || sha256_hex(&bytes) != source.sha256
+    {
+        return Err("source_integrity_failed");
+    }
+    let text_char_count = if source.mime_type.to_ascii_lowercase().starts_with("text/")
+        || source.source_kind == "report"
+    {
+        let (selected, _) = crate::domain::generations::select_text_content(
+            &bytes,
+            &source.mime_type,
+            &source.selection_kind,
+            &source.selection_spec,
+        )
+        .map_err(|_| "selection_invalid")?;
+        Some(selected.chars().count())
+    } else {
+        None
+    };
+    let page_count = source
+        .mime_type
+        .eq_ignore_ascii_case("application/pdf")
+        .then(|| extract_pdf_page_count(&bytes))
+        .flatten();
+    let duration_seconds = matches!(
+        source.mime_type.to_ascii_lowercase().as_str(),
+        "audio/wav" | "audio/x-wav" | "audio/wave"
+    )
+    .then(|| cheap_wav_duration_seconds(&bytes))
+    .flatten();
+    Ok((text_char_count, page_count, duration_seconds))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateStudyInput {

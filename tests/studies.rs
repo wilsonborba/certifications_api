@@ -3,6 +3,11 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use certifications_api::dal::fsm::sha256_hex;
+use certifications_api::dal::reports::{
+    BoxFuture, ReadableReportDataset, RenderedVisual, ReportDatasetMaterial, ReportPickerItem,
+    ReportsClient,
+};
 use certifications_api::{
     core::Settings,
     dal::{Store, fsm::MemoryFsm},
@@ -12,9 +17,13 @@ use certifications_api::{
     },
     presentation,
 };
+use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -1634,6 +1643,238 @@ async fn legacy_annotations_prepared_row_with_unknown_provenance_fails_closed_wi
     .await;
     assert_eq!(st_ok, StatusCode::OK);
     assert_eq!(body, b"%PDF-1.4\n%%EOF");
+}
+
+#[tokio::test]
+async fn streamed_analysis_reports_nullable_measurements_and_stops_reading_when_dropped() {
+    let mut store = Store::fixture().await;
+    let fsm = MemoryFsm::new();
+    let fixtures: [(&str, &str, &str, &[u8]); 4] = [
+        (
+            "src-text",
+            "private-name.txt",
+            "text/plain",
+            b"Secret lesson text",
+        ),
+        (
+            "src-pdf",
+            "private-name.pdf",
+            "application/pdf",
+            b"not a parseable PDF",
+        ),
+        (
+            "src-wav",
+            "private-name.wav",
+            "audio/wav",
+            b"not a parseable WAV",
+        ),
+        (
+            "src-second",
+            "second.txt",
+            "text/plain",
+            b"Second source must not be read after disconnect",
+        ),
+    ];
+    sqlx::query(
+        "INSERT INTO studies(id, owner_id, title, description, source_origin, status, quiz_id, expires_at, created_at, updated_at)
+         VALUES('analysis-stream-study', 'owner-a', 'Analysis', '', 'direct', 'active', '', NULL, 1, 1)",
+    )
+    .execute(&store.db)
+    .await
+    .unwrap();
+    for (id, filename, mime, bytes) in fixtures {
+        let fsm_ref = format!("certifications/owner-a/{id}");
+        fsm.seed(&fsm_ref, bytes);
+        sqlx::query(
+            "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, source_provenance, created_at, updated_at)
+             VALUES($1, 'owner-a', 'analysis-stream-study', $2, $3, $4, $5, $6, 'upload', 'ready', 'all', '', 0, '', 'upload', 1, 1)",
+        )
+        .bind(id)
+        .bind(filename)
+        .bind(mime)
+        .bind(bytes.len() as i64)
+        .bind(sha256_hex(bytes))
+        .bind(fsm_ref)
+        .execute(&store.db)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "UPDATE sources SET selection_kind = 'passages', selection_spec = 'p1:0-6' WHERE id = 'src-text'",
+    )
+    .execute(&store.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sources(id, owner_id, study_id, filename, mime_type, size_bytes, sha256, fsm_ref, source_kind, status, selection_kind, selection_spec, is_restricted, external_ref, source_provenance, report_calculation_id, report_calculation_version, report_row_count, report_lineage_sha256, created_at, updated_at)
+         VALUES('src-report', 'owner-a', 'analysis-stream-study', 'private-report-name', 'text/plain', 12, 'private-digest', '', 'report', 'ready', 'all', '', 0, 'private-project/private-report/private-dataset', 'unknown', 'calc', 1, 1, 'private-lineage', 2, 2)",
+    )
+    .execute(&store.db)
+    .await
+    .unwrap();
+    store.fsm = fsm.clone();
+    let reports = Arc::new(DeniedAnalysisReports::default());
+    store.reports = reports.clone();
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/studies/analysis-stream-study/analysis/stream")
+                .header("x-uuid", "other-owner")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    assert_eq!(fsm.get_count(), 0, "owner denial must precede source reads");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/studies/analysis-stream-study/analysis/stream")
+                .header("x-uuid", "owner-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let payload = String::from_utf8(body.to_vec()).unwrap();
+    assert!(payload.contains("event: stage"));
+    assert!(payload.contains("event: source_inspected"));
+    assert!(payload.contains("event: complete"));
+    assert!(payload.contains("\"text_char_count\":6"));
+    assert!(payload.contains("\"page_count\":null"));
+    assert!(payload.contains("\"duration_seconds\":null"));
+    assert!(payload.contains("\"code\":\"source_access_denied\""));
+    assert_eq!(reports.access_checks.load(Ordering::SeqCst), 1);
+    assert_eq!(reports.dataset_fetches.load(Ordering::SeqCst), 0);
+    assert!(!payload.contains("private-name"));
+    assert!(!payload.contains("private-report-name"));
+    assert!(!payload.contains("private-project/private-report/private-dataset"));
+    assert!(!payload.contains("Secret lesson text"));
+
+    let before_cancel = fsm.get_count();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/studies/analysis-stream-study/analysis/stream")
+                .header("x-uuid", "owner-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut chunks = response.into_body().into_data_stream();
+    let mut received = String::new();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !received.contains("event: source_inspected") {
+            let chunk = chunks
+                .next()
+                .await
+                .expect("stream ended before first source")
+                .unwrap();
+            received.push_str(std::str::from_utf8(&chunk).unwrap());
+        }
+    })
+    .await
+    .expect("first source event should be bounded");
+    drop(chunks);
+    assert_eq!(
+        fsm.get_count(),
+        before_cancel + 1,
+        "disconnect must prevent reading the next source"
+    );
+
+    // The synchronous analysis summary route remains available and unchanged.
+    let (status, summary) = call(
+        &app,
+        "POST",
+        "/studies/analysis-stream-study/analysis",
+        Some("owner-a"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(summary["total_sources"], 5);
+    assert_eq!(summary["ready_sources"], 5);
+}
+
+#[derive(Default)]
+struct DeniedAnalysisReports {
+    access_checks: AtomicUsize,
+    dataset_fetches: AtomicUsize,
+}
+
+impl ReportsClient for DeniedAnalysisReports {
+    fn list_readable_reports<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _project: Option<&'a str>,
+    ) -> BoxFuture<'a, certifications_api::core::Result<Vec<ReportPickerItem>>> {
+        Box::pin(async { Err(certifications_api::core::Error::unavailable()) })
+    }
+
+    fn check_report_access<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _project: &'a str,
+        _report: &'a str,
+    ) -> BoxFuture<'a, certifications_api::core::Result<ReportPickerItem>> {
+        Box::pin(async move {
+            self.access_checks.fetch_add(1, Ordering::SeqCst);
+            Err(certifications_api::core::Error::forbidden(
+                "private fixture detail",
+            ))
+        })
+    }
+
+    fn list_readable_datasets<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _project: &'a str,
+        _report: &'a str,
+    ) -> BoxFuture<'a, certifications_api::core::Result<Vec<ReadableReportDataset>>> {
+        Box::pin(async { Err(certifications_api::core::Error::unavailable()) })
+    }
+
+    fn fetch_report_dataset<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _project: &'a str,
+        _report: &'a str,
+        _dataset: &'a str,
+    ) -> BoxFuture<'a, certifications_api::core::Result<ReportDatasetMaterial>> {
+        Box::pin(async move {
+            self.dataset_fetches.fetch_add(1, Ordering::SeqCst);
+            Err(certifications_api::core::Error::unavailable())
+        })
+    }
+
+    fn render_question_visual<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _prompt: &'a str,
+        _visual_spec: &'a Value,
+    ) -> BoxFuture<'a, certifications_api::core::Result<RenderedVisual>> {
+        Box::pin(async { Err(certifications_api::core::Error::unavailable()) })
+    }
 }
 
 #[test]

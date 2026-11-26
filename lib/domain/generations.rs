@@ -475,7 +475,7 @@ fn utf16_offset_to_byte(text: &str, target: usize) -> Option<usize> {
     (units == target).then_some(text.len())
 }
 
-fn select_text_content(
+pub(crate) fn select_text_content(
     bytes: &[u8],
     mime_type: &str,
     kind: &str,
