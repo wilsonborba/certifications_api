@@ -62,9 +62,16 @@ struct CortexGate {
     release: Notify,
 }
 
+struct ReportFetchGate {
+    entered: Notify,
+    release: Notify,
+    resumed: Notify,
+}
+
 struct MockReportSource {
     accessible: AtomicBool,
     bytes: Mutex<Vec<u8>>,
+    fetch_gate: Mutex<Option<Arc<ReportFetchGate>>>,
 }
 
 impl ReportsClient for MockReportSource {
@@ -112,6 +119,12 @@ impl ReportsClient for MockReportSource {
         dataset: &'a str,
     ) -> ReportsFuture<'a, CoreResult<ReportDatasetMaterial>> {
         Box::pin(async move {
+            let fetch_gate = self.fetch_gate.lock().unwrap().take();
+            if let Some(fetch_gate) = fetch_gate {
+                fetch_gate.entered.notify_one();
+                fetch_gate.release.notified().await;
+                fetch_gate.resumed.notify_one();
+            }
             if self.accessible.load(Ordering::SeqCst)
                 && project == "proj"
                 && report == "rep"
@@ -492,6 +505,7 @@ async fn queued_report_generation() -> (
     let reports = Arc::new(MockReportSource {
         accessible: AtomicBool::new(true),
         bytes: Mutex::new(br#"[{"value":7}]"#.to_vec()),
+        fetch_gate: Mutex::new(None),
     });
     store.cortex = cortex.clone();
     store.reports = reports.clone();
@@ -1680,6 +1694,104 @@ async fn sqlite_idempotency_key_stays_unique_after_terminal_and_is_scoped() {
 }
 
 #[tokio::test]
+async fn sqlite_worker_recovery_requeues_pre_cortex_and_fails_uncertain_calls() {
+    let (mut store, app, cortex, reports, pre_call_job) = queued_report_generation().await;
+    let (_, other_study) = call(
+        &app,
+        "POST",
+        "/studies",
+        Some("u2"),
+        Some(json!({"title":"Interrupted generation"})),
+    )
+    .await;
+    let other_study_id = other_study["id"].as_str().unwrap();
+    let (source_status, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{other_study_id}/sources"),
+        Some("u2"),
+        Some(json!({"kind":"report", "filename":"Metrics", "external_ref":"proj/rep/data"})),
+    )
+    .await;
+    assert_eq!(source_status, StatusCode::CREATED);
+    let (job_status, uncertain_job) = call(
+        &app,
+        "POST",
+        &format!("/studies/{other_study_id}/generations"),
+        Some("u2"),
+        Some(json!({"language":"en", "count":1, "idempotency_key":"uncertain"})),
+    )
+    .await;
+    assert_eq!(job_status, StatusCode::CREATED);
+    let uncertain_job_id = uncertain_job["id"].as_str().unwrap();
+    sqlx::query(
+        "UPDATE generation_jobs SET status = 'running', started_at = 10, error_code = '' WHERE id = $1",
+    )
+    .bind(&pre_call_job)
+    .execute(&store.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE generation_jobs SET status = 'running', started_at = 10, error_code = 'cortex_request_in_flight' WHERE id = $1",
+    )
+    .bind(uncertain_job_id)
+    .execute(&store.db)
+    .await
+    .unwrap();
+    store.reports = reports;
+    store.cortex = cortex.clone();
+
+    let worker = tokio::spawn(generations::run_queue_worker(store.clone()));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let recovery_state: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT id, status, error_code FROM generation_jobs ORDER BY queued_at, id")
+            .fetch_all(&store.db)
+            .await
+            .unwrap();
+    assert!(
+        cortex.calls.load(Ordering::SeqCst) > 0,
+        "worker has not reached Cortex: states={recovery_state:?}"
+    );
+    let completed = wait_for_job_status(&app, &pre_call_job, "completed").await;
+    assert_eq!(completed["status"], "completed");
+    let (_, failed) = call(
+        &app,
+        "GET",
+        &format!("/generations/{uncertain_job_id}"),
+        Some("u2"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        failed["status"], "failed",
+        "state={failed}, recovered={recovery_state:?}"
+    );
+    assert_eq!(failed["error_code"], "cortex_outcome_unknown");
+    let recovery_event: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM generation_events WHERE job_id = $1 AND event_type = 'queued'
+           AND message LIKE '%requeued after recovery before contacting Cortex%'",
+    )
+    .bind(&pre_call_job)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(recovery_event, 1);
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 1);
+    worker.abort();
+    let _ = worker.await;
+
+    let (new_status, new_job) = call(
+        &app,
+        "POST",
+        &format!("/studies/{other_study_id}/generations"),
+        Some("u2"),
+        Some(json!({"language":"en", "count":1, "idempotency_key":"after-unknown"})),
+    )
+    .await;
+    assert_eq!(new_status, StatusCode::CREATED, "{new_job}");
+}
+
+#[tokio::test]
 #[ignore = "requires the isolated PostgreSQL test fixture"]
 async fn postgres_concurrent_starts_enforce_owner_singleton_and_idempotency() {
     let url = std::env::var("CERTIFICATIONS_TEST_DATABASE_URL")
@@ -1717,6 +1829,7 @@ async fn postgres_concurrent_starts_enforce_owner_singleton_and_idempotency() {
     store.reports = Arc::new(MockReportSource {
         accessible: AtomicBool::new(true),
         bytes: Mutex::new(br#"[{"value":7}]"#.to_vec()),
+        fetch_gate: Mutex::new(None),
     });
     publish_question_schema(&store).await;
     let app = Arc::new(presentation::router(App {
@@ -1835,4 +1948,281 @@ async fn postgres_concurrent_starts_enforce_owner_singleton_and_idempotency() {
     .unwrap();
     assert_eq!(active, 1);
     store.db.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires the isolated PostgreSQL test fixture"]
+async fn postgres_queue_worker_recovery_is_serialized_and_safe() {
+    let url = std::env::var("CERTIFICATIONS_TEST_DATABASE_URL")
+        .expect("CERTIFICATIONS_TEST_DATABASE_URL must point at the isolated fixture");
+    let socket_dir = std::env::var("CERTIFICATIONS_TEST_SOCKET_DIR")
+        .expect("CERTIFICATIONS_TEST_SOCKET_DIR must name the fixture socket directory");
+    let options = url.parse::<sqlx::any::AnyConnectOptions>().unwrap();
+    let parsed = &options.database_url;
+    assert_eq!(parsed.scheme(), "postgresql");
+    assert_eq!(parsed.username(), "certifications_api_app");
+    assert!(parsed.password().is_none());
+    assert_eq!(parsed.path(), "/certifications_api_test");
+    assert_eq!(parsed.host_str(), Some("localhost"));
+    let dsn_socket = parsed
+        .query_pairs()
+        .find(|(key, _)| key == "host")
+        .map(|(_, value)| value.into_owned())
+        .expect("test DSN must use its private Unix socket");
+    assert_eq!(dsn_socket, socket_dir);
+    assert!(std::path::Path::new(&socket_dir).is_dir());
+
+    let mut settings = test_settings();
+    settings.database_url = url;
+    let mut store_a = Store::connect(&settings).await.unwrap();
+    for migration in POSTGRES_MIGRATIONS {
+        sqlx::raw_sql(migration).execute(&store_a.db).await.unwrap();
+    }
+    publish_question_schema(&store_a).await;
+    let memory_docs = certifications_api::dal::documents::Documents::Memory(
+        certifications_api::dal::documents::Documents::memory(),
+    );
+    let report_gate = Arc::new(ReportFetchGate {
+        entered: Notify::new(),
+        release: Notify::new(),
+        resumed: Notify::new(),
+    });
+    let reports = Arc::new(MockReportSource {
+        accessible: AtomicBool::new(true),
+        bytes: Mutex::new(br#"[{"value":7}]"#.to_vec()),
+        fetch_gate: Mutex::new(None),
+    });
+    let cortex = MockCortex::new();
+    store_a.docs = memory_docs.clone();
+    store_a.reports = reports.clone();
+    store_a.cortex = cortex.clone();
+    store_a.fsm = MemoryFsm::new();
+    let app = Arc::new(presentation::router(App {
+        store: store_a.clone(),
+        settings: test_settings(),
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    }));
+
+    async fn create_report_job(
+        app: &Router,
+        owner: &str,
+        title: &str,
+        key: &str,
+    ) -> (String, String) {
+        let (_, study) = call(
+            app,
+            "POST",
+            "/studies",
+            Some(owner),
+            Some(json!({"title":title})),
+        )
+        .await;
+        let study_id = study["id"].as_str().unwrap().to_owned();
+        let (source_status, source) = call(
+            app,
+            "POST",
+            &format!("/studies/{study_id}/sources"),
+            Some(owner),
+            Some(json!({"kind":"report", "filename":"Metrics", "external_ref":"proj/rep/data"})),
+        )
+        .await;
+        assert_eq!(source_status, StatusCode::CREATED, "source={source}");
+        let (job_status, job) = call(
+            app,
+            "POST",
+            &format!("/studies/{study_id}/generations"),
+            Some(owner),
+            Some(json!({"language":"en", "count":1, "idempotency_key":key})),
+        )
+        .await;
+        assert_eq!(job_status, StatusCode::CREATED, "job={job}");
+        (study_id, job["id"].as_str().unwrap().to_owned())
+    }
+
+    let (study_a, job_a) = create_report_job(&app, "u1", "Pre-call interrupted", "pre-call").await;
+    let (_, job_unknown) = create_report_job(&app, "u2", "Cortex outcome unknown", "unknown").await;
+    sqlx::query(
+        "UPDATE generation_jobs SET status = 'running', started_at = 10, error_code = '' WHERE id = $1",
+    )
+    .bind(&job_a)
+    .execute(&store_a.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE generation_jobs SET status = 'running', started_at = 10, error_code = 'cortex_request_in_flight' WHERE id = $1",
+    )
+    .bind(&job_unknown)
+    .execute(&store_a.db)
+    .await
+    .unwrap();
+    *reports.fetch_gate.lock().unwrap() = Some(report_gate.clone());
+
+    let worker_a = tokio::spawn(generations::run_queue_worker(store_a.clone()));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        report_gate.entered.notified(),
+    )
+    .await
+    .expect("first worker did not reach the gated Reports preparation");
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 0);
+    let unknown: (String, String) =
+        sqlx::query_as("SELECT status, error_code FROM generation_jobs WHERE id = $1")
+            .bind(&job_unknown)
+            .fetch_one(&store_a.db)
+            .await
+            .unwrap();
+    assert_eq!(unknown, ("failed".into(), "cortex_outcome_unknown".into()));
+
+    let (_, job_queued) =
+        create_report_job(&app, "u3", "Arrived while worker is busy", "during-worker").await;
+    let mut store_b = Store::connect(&settings).await.unwrap();
+    store_b.docs = memory_docs;
+    store_b.reports = reports;
+    store_b.cortex = cortex.clone();
+    store_b.fsm = MemoryFsm::new();
+    let worker_b = tokio::spawn(generations::run_queue_worker(store_b.clone()));
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    let queued = generations::get_job(
+        &store_a,
+        &CallerIdentity {
+            user_id: "u3".into(),
+            access_level: 0,
+            display_name: None,
+        },
+        &job_queued,
+    )
+    .await
+    .unwrap();
+    assert_eq!(queued.status, "queued");
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 0);
+
+    let lock_pid: i32 = sqlx::query_scalar(
+        "SELECT activity.pid
+         FROM pg_locks AS locks
+         JOIN pg_stat_activity AS activity ON activity.pid = locks.pid
+         WHERE locks.locktype = 'advisory' AND locks.granted
+           AND locks.classid::bigint = $1 AND locks.objid::bigint = $2
+           AND activity.datname = current_database() AND activity.usename = current_user",
+    )
+    .bind(i64::from(0x43455254_i32))
+    .bind(i64::from(0x47454E31_i32))
+    .fetch_one(&store_a.db)
+    .await
+    .unwrap();
+    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+        .bind(lock_pid)
+        .fetch_one(&store_a.db)
+        .await
+        .unwrap();
+    assert!(
+        terminated,
+        "could not terminate the exact owned advisory-lock backend"
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let (status, error_code): (String, String) =
+                sqlx::query_as("SELECT status, error_code FROM generation_jobs WHERE id = $1")
+                    .bind(&job_a)
+                    .fetch_one(&store_a.db)
+                    .await
+                    .unwrap();
+            if status == "completed" {
+                break;
+            }
+            assert!(
+                matches!(status.as_str(), "queued" | "running"),
+                "recovered pre-call job entered unexpected state: {status}/{error_code}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("replacement worker did not requeue and complete the pre-call job");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM generation_jobs WHERE id = $1")
+                    .bind(&job_queued)
+                    .fetch_one(&store_a.db)
+                    .await
+                    .unwrap();
+            if status == "completed" {
+                break;
+            }
+            assert!(matches!(status.as_str(), "queued" | "running"));
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("replacement worker did not process the queued job after takeover");
+    let recovered_unknown: (String, String) =
+        sqlx::query_as("SELECT status, error_code FROM generation_jobs WHERE id = $1")
+            .bind(&job_unknown)
+            .fetch_one(&store_a.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        recovered_unknown,
+        ("failed".into(), "cortex_outcome_unknown".into())
+    );
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 2);
+
+    report_gate.release.notify_one();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        report_gate.resumed.notified(),
+    )
+    .await
+    .expect("stale Reports preparation did not resume after release");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        cortex.calls.load(Ordering::SeqCst),
+        2,
+        "stale worker dispatched Cortex after losing its lock session"
+    );
+    let job_a_final: (String, String) =
+        sqlx::query_as("SELECT status, error_code FROM generation_jobs WHERE id = $1")
+            .bind(&job_a)
+            .fetch_one(&store_a.db)
+            .await
+            .unwrap();
+    assert_eq!(job_a_final.0, "completed");
+
+    worker_a.abort();
+    let _ = worker_a.await;
+    worker_b.abort();
+    let _ = worker_b.await;
+    let mut probe = store_a.db.acquire().await.unwrap();
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1, $2)")
+        .bind(0x43455254_i32)
+        .bind(0x47454E31_i32)
+        .fetch_one(&mut *probe)
+        .await
+        .unwrap();
+    assert!(
+        acquired,
+        "worker lock remained held after both worker tasks stopped"
+    );
+    let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1, $2)")
+        .bind(0x43455254_i32)
+        .bind(0x47454E31_i32)
+        .fetch_one(&mut *probe)
+        .await
+        .unwrap();
+    assert!(unlocked);
+    probe.close().await.unwrap();
+    let (new_status, new_job) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_a}/generations"),
+        Some("u1"),
+        Some(json!({"language":"en", "count":1, "idempotency_key":"after-recovery"})),
+    )
+    .await;
+    assert_eq!(new_status, StatusCode::CREATED, "job={new_job}");
+    assert_eq!(cortex.calls.load(Ordering::SeqCst), 2);
+    store_a.db.close().await;
+    store_b.db.close().await;
 }

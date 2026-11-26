@@ -1,7 +1,7 @@
 use crate::{
     core::{Error, Result, now},
     dal::{
-        Store,
+        DatabaseBackend, Store,
         cortex::{GeneratedQuestion, GenerationRequest, GenerationSource},
         fsm::sha256_hex,
         new_id,
@@ -18,8 +18,39 @@ use crate::{
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::Row;
+use sqlx::{Any, Connection, Row, pool::PoolConnection};
 use std::collections::HashSet;
+
+const GENERATION_WORKER_LOCK_CLASS: i32 = 0x43455254;
+const GENERATION_WORKER_LOCK_ID: i32 = 0x47454E31;
+type WorkerConnection = std::sync::Arc<tokio::sync::Mutex<PoolConnection<Any>>>;
+
+async fn execute_worker_state_query<'q>(
+    store: &Store,
+    worker_connection: Option<&WorkerConnection>,
+    query: sqlx::query::Query<'q, Any, sqlx::any::AnyArguments<'q>>,
+) -> Result<sqlx::any::AnyQueryResult> {
+    if let Some(connection) = worker_connection {
+        let mut connection = connection.lock().await;
+        Ok(query.execute(&mut **connection).await?)
+    } else {
+        Ok(query.execute(&store.db).await?)
+    }
+}
+
+async fn record_worker_step(
+    store: &Store,
+    job_id: &str,
+    step: &StepMeasurement,
+    worker_connection: Option<&WorkerConnection>,
+) -> Result<()> {
+    if let Some(worker_connection) = worker_connection {
+        let mut connection = worker_connection.lock().await;
+        estimates::record_step_on_connection(&mut connection, job_id, step).await
+    } else {
+        estimates::record_step(store, job_id, step).await
+    }
+}
 
 pub const QUESTION_SCHEMA_NAME: &str = "question-v2";
 pub const QUESTION_SCHEMA_VERSION: i64 = 1;
@@ -107,6 +138,28 @@ async fn emit_event(store: &Store, job_id: &str, event_type: &str, message: &str
     .bind(message)
     .bind(now())
     .execute(&store.db)
+    .await?;
+    Ok(())
+}
+
+async fn emit_event_with_worker_connection(
+    store: &Store,
+    job_id: &str,
+    event_type: &str,
+    message: &str,
+    worker_connection: Option<&WorkerConnection>,
+) -> Result<()> {
+    execute_worker_state_query(
+        store,
+        worker_connection,
+        sqlx::query(
+            "INSERT INTO generation_events(job_id, event_type, message, created_at) VALUES($1, $2, $3, $4)",
+        )
+        .bind(job_id)
+        .bind(event_type)
+        .bind(message)
+        .bind(now()),
+    )
     .await?;
     Ok(())
 }
@@ -504,22 +557,27 @@ fn select_text_content(
     }
 }
 
-async fn fail_job(
+async fn fail_job_state(
     store: &Store,
     job_id: &str,
     code: &str,
     message: &str,
+    worker_connection: Option<&WorkerConnection>,
 ) -> Result<GenerationJobSummary> {
-    let failed = sqlx::query(
+    let failed = execute_worker_state_query(
+        store,
+        worker_connection,
+        sqlx::query(
         "UPDATE generation_jobs SET status = 'failed', error_code = $1, finished_at = $2 WHERE id = $3 AND status = 'running'",
+        )
+        .bind(code)
+        .bind(now())
+        .bind(job_id),
     )
-    .bind(code)
-    .bind(now())
-    .bind(job_id)
-    .execute(&store.db)
     .await?;
     if failed.rows_affected() > 0 {
-        emit_event(store, job_id, "failed", message).await?;
+        emit_event_with_worker_connection(store, job_id, "failed", message, worker_connection)
+            .await?;
     }
     Err(Error::unprocessable(format!("{code}: {message}")))
 }
@@ -533,25 +591,30 @@ async fn stop_was_requested(store: &Store, job_id: &str) -> Result<bool> {
     Ok(reason == "user_stop_requested")
 }
 
-async fn finish_requested_stop(
+async fn finish_requested_stop_state(
     store: &Store,
     caller: &CallerIdentity,
     job_id: &str,
+    worker_connection: Option<&WorkerConnection>,
 ) -> Result<GenerationJobSummary> {
-    let stopped = sqlx::query(
-        "UPDATE generation_jobs SET status = 'cancelled', error_code = '', finished_at = $1
+    let stopped = execute_worker_state_query(
+        store,
+        worker_connection,
+        sqlx::query(
+            "UPDATE generation_jobs SET status = 'cancelled', error_code = '', finished_at = $1
          WHERE id = $2 AND status = 'running' AND stopped_reason = 'user_stop_requested'",
+        )
+        .bind(now())
+        .bind(job_id),
     )
-    .bind(now())
-    .bind(job_id)
-    .execute(&store.db)
     .await?;
     if stopped.rows_affected() > 0 {
-        emit_event(
+        emit_event_with_worker_connection(
             store,
             job_id,
             "cancelled",
             "Stopped at a safe boundary after the current step",
+            worker_connection,
         )
         .await?;
     }
@@ -563,6 +626,41 @@ pub async fn process_job(
     caller: &CallerIdentity,
     job_id: &str,
 ) -> Result<GenerationJobSummary> {
+    process_job_with_worker_connection(store, caller, job_id, None).await
+}
+
+async fn process_job_with_worker_connection(
+    store: &Store,
+    caller: &CallerIdentity,
+    job_id: &str,
+    worker_connection: Option<&WorkerConnection>,
+) -> Result<GenerationJobSummary> {
+    macro_rules! fail_job {
+        ($store:expr, $job_id:expr, $code:expr, $message:expr $(,)?) => {
+            fail_job_state($store, $job_id, $code, $message, worker_connection)
+        };
+    }
+    macro_rules! finish_requested_stop {
+        ($store:expr, $caller:expr, $job_id:expr $(,)?) => {
+            finish_requested_stop_state($store, $caller, $job_id, worker_connection)
+        };
+    }
+    macro_rules! emit_event {
+        ($store:expr, $job_id:expr, $event_type:expr, $message:expr $(,)?) => {
+            emit_event_with_worker_connection(
+                $store,
+                $job_id,
+                $event_type,
+                $message,
+                worker_connection,
+            )
+        };
+    }
+    macro_rules! record_step {
+        ($store:expr, $job_id:expr, $step:expr $(,)?) => {
+            record_worker_step($store, $job_id, $step, worker_connection)
+        };
+    }
     let job = get_job(store, caller, job_id).await?;
     if job.status == "cancelled" || job.status == "completed" {
         return Ok(job);
@@ -601,17 +699,15 @@ pub async fn process_job(
 
     let started = now();
     let wait_ms = (started - job_queued_at).max(0) * 1000;
-    let claimed = sqlx::query("UPDATE generation_jobs SET status = 'running', started_at = $1 WHERE id = $2 AND status = 'queued'")
+    let claimed = execute_worker_state_query(store, worker_connection, sqlx::query("UPDATE generation_jobs SET status = 'running', started_at = $1 WHERE id = $2 AND status = 'queued'")
         .bind(started)
-        .bind(job_id)
-        .execute(&store.db)
-        .await?;
+        .bind(job_id)).await?;
     if claimed.rows_affected() == 0 {
         return get_job(store, caller, job_id).await;
     }
-    emit_event(store, job_id, "running", "Calling Cortex T0 Easy").await?;
+    emit_event!(store, job_id, "running", "Calling Cortex T0 Easy").await?;
     if stop_was_requested(store, job_id).await? {
-        return finish_requested_stop(store, caller, job_id).await;
+        return finish_requested_stop!(store, caller, job_id).await;
     }
 
     let study = sqlx::query("SELECT owner_id, status, expires_at FROM studies WHERE id = $1")
@@ -619,7 +715,7 @@ pub async fn process_job(
         .fetch_optional(&store.db)
         .await?;
     let Some(study) = study else {
-        return fail_job(
+        return fail_job!(
             store,
             job_id,
             "study_unavailable",
@@ -631,7 +727,7 @@ pub async fn process_job(
     let study_status: String = study.get("status");
     let study_expiry: Option<i64> = study.get("expires_at");
     if study_owner != caller.user_id {
-        return fail_job(
+        return fail_job!(
             store,
             job_id,
             "study_unavailable",
@@ -649,7 +745,7 @@ pub async fn process_job(
                 .execute(&store.db)
                 .await?;
         }
-        return fail_job(
+        return fail_job!(
             store,
             job_id,
             "study_expired",
@@ -658,7 +754,7 @@ pub async fn process_job(
         .await;
     }
     if !matches!(study_status.as_str(), "draft" | "active") {
-        return fail_job(
+        return fail_job!(
             store,
             job_id,
             "study_unavailable",
@@ -677,7 +773,7 @@ pub async fn process_job(
         .fetch_optional(&store.db)
         .await?;
         if target.is_none() {
-            return fail_job(
+            return fail_job!(
                 store,
                 job_id,
                 "quiz_not_available",
@@ -747,7 +843,7 @@ pub async fn process_job(
             || (!is_report && fsm_ref.trim().is_empty())
             || external_ref != current_external_ref
         {
-            return fail_job(
+            return fail_job!(
                 store,
                 job_id,
                 "source_unavailable",
@@ -769,7 +865,7 @@ pub async fn process_job(
                     || row.get::<String, _>("current_report_lineage_sha256")
                         != row.get::<String, _>("report_lineage_sha256")))
         {
-            return fail_job(
+            return fail_job!(
                 store,
                 job_id,
                 "source_integrity_failed",
@@ -782,7 +878,7 @@ pub async fn process_job(
             {
                 Ok(parts) => parts,
                 Err(_) => {
-                    return fail_job(
+                    return fail_job!(
                         store,
                         job_id,
                         "source_unavailable",
@@ -798,7 +894,7 @@ pub async fn process_job(
             {
                 checked
             } else {
-                return fail_job(
+                return fail_job!(
                     store,
                     job_id,
                     "source_unavailable",
@@ -813,7 +909,7 @@ pub async fn process_job(
             {
                 Ok(material) => material,
                 Err(_) => {
-                    return fail_job(
+                    return fail_job!(
                         store,
                         job_id,
                         "source_unavailable",
@@ -823,7 +919,7 @@ pub async fn process_job(
                 }
             };
             if (checked.is_restricted || material.is_restricted) != source.is_restricted {
-                return fail_job(
+                return fail_job!(
                     store,
                     job_id,
                     "source_unavailable",
@@ -837,7 +933,7 @@ pub async fn process_job(
                 || material.row_count != row.get::<i64, _>("report_row_count")
                 || material.lineage_sha256 != row.get::<String, _>("report_lineage_sha256")
             {
-                return fail_job(
+                return fail_job!(
                     store,
                     job_id,
                     "source_integrity_failed",
@@ -851,7 +947,7 @@ pub async fn process_job(
                 .await
                 .is_err()
             {
-                return fail_job(
+                return fail_job!(
                     store,
                     job_id,
                     "source_unavailable",
@@ -862,7 +958,7 @@ pub async fn process_job(
             match store.fsm.get_bytes(&fsm_ref).await {
                 Ok(bytes) => bytes,
                 Err(_) => {
-                    return fail_job(
+                    return fail_job!(
                         store,
                         job_id,
                         "source_unavailable",
@@ -877,7 +973,7 @@ pub async fn process_job(
             || sha256.trim().is_empty()
             || sha256_hex(&bytes) != sha256
         {
-            return fail_job(
+            return fail_job!(
                 store,
                 job_id,
                 "source_integrity_failed",
@@ -901,7 +997,7 @@ pub async fn process_job(
                         } else {
                             "invalid_source_selection"
                         };
-                        return fail_job(store, job_id, code, message).await;
+                        return fail_job!(store, job_id, code, message).await;
                     }
                 };
             let suffix = match mime_type.as_str() {
@@ -931,7 +1027,7 @@ pub async fn process_job(
                 _ => false,
             };
             if !selection_supported {
-                return fail_job(
+                return fail_job!(
                     store,
                     job_id,
                     "invalid_source_selection",
@@ -998,7 +1094,7 @@ pub async fn process_job(
         existing_prompts: existing_prompts.clone(),
     };
     let prep_ms = prep_inst.elapsed().as_millis() as i64;
-    estimates::record_step(
+    record_step!(
         store,
         job_id,
         &StepMeasurement {
@@ -1014,16 +1110,19 @@ pub async fn process_job(
 
     let cortex_inst = std::time::Instant::now();
     let cortex_started_at = now();
-    let cortex_claim = sqlx::query(
-        "UPDATE generation_jobs SET error_code = 'cortex_request_in_flight'
+    let cortex_claim = execute_worker_state_query(
+        store,
+        worker_connection,
+        sqlx::query(
+            "UPDATE generation_jobs SET error_code = 'cortex_request_in_flight'
          WHERE id = $1 AND status = 'running' AND stopped_reason <> 'user_stop_requested'",
+        )
+        .bind(job_id),
     )
-    .bind(job_id)
-    .execute(&store.db)
     .await?;
     if cortex_claim.rows_affected() == 0 {
         if stop_was_requested(store, job_id).await? {
-            return finish_requested_stop(store, caller, job_id).await;
+            return finish_requested_stop!(store, caller, job_id).await;
         }
         return get_job(store, caller, job_id).await;
     }
@@ -1031,7 +1130,7 @@ pub async fn process_job(
         Ok(result) => result,
         Err(err) => {
             let cortex_ms = cortex_inst.elapsed().as_millis() as i64;
-            let _ = estimates::record_step(
+            let _ = record_step!(
                 store,
                 job_id,
                 &StepMeasurement {
@@ -1045,7 +1144,7 @@ pub async fn process_job(
             )
             .await;
             let _ = err;
-            return fail_job(
+            return fail_job!(
                 store,
                 job_id,
                 "cortex_outcome_unknown",
@@ -1054,14 +1153,12 @@ pub async fn process_job(
             .await;
         }
     };
-    sqlx::query(
+    execute_worker_state_query(store, worker_connection, sqlx::query(
         "UPDATE generation_jobs SET cortex_session_id = $1, cortex_output_id = $2, error_code = 'cortex_outcome_unknown' WHERE id = $3",
     )
     .bind(&result.session_id)
     .bind(&result.output_id)
-    .bind(job_id)
-    .execute(&store.db)
-    .await?;
+    .bind(job_id)).await?;
     let current_status: String =
         sqlx::query_scalar("SELECT status FROM generation_jobs WHERE id = $1")
             .bind(job_id)
@@ -1082,31 +1179,34 @@ pub async fn process_job(
                 "Cortex returned without a final result; automatic retry is disabled",
             )
         };
-        return fail_job(store, job_id, code, message).await;
+        return fail_job!(store, job_id, code, message).await;
     }
     let mut generated = result.questions;
 
     if has_wrong_script(&job.language, &generated) {
         if stop_was_requested(store, job_id).await? {
-            return finish_requested_stop(store, caller, job_id).await;
+            return finish_requested_stop!(store, caller, job_id).await;
         }
-        emit_event(
+        emit_event!(
             store,
             job_id,
             "language_correction",
             "Detected wrong script; requesting Cortex correction",
         )
         .await?;
-        let correction_claim = sqlx::query(
-            "UPDATE generation_jobs SET error_code = 'cortex_correction_in_flight'
+        let correction_claim = execute_worker_state_query(
+            store,
+            worker_connection,
+            sqlx::query(
+                "UPDATE generation_jobs SET error_code = 'cortex_correction_in_flight'
              WHERE id = $1 AND status = 'running' AND stopped_reason <> 'user_stop_requested'",
+            )
+            .bind(job_id),
         )
-        .bind(job_id)
-        .execute(&store.db)
         .await?;
         if correction_claim.rows_affected() == 0 {
             if stop_was_requested(store, job_id).await? {
-                return finish_requested_stop(store, caller, job_id).await;
+                return finish_requested_stop!(store, caller, job_id).await;
             }
             return get_job(store, caller, job_id).await;
         }
@@ -1117,7 +1217,7 @@ pub async fn process_job(
         {
             Ok(questions) => questions,
             Err(_) => {
-                return fail_job(
+                return fail_job!(
                     store,
                     job_id,
                     "cortex_outcome_unknown",
@@ -1134,15 +1234,13 @@ pub async fn process_job(
         if current_status != "running" {
             return get_job(store, caller, job_id).await;
         }
-        sqlx::query(
+        execute_worker_state_query(store, worker_connection, sqlx::query(
             "UPDATE generation_jobs SET error_code = 'cortex_outcome_unknown' WHERE id = $1 AND status = 'running'",
         )
-        .bind(job_id)
-        .execute(&store.db)
-        .await?;
+        .bind(job_id)).await?;
         if has_wrong_script(&job.language, &generated) {
             let cortex_ms = cortex_inst.elapsed().as_millis() as i64;
-            let _ = estimates::record_step(
+            let _ = record_step!(
                 store,
                 job_id,
                 &StepMeasurement {
@@ -1155,7 +1253,7 @@ pub async fn process_job(
                 },
             )
             .await;
-            return fail_job(
+            return fail_job!(
                 store,
                 job_id,
                 "wrong_language_script",
@@ -1165,7 +1263,7 @@ pub async fn process_job(
         }
     }
     let cortex_ms = cortex_inst.elapsed().as_millis() as i64;
-    estimates::record_step(
+    record_step!(
         store,
         job_id,
         &StepMeasurement {
@@ -1199,7 +1297,7 @@ pub async fn process_job(
     let mut accepted = Vec::new();
     for q in generated {
         if !allowed_sources.contains(&q.source_id) {
-            return fail_job(
+            return fail_job!(
                 store,
                 job_id,
                 "unverified_citation",
@@ -1219,9 +1317,18 @@ pub async fn process_job(
         .filter(|qid| !qid.trim().is_empty())
         .unwrap_or_else(new_id);
     let ts = now();
-    let mut doc_ids = Vec::with_capacity(accepted.len());
+    let mut doc_ids: Vec<String> = Vec::with_capacity(accepted.len());
     let mut saved_questions = Vec::with_capacity(accepted.len());
     for q in &accepted {
+        if worker_connection.is_some()
+            && let Err(error) =
+                execute_worker_state_query(store, worker_connection, sqlx::query("SELECT 1")).await
+        {
+            for created_doc_id in &doc_ids {
+                guardrail::cleanup_orphan_document(store, created_doc_id).await;
+            }
+            return Err(error);
+        }
         let doc_id = new_id();
         doc_ids.push(doc_id.clone());
         let payload = json!({
@@ -1256,7 +1363,16 @@ pub async fn process_job(
     let saved_count = saved_questions.len() as i64;
     let done = now();
     let finalize_result: Result<bool> = async {
-        let mut tx = store.db.begin().await?;
+        let mut locked_connection = if let Some(worker_connection) = worker_connection {
+            Some(worker_connection.lock().await)
+        } else {
+            None
+        };
+        let mut tx = if let Some(connection) = locked_connection.as_deref_mut() {
+            connection.begin().await?
+        } else {
+            store.db.begin().await?
+        };
         // This compare-and-set serializes final publication with stop/cancel.
         let claim = sqlx::query(
             "UPDATE generation_jobs SET error_code = 'publishing' WHERE id = $1 AND status = 'running'",
@@ -1470,7 +1586,7 @@ pub async fn process_job(
     }
 
     let save_ms = save_inst.elapsed().as_millis() as i64;
-    estimates::record_step(
+    record_step!(
         store,
         job_id,
         &StepMeasurement {
@@ -1496,6 +1612,9 @@ pub async fn process_job(
     let source_count: i64 = counts_row.get("cnt");
     let total_bytes: i64 = counts_row.get("bytes");
     let total_process_ms = prep_ms + cortex_ms + save_ms;
+    if worker_connection.is_some() {
+        execute_worker_state_query(store, worker_connection, sqlx::query("SELECT 1")).await?;
+    }
     estimates::record_estimation_sample(
         store,
         &caller.user_id,
@@ -1516,7 +1635,10 @@ pub async fn process_job(
 /// Drain the oldest persisted generation at a time. The conditional status
 /// transition in `process_job` is the durable claim, so two pollers cannot
 /// submit the same queued job to Cortex.
-pub async fn process_next_queued(store: &Store) -> Result<bool> {
+async fn process_next_queued(
+    store: &Store,
+    worker_connection: Option<WorkerConnection>,
+) -> Result<bool> {
     let row = sqlx::query(
         "SELECT id, owner_id FROM generation_jobs WHERE status = 'queued' ORDER BY queued_at ASC, id ASC LIMIT 1",
     )
@@ -1531,25 +1653,32 @@ pub async fn process_next_queued(store: &Store) -> Result<bool> {
         display_name: None,
     };
     let job_id: String = row.get("id");
-    if let Err(error) = process_job(store, &caller, &job_id).await {
+    if let Err(error) =
+        process_job_with_worker_connection(store, &caller, &job_id, worker_connection.as_ref())
+            .await
+    {
         tracing::warn!(job_id = %job_id, error = %error, "Generation queue item stopped");
-        let terminal = sqlx::query(
+        let terminal = execute_worker_state_query(
+            store,
+            worker_connection.as_ref(),
+            sqlx::query(
             "UPDATE generation_jobs SET status = 'failed',
                  error_code = CASE WHEN error_code IN ('cortex_request_in_flight', 'cortex_correction_in_flight', 'cortex_outcome_unknown')
                                    THEN 'cortex_outcome_unknown' ELSE 'generation_processing_failed' END,
                  finished_at = $1
              WHERE id = $2 AND status = 'running'",
+            )
+            .bind(now())
+            .bind(&job_id),
         )
-        .bind(now())
-        .bind(&job_id)
-        .execute(&store.db)
         .await?;
         if terminal.rows_affected() > 0 {
-            let _ = emit_event(
+            let _ = emit_event_with_worker_connection(
                 store,
                 &job_id,
                 "failed",
                 "Generation stopped after an internal processing error",
+                worker_connection.as_ref(),
             )
             .await;
         }
@@ -1557,13 +1686,161 @@ pub async fn process_next_queued(store: &Store) -> Result<bool> {
     Ok(true)
 }
 
-pub async fn run_queue_worker(store: Store) {
+async fn acquire_postgres_worker_lock(store: &Store) -> Result<Option<WorkerConnection>> {
+    let mut connection = store.db.acquire().await?;
+    // A session advisory lock must not be returned to the shared pool when this
+    // future is cancelled. Closing the physical connection releases the lock.
+    connection.close_on_drop();
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1, $2)")
+        .bind(GENERATION_WORKER_LOCK_CLASS)
+        .bind(GENERATION_WORKER_LOCK_ID)
+        .fetch_one(&mut *connection)
+        .await?;
+    Ok(acquired.then(|| std::sync::Arc::new(tokio::sync::Mutex::new(connection))))
+}
+
+async fn reconcile_interrupted_jobs_on_connection(
+    connection: &mut sqlx::AnyConnection,
+) -> Result<()> {
+    let rows = sqlx::query(
+        "SELECT id, error_code, stopped_reason, started_at FROM generation_jobs
+         WHERE status = 'running' ORDER BY started_at ASC, id ASC",
+    )
+    .fetch_all(&mut *connection)
+    .await?;
+
+    for row in rows {
+        let job_id: String = row.get("id");
+        let old_error: String = row.get("error_code");
+        let old_stop: String = row.get("stopped_reason");
+        let (new_status, new_error, event_type, message, started_at, finished_at) =
+            if old_error.is_empty() && old_stop == "user_stop_requested" {
+                (
+                    "cancelled",
+                    "",
+                    "cancelled",
+                    "Generation stopped before contacting Cortex after worker recovery",
+                    None,
+                    Some(now()),
+                )
+            } else if old_error.is_empty() {
+                (
+                    "queued",
+                    "",
+                    "queued",
+                    "Generation requeued after recovery before contacting Cortex",
+                    None,
+                    None,
+                )
+            } else {
+                (
+                    "failed",
+                    "cortex_outcome_unknown",
+                    "failed",
+                    "Worker stopped during or after a Cortex request; automatic retry is disabled",
+                    row.try_get::<Option<i64>, _>("started_at")?,
+                    Some(now()),
+                )
+            };
+
+        let mut tx = connection.begin().await?;
+        let updated = sqlx::query(
+            "UPDATE generation_jobs
+             SET status = $1, error_code = $2, started_at = $3, finished_at = $4
+             WHERE id = $5 AND status = 'running' AND error_code = $6 AND stopped_reason = $7",
+        )
+        .bind(new_status)
+        .bind(new_error)
+        .bind(started_at)
+        .bind(finished_at)
+        .bind(&job_id)
+        .bind(&old_error)
+        .bind(&old_stop)
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() > 0 {
+            sqlx::query(
+                "INSERT INTO generation_events(job_id, event_type, message, created_at)
+                 VALUES($1, $2, $3, $4)",
+            )
+            .bind(&job_id)
+            .bind(event_type)
+            .bind(message)
+            .bind(now())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+    }
+    Ok(())
+}
+
+async fn reconcile_interrupted_jobs(
+    store: &Store,
+    worker_connection: Option<&WorkerConnection>,
+) -> Result<()> {
+    if let Some(worker_connection) = worker_connection {
+        let mut connection = worker_connection.lock().await;
+        reconcile_interrupted_jobs_on_connection(&mut connection).await
+    } else {
+        let mut connection = store.db.acquire().await?;
+        reconcile_interrupted_jobs_on_connection(&mut connection).await
+    }
+}
+
+async fn run_queue_loop(store: &Store, worker_connection: Option<WorkerConnection>) {
     loop {
-        match process_next_queued(&store).await {
+        if worker_connection.is_some()
+            && let Err(error) = execute_worker_state_query(
+                store,
+                worker_connection.as_ref(),
+                sqlx::query("SELECT 1"),
+            )
+            .await
+        {
+            tracing::error!(error = %error, "Generation worker lock connection was lost");
+            return;
+        }
+        match process_next_queued(store, worker_connection.clone()).await {
             Ok(true) => continue,
             Ok(false) => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
             Err(error) => {
                 tracing::error!(error = %error, "Generation queue poll failed");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    }
+}
+
+pub async fn run_queue_worker(store: Store) {
+    if store.database_backend == DatabaseBackend::Sqlite {
+        // SQLite is used by single-process fixtures; this lock makes no
+        // cross-process coordination claim.
+        let _local_guard = store.sqlite_worker_lock.lock().await;
+        if let Err(error) = reconcile_interrupted_jobs(&store, None).await {
+            tracing::error!(error = %error, "Generation recovery failed; worker is stopping");
+            return;
+        }
+        run_queue_loop(&store, None).await;
+        return;
+    }
+
+    loop {
+        match acquire_postgres_worker_lock(&store).await {
+            Ok(Some(connection)) => {
+                if let Err(error) = reconcile_interrupted_jobs(&store, Some(&connection)).await {
+                    tracing::error!(error = %error, "Generation recovery failed; worker will retry after reacquiring its lock");
+                    drop(connection);
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+                run_queue_loop(&store, Some(connection.clone())).await;
+                drop(connection);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+            Err(error) => {
+                tracing::error!(error = %error, "Generation worker lock acquisition failed");
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         }
