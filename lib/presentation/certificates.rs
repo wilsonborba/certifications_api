@@ -6,7 +6,7 @@ use crate::{
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -61,8 +61,13 @@ async fn issue_certificate(
 async fn verify_certificate(
     State(app): State<App>,
     Path(certificate_code): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<Value>> {
-    let info = certificates::verify_certificate(&app.store, &certificate_code).await?;
+    let accept_language = headers
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|val| val.to_str().ok());
+    let info =
+        certificates::verify_certificate(&app.store, &certificate_code, accept_language).await?;
     Ok(Json(json!(info)))
 }
 

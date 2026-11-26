@@ -19,6 +19,7 @@ use sqlx::Row;
 
 const REGULAR_FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/IBMPlexSansThai-Regular.ttf");
 const BOLD_FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/IBMPlexSansThai-Bold.ttf");
+pub const ASODYA_LOGO_BYTES: &[u8] = include_bytes!("../../assets/asodya_logo.png");
 
 #[derive(Clone, Debug, Serialize)]
 pub struct HolderIdentity {
@@ -206,6 +207,8 @@ static REGULAR_FONT_BASE64: std::sync::LazyLock<String> =
     std::sync::LazyLock::new(|| to_base64(REGULAR_FONT_BYTES));
 static BOLD_FONT_BASE64: std::sync::LazyLock<String> =
     std::sync::LazyLock::new(|| to_base64(BOLD_FONT_BYTES));
+static LOGO_BASE64: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| to_base64(ASODYA_LOGO_BYTES));
 
 fn resolve_labels(language: Option<&str>) -> CertLabels {
     match language.map(str::trim) {
@@ -372,7 +375,7 @@ pub fn render_certificate_pdf(
             ..Default::default()
         }));
         surface.set_stroke(Some(Stroke {
-            paint: rgb::Color::new(31, 41, 55).into(),
+            paint: rgb::Color::new(107, 33, 168).into(),
             width: 3.0,
             ..Default::default()
         }));
@@ -389,34 +392,58 @@ pub fn render_certificate_pdf(
     if let Some(path) = ib.finish() {
         surface.set_fill(None);
         surface.set_stroke(Some(Stroke {
-            paint: rgb::Color::new(209, 213, 219).into(),
+            paint: rgb::Color::new(233, 213, 255).into(),
             width: 1.0,
             ..Default::default()
         }));
         surface.draw_path(&path);
     }
 
+    // Asodya Logo (top-left)
+    if let Ok(logo_img) = krilla::image::Image::from_png(Data::from(ASODYA_LOGO_BYTES), true) {
+        surface.push_transform(&krilla::geom::Transform::from_translate(48.0, 36.0));
+        if let Some(logo_size) = krilla::geom::Size::from_wh(42.0, 42.0) {
+            surface.draw_image(logo_img, logo_size);
+        }
+        surface.pop();
+    }
+
+    // Brand Header "ASODYA"
+    surface.set_fill(Some(Fill {
+        paint: rgb::Color::new(107, 33, 168).into(),
+        ..Default::default()
+    }));
+    surface.set_stroke(None);
+    surface.draw_text(
+        Point::from_xy(98.0, 62.0),
+        bold_font.clone(),
+        18.0,
+        "ASODYA",
+        false,
+        TextDirection::Auto,
+    );
+
     let left_x = 48.0f32;
     let max_text_width = 470.0f32;
 
     // Title
     surface.set_fill(Some(Fill {
-        paint: rgb::Color::new(17, 24, 39).into(),
+        paint: rgb::Color::new(88, 28, 135).into(),
         ..Default::default()
     }));
     surface.set_stroke(None);
     surface.draw_text(
-        Point::from_xy(left_x, 65.0),
+        Point::from_xy(left_x, 108.0),
         bold_font.clone(),
-        22.0,
+        20.0,
         labels.cert_title,
         false,
         TextDirection::Auto,
     );
 
-    let mut current_y = 115.0f32;
+    let mut current_y = 138.0f32;
     let max_usable_y = 465.0f32;
-    let line_height = 22.0f32;
+    let line_height = 20.0f32;
 
     let draw_field = |surface: &mut krilla::surface::Surface<'_>,
                       label: &str,
@@ -428,7 +455,7 @@ pub fn render_certificate_pdf(
             &full_text,
             max_text_width,
             REGULAR_FONT_BYTES,
-            16.0,
+            15.0,
             max_lines,
         );
         for line in lines {
@@ -443,14 +470,14 @@ pub fn render_certificate_pdf(
             surface.draw_text(
                 Point::from_xy(left_x, *y),
                 regular_font.clone(),
-                16.0,
+                15.0,
                 &line,
                 false,
                 TextDirection::Auto,
             );
             *y += line_height;
         }
-        *y += 6.0;
+        *y += 5.0;
     };
 
     draw_field(
@@ -485,7 +512,7 @@ pub fn render_certificate_pdf(
     );
 
     if current_y <= max_usable_y {
-        current_y += 6.0;
+        current_y += 5.0;
         let code_line = format!("{}: {code}", labels.code_prefix);
         surface.set_fill(Some(Fill {
             paint: rgb::Color::new(31, 41, 55).into(),
@@ -500,7 +527,7 @@ pub fn render_certificate_pdf(
             false,
             TextDirection::Auto,
         );
-        current_y += 20.0;
+        current_y += 18.0;
     }
 
     if current_y <= max_usable_y {
@@ -523,7 +550,7 @@ pub fn render_certificate_pdf(
                 false,
                 TextDirection::Auto,
             );
-            current_y += 16.0;
+            current_y += 15.0;
         }
     }
 
@@ -615,13 +642,13 @@ pub fn render_certificate_svg(
 
     // Title
     text_elements.push_str(&format!(
-        "<text x=\"{left_x}\" y=\"65\" font-size=\"22\" font-family=\"'IBMPlexSansThai', 'Liberation Sans', sans-serif\" font-weight=\"bold\" fill=\"#111827\">{}</text>\n",
+        "<text x=\"{left_x}\" y=\"108\" font-size=\"20\" font-family=\"'IBMPlexSansThai', 'Liberation Sans', sans-serif\" font-weight=\"bold\" fill=\"#581C87\">{}</text>\n",
         escape_xml(labels.cert_title)
     ));
 
-    let mut current_y = 115.0f32;
+    let mut current_y = 138.0f32;
     let max_usable_y = 465.0f32;
-    let line_height = 22.0f32;
+    let line_height = 20.0f32;
 
     let mut add_field = |label: &str, value: &str, y: &mut f32, max_lines: usize| {
         let full_text = format!("{label}: {value}");
@@ -629,7 +656,7 @@ pub fn render_certificate_svg(
             &full_text,
             max_text_width,
             REGULAR_FONT_BYTES,
-            16.0,
+            15.0,
             max_lines,
         );
         for line in lines {
@@ -637,12 +664,12 @@ pub fn render_certificate_svg(
                 break;
             }
             text_elements.push_str(&format!(
-                "<text x=\"{left_x}\" y=\"{:.1}\" font-size=\"16\" font-family=\"'IBMPlexSansThai', 'Liberation Sans', sans-serif\" fill=\"#374151\">{}</text>\n",
+                "<text x=\"{left_x}\" y=\"{:.1}\" font-size=\"15\" font-family=\"'IBMPlexSansThai', 'Liberation Sans', sans-serif\" fill=\"#374151\">{}</text>\n",
                 *y, escape_xml(&line)
             ));
             *y += line_height;
         }
-        *y += 6.0;
+        *y += 5.0;
     };
 
     add_field(labels.holder_prefix, holder_name, &mut current_y, 4);
@@ -652,13 +679,13 @@ pub fn render_certificate_svg(
     add_field(labels.date_prefix, &date_str, &mut current_y, 1);
 
     if current_y <= max_usable_y {
-        current_y += 6.0;
+        current_y += 5.0;
         let code_line = format!("{}: {code}", labels.code_prefix);
         text_elements.push_str(&format!(
             "<text x=\"{left_x}\" y=\"{:.1}\" font-size=\"14\" font-family=\"'IBMPlexSansThai', monospace\" font-weight=\"bold\" fill=\"#1f2937\">{}</text>\n",
             current_y, escape_xml(&code_line)
         ));
-        current_y += 20.0;
+        current_y += 18.0;
     }
 
     if current_y <= max_usable_y {
@@ -672,7 +699,7 @@ pub fn render_certificate_svg(
                 "<text x=\"{left_x}\" y=\"{:.1}\" font-size=\"12\" font-family=\"'IBMPlexSansThai', monospace\" fill=\"#6b7280\">{}</text>\n",
                 current_y, escape_xml(&uline)
             ));
-            current_y += 16.0;
+            current_y += 15.0;
         }
     }
 
@@ -727,12 +754,14 @@ pub fn render_certificate_svg(
          }}\n\
          </style>\n\
          </defs>\n\
-         <rect x=\"15\" y=\"15\" width=\"770\" height=\"470\" rx=\"6\" fill=\"#ffffff\" stroke=\"#1f2937\" stroke-width=\"3\"/>\n\
-         <rect x=\"22\" y=\"22\" width=\"756\" height=\"456\" rx=\"4\" fill=\"none\" stroke=\"#d1d5db\" stroke-width=\"1\"/>\n\
+         <rect x=\"15\" y=\"15\" width=\"770\" height=\"470\" rx=\"6\" fill=\"#ffffff\" stroke=\"#6B21A8\" stroke-width=\"3\"/>\n\
+         <rect x=\"22\" y=\"22\" width=\"756\" height=\"456\" rx=\"4\" fill=\"none\" stroke=\"#E9D5FF\" stroke-width=\"1\"/>\n\
+         <image href=\"data:image/png;base64,{}\" x=\"48\" y=\"36\" width=\"42\" height=\"42\"/>\n\
+         <text x=\"98\" y=\"62\" font-size=\"18\" font-family=\"'IBMPlexSansThai', 'Liberation Sans', sans-serif\" font-weight=\"bold\" fill=\"#6B21A8\">ASODYA</text>\n\
          {text_elements}\
          {qr_modules}\
          </svg>",
-        *REGULAR_FONT_BASE64, *BOLD_FONT_BASE64
+        *REGULAR_FONT_BASE64, *BOLD_FONT_BASE64, *LOGO_BASE64
     );
     svg.into_bytes()
 }
@@ -909,6 +938,7 @@ pub async fn issue_or_get_certificate(
 pub async fn verify_certificate(
     store: &Store,
     code: &str,
+    accept_language: Option<&str>,
 ) -> Result<PublicCertificateVerification> {
     let row = sqlx::query(
         "SELECT holder_id, attempt_id, verification_code, status, issued_at, revoked_at,
@@ -922,7 +952,26 @@ pub async fn verify_certificate(
     .ok_or_else(Error::missing)?;
 
     let attempt_id: String = row.get("attempt_id");
-    let activity_summary = attempts::load_activity_summary(store, &attempt_id).await?;
+
+    let effective_language: Option<String> = match accept_language.map(str::trim) {
+        Some(l) if !l.is_empty() => Some(l.to_string()),
+        _ => {
+            sqlx::query_scalar(
+                "SELECT qver.language
+                 FROM attempts att
+                 JOIN quiz_version_questions qvq ON qvq.quiz_version_id = att.quiz_version_id
+                 JOIN question_versions qver ON qver.id = qvq.question_version_id
+                 WHERE att.id = $1
+                 LIMIT 1",
+            )
+            .bind(&attempt_id)
+            .fetch_optional(&store.db)
+            .await?
+        }
+    };
+
+    let activity_summary =
+        attempts::load_activity_summary(store, &attempt_id, effective_language.as_deref()).await?;
 
     Ok(PublicCertificateVerification {
         verification_code: row.get("verification_code"),

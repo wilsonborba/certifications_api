@@ -328,6 +328,48 @@ async fn call(
     (status, val)
 }
 
+async fn call_with_lang(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    user: Option<&str>,
+    level: Option<&str>,
+    accept_lang: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut req = Request::builder().method(method).uri(uri);
+    if let Some(u) = user {
+        req = req.header("x-uuid", u);
+    }
+    if let Some(l) = level {
+        req = req.header("x-access-level", l);
+    }
+    if let Some(al) = accept_lang {
+        req = req.header("accept-language", al);
+    }
+    if body.is_some() {
+        req = req.header("content-type", "application/json");
+    }
+    let resp = app
+        .clone()
+        .oneshot(
+            req.body(Body::from(body.map(|v| v.to_string()).unwrap_or_default()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    let val = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, val)
+}
+
 #[tokio::test]
 async fn certificate_identity_idempotent_issuance_snapshot_files_and_revocation() {
     let app = setup_app().await;
@@ -570,6 +612,14 @@ async fn certificate_identity_idempotent_issuance_snapshot_files_and_revocation(
     assert!(!svg_str.contains("page_hidden"));
     assert!(!svg_str.contains("Yes is right"));
 
+    // Purple branding, logo image, ASODYA header, and absence of signature / admin
+    assert!(svg_str.contains("stroke=\"#6B21A8\""));
+    assert!(svg_str.contains("stroke=\"#E9D5FF\""));
+    assert!(svg_str.contains("fill=\"#581C87\""));
+    assert!(svg_str.contains("<image href=\"data:image/png;base64,"));
+    assert!(svg_str.contains(">ASODYA<"));
+    assert!(!svg_str.to_lowercase().contains("signature"));
+
     let pdf_str = extract_pdf_text(&pdf_bytes);
     assert!(pdf_str.contains("Asodya Completion Certificate"));
     assert!(pdf_str.contains("Holder: Ana Silva"));
@@ -578,6 +628,8 @@ async fn certificate_identity_idempotent_issuance_snapshot_files_and_revocation(
     assert!(pdf_str.contains("Date:"));
     assert!(!pdf_str.contains("page_hidden"));
     assert!(!pdf_str.contains("Yes is right"));
+    assert!(pdf_str.contains("ASODYA"));
+    assert!(!pdf_str.to_lowercase().contains("signature"));
 
     // Admin revocation is reflected on public verification.
     let (st, _) = call(
@@ -862,6 +914,74 @@ async fn certificate_qr_and_multilingual_unicode_rendering_en_pt_th() {
     assert!(th_pdf_str.contains("สมชาย ใจดี"));
     assert!(th_pdf_str.contains("แบบทดสอบความรู้พื้นฐาน"));
     assert!(!th_pdf_str.contains("คำอธิบาย"));
+
+    // 3. Activity interpretation note / disclaimer localization:
+    // Thai quiz verification falls back to Thai disclaimer when no Accept-Language header is provided:
+    let (st, th_ver_default) = call(
+        &app,
+        "GET",
+        &format!("/certificates/{th_code}"),
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        th_ver_default["activity_summary"]["disclaimer"],
+        "สรุปวงจรชีวิตของเบราว์เซอร์ที่สังเกตได้เท่านั้น การไม่มีเหตุการณ์หรือการมีสิ่งรบกวนไม่ใช่คำตัดสินว่ามีการทุจริต"
+    );
+
+    // Explicit Accept-Language: th overrides or confirms Thai:
+    let (st, th_ver_header) = call_with_lang(
+        &app,
+        "GET",
+        &format!("/certificates/{th_code}"),
+        None,
+        None,
+        Some("th-TH,th;q=0.9"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        th_ver_header["activity_summary"]["disclaimer"],
+        "สรุปวงจรชีวิตของเบราว์เซอร์ที่สังเกตได้เท่านั้น การไม่มีเหตุการณ์หรือการมีสิ่งรบกวนไม่ใช่คำตัดสินว่ามีการทุจริต"
+    );
+
+    // Explicit Accept-Language: pt returns Portuguese disclaimer:
+    let (st, pt_ver_header) = call_with_lang(
+        &app,
+        "GET",
+        &format!("/certificates/{th_code}"),
+        None,
+        None,
+        Some("pt-BR,pt;q=0.9"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        pt_ver_header["activity_summary"]["disclaimer"],
+        "Resumo do ciclo de vida do navegador observado apenas; a ausência de eventos ou a presença de interrupções não é um veredito de fraude."
+    );
+
+    // Explicit Accept-Language: en returns English disclaimer:
+    let (st, en_ver_header) = call_with_lang(
+        &app,
+        "GET",
+        &format!("/certificates/{th_code}"),
+        None,
+        None,
+        Some("en-US,en;q=0.9"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        en_ver_header["activity_summary"]["disclaimer"],
+        "Observed browser lifecycle summary only; absence of events or presence of interruptions is not a cheating verdict."
+    );
 }
 
 #[tokio::test]
