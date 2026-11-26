@@ -492,7 +492,8 @@ async fn provenance_totals_reconcile_correct_wrong_and_unanswered_memberships() 
             "prompt":"Which option is correct?",
             "alternatives":[{"id":"a","text":"Correct"},{"id":"b","text":"Incorrect"}],
             "correct_id":"a",
-            "explanation":"The first option is correct."
+            "explanation":"The first option is correct.",
+            "citation_ref":"MANAGER_PRIVATE_CITATION_REPRODUCED"
         })),
     )
     .await;
@@ -613,6 +614,37 @@ async fn provenance_totals_reconcile_correct_wrong_and_unanswered_memberships() 
     assert_eq!(st, StatusCode::OK);
     assert_eq!(result["score_correct"], 1);
     assert_eq!(result["score_total"], 3);
+
+    let (st, reviewed) = call(
+        &app,
+        "GET",
+        &format!("/attempts/{attempt_id}/results"),
+        "learner-mixed",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let reused_result = reviewed["questions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|question| question["question_id"] == origin_question_id)
+        .unwrap();
+    assert_eq!(reused_result["citation_ref"], "");
+
+    let (st, origin_questions) = call(
+        &app,
+        "GET",
+        &format!("/studies/{origin_study_id}/questions"),
+        "origin-author",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        origin_questions["items"][0]["citation_ref"],
+        "MANAGER_PRIVATE_CITATION_REPRODUCED"
+    );
 
     let (st, personal) = call(&app, "GET", "/attempts/overview", "learner-mixed", None).await;
     assert_eq!(st, StatusCode::OK);

@@ -27,19 +27,25 @@ use serde_json::{Value, json};
 use sqlx::Row;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use tower::ServiceExt;
 
 struct MockReports {
     restricted: AtomicBool,
+    calls: AtomicUsize,
 }
 
 impl MockReports {
     fn new(restricted: bool) -> Arc<Self> {
         Arc::new(Self {
             restricted: AtomicBool::new(restricted),
+            calls: AtomicUsize::new(0),
         })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
     }
 }
 
@@ -49,6 +55,7 @@ impl ReportsClient for MockReports {
         _user_id: &'a str,
         _project: Option<&'a str>,
     ) -> BoxFuture<'a, CoreResult<Vec<ReportPickerItem>>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { Ok(Vec::new()) })
     }
     fn check_report_access<'a>(
@@ -57,6 +64,7 @@ impl ReportsClient for MockReports {
         project: &'a str,
         report: &'a str,
     ) -> BoxFuture<'a, CoreResult<ReportPickerItem>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         let restricted = self.restricted.load(Ordering::SeqCst);
         Box::pin(async move {
             Ok(ReportPickerItem {
@@ -106,6 +114,7 @@ impl ReportsClient for MockReports {
         _prompt: &'a str,
         _visual_spec: &'a Value,
     ) -> BoxFuture<'a, CoreResult<RenderedVisual>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { Err(CoreError::unavailable()) })
     }
 }
@@ -223,6 +232,31 @@ async fn call_with_language(
         .clone()
         .oneshot(
             req.body(Body::from(body.map(|v| v.to_string()).unwrap_or_default()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let val = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, val)
+}
+
+async fn call_with_access_level(
+    app: &Router,
+    uri: &str,
+    user: &str,
+    access_level: i64,
+) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header("x-uuid", user)
+                .header("x-access-level", access_level.to_string())
+                .body(Body::empty())
                 .unwrap(),
         )
         .await
@@ -1120,18 +1154,98 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
         stats["score_distribution_report_view"]["rows"][0]["score_band"],
         "0% to <50%"
     );
+    let report_view = &stats["score_distribution_report_view"];
     assert_eq!(
-        stats["score_distribution_report_view"]["descriptor"]["meta"]["source"],
+        report_view["visual"],
+        json!({
+            "template": "cert-score-distribution",
+            "version": 1,
+            "mapping": {"bucket": ["score_band"], "attempts": ["attempt_count"]},
+            "options": {}
+        })
+    );
+    assert_eq!(
+        report_view["template_definition"],
+        json!({
+            "template_id": "cert-score-distribution",
+            "version": 1,
+            "kind": "chart",
+            "visual": "bar",
+            "title": report_view["descriptor"]["title"],
+            "slots": [
+                {
+                    "slot_name": "bucket",
+                    "role": "dimension",
+                    "is_required": true,
+                    "min_count": 1,
+                    "max_count": 1,
+                    "accepted_types": ["string"]
+                },
+                {
+                    "slot_name": "attempts",
+                    "role": "measure",
+                    "is_required": true,
+                    "min_count": 1,
+                    "max_count": 2,
+                    "accepted_types": ["integer", "float"]
+                }
+            ],
+            "options": []
+        })
+    );
+    assert_eq!(
+        report_view["template_definition"]["slots"][0]["accepted_types"][0],
+        report_view["descriptor"]["fields"][0]["type"]
+    );
+    assert_eq!(
+        report_view["template_definition"]["slots"][1]["accepted_types"][0],
+        report_view["descriptor"]["fields"][1]["type"]
+    );
+    assert!(report_view["descriptor"]["fields"][1].get("unit").is_none());
+    assert_eq!(
+        report_view["descriptor"]["meta"]["source"],
         "Certifications API"
     );
+    assert_eq!(report_view["descriptor"]["data_tier"], "real");
+    assert_eq!(report_view["descriptor"]["meta"]["tier"], "real");
+    assert_eq!(report_view["descriptor"]["meta"]["freshness_mode"], "live");
+    assert_eq!(report_view["descriptor"]["meta"]["sample_size"], 11);
     assert_eq!(
-        stats["score_distribution_report_view"]["descriptor"]["meta"]["sample_size"],
-        11
-    );
-    assert_eq!(
-        stats["score_distribution_report_view"]["descriptor"]["meta"]["sample_unit"],
+        report_view["descriptor"]["meta"]["sample_unit"],
         "completed_attempts"
     );
+
+    let reports_calls_before_owner_stats = reports.calls();
+    let (st, public_owner_stats) = call(
+        &app,
+        "GET",
+        &format!("/me/quizzes/{quiz_id}/statistics"),
+        Some("author-1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(public_owner_stats, stats);
+    let (st, public_other_owner_stats) = call(
+        &app,
+        "GET",
+        &format!("/me/quizzes/{quiz_id}/statistics"),
+        Some("other-author"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert!(public_other_owner_stats.get("score_distribution").is_none());
+    let (st, public_admin_stats) = call_with_access_level(
+        &app,
+        &format!("/me/quizzes/{quiz_id}/statistics"),
+        "admin-1",
+        1,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(public_admin_stats, stats);
+    assert_eq!(reports.calls(), reports_calls_before_owner_stats);
 
     let (st, pt_stats) = call_with_language(
         &app,
@@ -1146,6 +1260,10 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     assert_eq!(
         pt_stats["score_distribution_report_view"]["descriptor"]["title"],
         "Distribuição das pontuações do questionário"
+    );
+    assert_eq!(
+        pt_stats["score_distribution_report_view"]["template_definition"]["title"],
+        pt_stats["score_distribution_report_view"]["descriptor"]["title"]
     );
     assert_eq!(pt_stats["score_distribution"][0]["score_band"], "0% a <50%");
     assert_eq!(
@@ -1165,6 +1283,10 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     assert_eq!(
         th_stats["score_distribution_report_view"]["descriptor"]["title"],
         "การกระจายคะแนนแบบทดสอบ"
+    );
+    assert_eq!(
+        th_stats["score_distribution_report_view"]["template_definition"]["title"],
+        th_stats["score_distribution_report_view"]["descriptor"]["title"]
     );
     assert_eq!(
         th_stats["score_distribution"][1]["score_band"],
@@ -1215,6 +1337,15 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
         sparse_stats["score_distribution"][0]["score_band"],
         "50% ถึงน้อยกว่า 80%"
     );
+    let (st, public_stats_before_private_transition) = call(
+        &app,
+        "GET",
+        &format!("/quizzes/{quiz_id}/statistics"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
 
     let updated_question_id: String =
         sqlx::query_scalar("SELECT question_id FROM question_versions WHERE id = $1")
@@ -1310,4 +1441,91 @@ async fn catalog_discovery_tags_no_answer_leaks_and_restricted_report_refusal() 
     .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
     assert!(private_stats.get("score_distribution").is_none());
+    let (st, private_stats_with_identity) = call(
+        &app,
+        "GET",
+        &format!("/quizzes/{quiz_id}/statistics"),
+        Some("author-1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert!(
+        private_stats_with_identity
+            .get("score_distribution")
+            .is_none()
+    );
+
+    let (st, missing_identity_stats) = call(
+        &app,
+        "GET",
+        &format!("/me/quizzes/{quiz_id}/statistics"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert!(missing_identity_stats.get("score_distribution").is_none());
+    let doc_store = memory_docs(&store.docs).unwrap();
+    doc_store.reset_read_count();
+    let (st, other_owner_stats) = call(
+        &app,
+        "GET",
+        &format!("/me/quizzes/{quiz_id}/statistics"),
+        Some("other-author"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert!(other_owner_stats.get("score_distribution").is_none());
+    assert_eq!(doc_store.read_count(), 0);
+
+    let reports_calls_before_private_stats = reports.calls();
+    let (st, private_owner_stats) = call(
+        &app,
+        "GET",
+        &format!("/me/quizzes/{quiz_id}/statistics"),
+        Some("author-1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let mut expected_private_stats = public_stats_before_private_transition;
+    expected_private_stats["score_distribution_report_view"]["descriptor"]["visibility"] =
+        json!("restricted");
+    assert_eq!(private_owner_stats, expected_private_stats);
+    assert_eq!(
+        private_owner_stats["score_distribution_report_view"]["descriptor"]["data_tier"],
+        "real"
+    );
+    assert_eq!(
+        private_owner_stats["score_distribution_report_view"]["descriptor"]["meta"]["tier"],
+        "real"
+    );
+    assert_eq!(
+        private_owner_stats["score_distribution_report_view"]["descriptor"]["meta"]["freshness_mode"],
+        "live"
+    );
+    let private_stats_text = private_owner_stats.to_string();
+    for forbidden in [
+        "correct_id",
+        "explanation",
+        "citation_ref",
+        "answer-1",
+        "att-1",
+        "learner-1",
+    ] {
+        assert!(!private_stats_text.contains(forbidden));
+    }
+
+    let (st, private_admin_stats) = call_with_access_level(
+        &app,
+        &format!("/me/quizzes/{quiz_id}/statistics"),
+        "admin-1",
+        1,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(private_admin_stats, expected_private_stats);
+    assert_eq!(reports.calls(), reports_calls_before_private_stats);
 }

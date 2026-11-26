@@ -1,14 +1,14 @@
 use crate::{
     core::{Error, Result, now},
     dal::{
-        Store, new_id,
+        AnyQuery, Store, new_id,
         schemas::{self, DraftSchema, SchemaField},
     },
     domain::{
         auth::{CallerIdentity, require_owner},
         authoring::{ORIGIN_CORTEX, ORIGIN_CREATOR},
         guardrail,
-        provenance::{QuestionProvenanceStats, question_provenance_stats},
+        provenance::{QuestionProvenanceStats, REUSED_PUBLIC_VERSION, question_provenance_stats},
     },
 };
 use serde::{Deserialize, Serialize};
@@ -384,16 +384,16 @@ pub async fn list_my_attempts(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let mut count = sqlx::QueryBuilder::<sqlx::Any>::new(
+    let mut count = AnyQuery::new(
         "SELECT COUNT(*) FROM attempts a JOIN quiz_versions qv ON qv.id = a.quiz_version_id WHERE a.owner_id = ",
     );
-    count.push_bind(&caller.user_id);
+    count.push_bind_text(caller.user_id.clone());
     push_history_filters(&mut count, filter, search, quiz_id, tag);
-    let total: i64 = count.build_query_scalar().fetch_one(&store.db).await?;
+    let total: i64 = count.query().fetch_one(&store.db).await?.try_get(0)?;
 
     let limit = limit.clamp(1, 50);
     let offset = offset.max(0);
-    let mut query = sqlx::QueryBuilder::<sqlx::Any>::new(
+    let mut query = AnyQuery::new(
         "WITH sequenced AS (
              SELECT a.*,
                     ROW_NUMBER() OVER (PARTITION BY quiz_id ORDER BY started_at ASC, id ASC) AS attempt_sequence,
@@ -401,7 +401,7 @@ pub async fn list_my_attempts(
                         OVER (PARTITION BY quiz_id ORDER BY started_at ASC, id ASC) AS previous_attempt_score_pct
              FROM attempts a WHERE a.owner_id = ",
     );
-    query.push_bind(&caller.user_id);
+    query.push_bind_text(caller.user_id.clone());
     query.push(
         ")
          SELECT a.id, a.quiz_id, qv.title AS quiz_title, q.origin AS quiz_origin, a.quiz_version_id,
@@ -413,10 +413,10 @@ pub async fn list_my_attempts(
     push_history_filters(&mut query, filter, search, quiz_id, tag);
     query
         .push(" ORDER BY a.started_at DESC, a.id DESC LIMIT ")
-        .push_bind(limit)
+        .push_bind_i64(limit)
         .push(" OFFSET ")
-        .push_bind(offset);
-    let rows = query.build().fetch_all(&store.db).await?;
+        .push_bind_i64(offset);
+    let rows = query.query().fetch_all(&store.db).await?;
 
     let items = rows
         .into_iter()
@@ -459,33 +459,35 @@ pub async fn list_my_attempts(
     })
 }
 
-fn push_history_filters<'a>(
-    query: &mut sqlx::QueryBuilder<'a, sqlx::Any>,
-    filter: &'a AttemptHistoryFilter,
-    search: Option<&'a str>,
-    quiz_id: Option<&'a str>,
-    tag: Option<&'a str>,
+fn push_history_filters(
+    query: &mut AnyQuery,
+    filter: &AttemptHistoryFilter,
+    search: Option<&str>,
+    quiz_id: Option<&str>,
+    tag: Option<&str>,
 ) {
     if let Some(search) = search {
         query
             .push(" AND LOWER(qv.title) LIKE LOWER(")
-            .push_bind(format!("%{search}%"))
+            .push_bind_text(format!("%{search}%"))
             .push(")");
     }
     if let Some(from) = filter.started_from {
-        query.push(" AND a.started_at >= ").push_bind(from);
+        query.push(" AND a.started_at >= ").push_bind_i64(from);
     }
     if let Some(to) = filter.started_to {
-        query.push(" AND a.started_at <= ").push_bind(to);
+        query.push(" AND a.started_at <= ").push_bind_i64(to);
     }
     if let Some(quiz_id) = quiz_id {
-        query.push(" AND a.quiz_id = ").push_bind(quiz_id);
+        query
+            .push(" AND a.quiz_id = ")
+            .push_bind_text(quiz_id.to_owned());
     }
     if let Some(tag) = tag {
         query.push(
             " AND EXISTS (SELECT 1 FROM quiz_tags qt JOIN tags t ON t.id = qt.tag_id WHERE qt.quiz_id = a.quiz_id AND t.slug = ",
         )
-        .push_bind(tag)
+        .push_bind_text(tag.to_owned())
         .push(")");
     }
 }
@@ -874,6 +876,7 @@ pub async fn get_results(
     let quiz_version_id: String = row.get("quiz_version_id");
     let q_rows = sqlx::query(
         "SELECT qu.id AS question_id, qver.id AS qv_id, qver.language, qu.origin, qver.couch_doc_id,
+                qvq.source_scope,
                 aa.selected_option_id, aa.is_correct
          FROM quiz_version_questions qvq
          JOIN question_versions qver ON qver.id = qvq.question_version_id
@@ -896,6 +899,7 @@ pub async fn get_results(
     for r in q_rows {
         let doc_id: String = r.get("couch_doc_id");
         let origin: String = r.get("origin");
+        let source_scope: String = r.get("source_scope");
         let selected: Option<String> = r.try_get("selected_option_id").ok();
         let doc = store.docs.get(&doc_id).await?;
         let correct_id = doc["correct_id"].as_str().unwrap_or("").to_string();
@@ -924,7 +928,11 @@ pub async fn get_results(
             correct_id,
             is_correct,
             explanation: doc["explanation"].as_str().unwrap_or("").to_string(),
-            citation_ref: doc["citation_ref"].as_str().unwrap_or("").to_string(),
+            citation_ref: if source_scope == REUSED_PUBLIC_VERSION {
+                String::new()
+            } else {
+                doc["citation_ref"].as_str().unwrap_or("").to_string()
+            },
         });
     }
 
