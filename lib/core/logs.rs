@@ -267,6 +267,7 @@ mod tests {
             fsm_key: String::new(),
             cortex_url: String::new(),
             reports_url: String::new(),
+            reports_service_key: String::new(),
             gateway_url: String::new(),
             certifications_service_key: "svc-secret-key".into(),
             clamav: Default::default(),

@@ -189,22 +189,6 @@ async fn load_owned_study_quiz(
     Ok((owner_id, quiz_id.filter(|s| !s.is_empty())))
 }
 
-async fn load_owned_study_quiz_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
-    caller: &CallerIdentity,
-    study_id: &str,
-) -> Result<(String, Option<String>)> {
-    let row = sqlx::query("SELECT owner_id, quiz_id FROM studies WHERE id = $1")
-        .bind(study_id)
-        .fetch_optional(&mut **tx)
-        .await?
-        .ok_or_else(Error::missing)?;
-    let owner_id: String = row.get("owner_id");
-    require_owner(caller, &owner_id)?;
-    let quiz_id: Option<String> = row.get("quiz_id");
-    Ok((owner_id, quiz_id.filter(|s| !s.is_empty())))
-}
-
 async fn ensure_study_quiz(
     store: &Store,
     owner_id: &str,
@@ -1092,6 +1076,17 @@ pub async fn prepare_question_visual_job(
 ) -> Result<PreparedVisualJobResult> {
     let (_owner_id, existing_quiz) = load_owned_study_quiz(store, caller, study_id).await?;
     let quiz_id = existing_quiz.ok_or_else(Error::missing)?;
+    let quiz_visibility: String =
+        sqlx::query_scalar("SELECT visibility FROM quizzes WHERE id = $1")
+            .bind(&quiz_id)
+            .fetch_optional(&store.db)
+            .await?
+            .ok_or_else(Error::missing)?;
+    if quiz_visibility == "public" {
+        return Err(Error::conflict(
+            "quiz_already_published: Cannot mutate visuals on a published quiz",
+        ));
+    }
     let (_, items) = current_quiz_version_questions(store, &quiz_id).await?;
     let item = items
         .iter()
@@ -1197,50 +1192,6 @@ pub async fn upload_question_visual(
         ));
     }
 
-    let job_row = sqlx::query(
-        "SELECT owner_id, study_id, question_id, question_version_id, width, height, scale, expires_at
-         FROM question_visual_jobs WHERE render_job_id = $1",
-    )
-    .bind(&input.render_job_id)
-    .fetch_optional(&store.db)
-    .await?
-    .ok_or_else(|| Error::unprocessable("render_job_not_found: Prepared visual job not found"))?;
-
-    let job_owner_id: String = job_row.get("owner_id");
-    let job_study_id: String = job_row.get("study_id");
-    let job_question_id: String = job_row.get("question_id");
-    let job_qv_id: String = job_row.get("question_version_id");
-    let job_width: i64 = job_row.get("width");
-    let job_height: i64 = job_row.get("height");
-    let job_scale: i64 = job_row.get("scale");
-    let job_expires_at: i64 = job_row.get("expires_at");
-
-    if job_owner_id != caller.user_id {
-        return Err(Error::forbidden(
-            "owner_mismatch: Caller is not the job owner",
-        ));
-    }
-    if job_study_id != study_id {
-        return Err(Error::conflict(
-            "study_mismatch: Job belongs to a different study",
-        ));
-    }
-    if job_question_id != question_id {
-        return Err(Error::conflict(
-            "question_mismatch: Job belongs to a different question",
-        ));
-    }
-    if job_qv_id != input.question_version_id {
-        return Err(Error::conflict(
-            "question_version_mismatch: Job belongs to a different question version",
-        ));
-    }
-    if now() > job_expires_at {
-        return Err(Error::unprocessable(
-            "render_job_expired: Render job has expired",
-        ));
-    }
-
     if input.png_base64.len() > 6 * 1024 * 1024 {
         return Err(Error::unprocessable(
             "payload_too_large: PNG base64 exceeds maximum allowed size",
@@ -1320,40 +1271,9 @@ pub async fn upload_question_visual(
     let header_w = u32::from_be_bytes([raw_bytes[16], raw_bytes[17], raw_bytes[18], raw_bytes[19]]);
     let header_h = u32::from_be_bytes([raw_bytes[20], raw_bytes[21], raw_bytes[22], raw_bytes[23]]);
 
-    let expected_w = (job_width
-        .checked_mul(job_scale)
-        .ok_or_else(|| Error::unprocessable("invalid_dimensions: dimension overflow"))?)
-        as u32;
-    let expected_h = (job_height
-        .checked_mul(job_scale)
-        .ok_or_else(|| Error::unprocessable("invalid_dimensions: dimension overflow"))?)
-        as u32;
-
-    if header_w != expected_w || header_h != expected_h {
-        return Err(Error::unprocessable(format!(
-            "invalid_dimensions: Decoded PNG dimensions ({}x{}) do not match expected descriptor bounds ({}x{})",
-            header_w, header_h, expected_w, expected_h
-        )));
-    }
     if (header_w as u64).saturating_mul(header_h as u64) > 4096 * 4096 {
         return Err(Error::unprocessable(
             "invalid_dimensions: Total decoded pixels exceed 4096*4096",
-        ));
-    }
-
-    if input.expected_width.is_some_and(|ew| ew != job_width) {
-        return Err(Error::unprocessable(
-            "expected_width_mismatch: Client expected_width does not match job descriptor",
-        ));
-    }
-    if input.expected_height.is_some_and(|eh| eh != job_height) {
-        return Err(Error::unprocessable(
-            "expected_height_mismatch: Client expected_height does not match job descriptor",
-        ));
-    }
-    if input.expected_scale.is_some_and(|es| es != job_scale) {
-        return Err(Error::unprocessable(
-            "expected_scale_mismatch: Client expected_scale does not match job descriptor",
         ));
     }
 
@@ -1372,66 +1292,40 @@ pub async fn upload_question_visual(
     let payload_sha256 = format!("{:x}", hasher.finalize());
 
     let visual_id = format!("vis_{}", input.render_job_id);
-    let ref_key = format!("visuals/{job_qv_id}/{}.png", new_id());
-    let fsm_ref = store.fsm.put_bytes(&ref_key, &raw_bytes).await?;
 
-    let mut tx = store.db.begin().await?;
-
-    let (_owner_id, existing_quiz) = load_owned_study_quiz_in_tx(&mut tx, caller, study_id).await?;
-    let quiz_id = match existing_quiz {
-        Some(qid) => qid,
-        None => {
-            let _ = store.fsm.delete_ref(&fsm_ref).await;
-            return Err(Error::missing());
-        }
-    };
-    let (_, items) = current_quiz_version_questions_in_tx(&mut tx, &quiz_id).await?;
-    let item = match items.iter().find(|item| item.question_id == question_id) {
-        Some(it) => it,
-        None => {
-            let _ = store.fsm.delete_ref(&fsm_ref).await;
-            return Err(Error::missing());
-        }
-    };
-    if item.source_scope == REUSED_PUBLIC_VERSION {
-        let _ = store.fsm.delete_ref(&fsm_ref).await;
-        return Err(Error::conflict(
-            "reused_question_immutable: Visuals cannot be added to a publicly reused question version",
-        ));
-    }
-    if item.question_version_id != job_qv_id {
-        let _ = store.fsm.delete_ref(&fsm_ref).await;
-        return Err(Error::conflict(
-            "conflict: question_version_id does not match current question version",
-        ));
-    }
-
-    let existing: Option<(String, String, String, String, String, i64)> = sqlx::query_as(
+    // 1. Early check for durable identical replay: does not require active temporary job nor another FSM upload.
+    let existing_visual: Option<(String, String, String, String, String, i64)> = sqlx::query_as(
         "SELECT id, question_version_id, fsm_ref, mime_type, payload_sha256, created_at FROM question_visuals WHERE id = $1",
     )
     .bind(&visual_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&store.db)
     .await?;
 
-    if let Some((ex_id, ex_qv, ex_fsm, ex_mime, ex_hash, ex_ts)) = existing {
-        if ex_qv != job_qv_id {
-            let _ = store.fsm.delete_ref(&fsm_ref).await;
+    if let Some((ex_id, ex_qv, ex_fsm, ex_mime, ex_hash, ex_ts)) = existing_visual {
+        let (owner_id, _) = load_owned_study_quiz(store, caller, study_id).await?;
+        require_owner(caller, &owner_id)?;
+        if ex_qv != input.question_version_id {
             return Err(Error::conflict(
                 "conflict: render_job_id already used for different question version",
             ));
         }
         if ex_hash != payload_sha256 {
-            let _ = store.fsm.delete_ref(&fsm_ref).await;
             return Err(Error::conflict(
                 "conflict: conflicting PNG payload for same visual render job",
             ));
         }
-        tx.commit().await?;
-        let _ = store.fsm.delete_ref(&fsm_ref).await;
-        let _ = store
+        let cleanup_res = store
             .reports
             .delete_render_job(&caller.user_id, &input.render_job_id, true)
             .await;
+        if cleanup_res.is_ok() {
+            let _ = sqlx::query(
+                "UPDATE question_visual_jobs SET cleanup_status = 'cleaned', cleanup_error = '' WHERE render_job_id = $1",
+            )
+            .bind(&input.render_job_id)
+            .execute(&store.db)
+            .await;
+        }
         return Ok(QuestionVisual {
             id: ex_id,
             fsm_ref: ex_fsm,
@@ -1440,6 +1334,189 @@ pub async fn upload_question_visual(
         });
     }
 
+    // 2. Validate prepared render job descriptor
+    let job_row = sqlx::query(
+        "SELECT owner_id, study_id, question_id, question_version_id, width, height, scale, expires_at
+         FROM question_visual_jobs WHERE render_job_id = $1",
+    )
+    .bind(&input.render_job_id)
+    .fetch_optional(&store.db)
+    .await?
+    .ok_or_else(|| Error::unprocessable("render_job_not_found: Prepared visual job not found"))?;
+
+    let job_owner_id: String = job_row.get("owner_id");
+    let job_study_id: String = job_row.get("study_id");
+    let job_question_id: String = job_row.get("question_id");
+    let job_qv_id: String = job_row.get("question_version_id");
+    let job_width: i64 = job_row.get("width");
+    let job_height: i64 = job_row.get("height");
+    let job_scale: i64 = job_row.get("scale");
+    let job_expires_at: i64 = job_row.get("expires_at");
+
+    if job_owner_id != caller.user_id {
+        return Err(Error::forbidden(
+            "owner_mismatch: Caller is not the job owner",
+        ));
+    }
+    if job_study_id != study_id {
+        return Err(Error::conflict(
+            "study_mismatch: Job belongs to a different study",
+        ));
+    }
+    if job_question_id != question_id {
+        return Err(Error::conflict(
+            "question_mismatch: Job belongs to a different question",
+        ));
+    }
+    if job_qv_id != input.question_version_id {
+        return Err(Error::conflict(
+            "question_version_mismatch: Job belongs to a different question version",
+        ));
+    }
+    if now() > job_expires_at {
+        return Err(Error::unprocessable(
+            "render_job_expired: Render job has expired",
+        ));
+    }
+
+    let expected_w = (job_width
+        .checked_mul(job_scale)
+        .ok_or_else(|| Error::unprocessable("invalid_dimensions: dimension overflow"))?)
+        as u32;
+    let expected_h = (job_height
+        .checked_mul(job_scale)
+        .ok_or_else(|| Error::unprocessable("invalid_dimensions: dimension overflow"))?)
+        as u32;
+
+    if header_w != expected_w || header_h != expected_h {
+        return Err(Error::unprocessable(format!(
+            "invalid_dimensions: Decoded PNG dimensions ({}x{}) do not match expected descriptor bounds ({}x{})",
+            header_w, header_h, expected_w, expected_h
+        )));
+    }
+
+    if input.expected_width.is_some_and(|ew| ew != job_width) {
+        return Err(Error::unprocessable(
+            "expected_width_mismatch: Client expected_width does not match job descriptor",
+        ));
+    }
+    if input.expected_height.is_some_and(|eh| eh != job_height) {
+        return Err(Error::unprocessable(
+            "expected_height_mismatch: Client expected_height does not match job descriptor",
+        ));
+    }
+    if input.expected_scale.is_some_and(|es| es != job_scale) {
+        return Err(Error::unprocessable(
+            "expected_scale_mismatch: Client expected_scale does not match job descriptor",
+        ));
+    }
+
+    // 3. Row-locking transaction on study and quiz BEFORE FSM upload
+    let mut tx = store.db.begin().await?;
+
+    let lifecycle_query = if store.postgres() {
+        "SELECT owner_id, quiz_id, status, expires_at FROM studies WHERE id = $1 FOR UPDATE"
+    } else {
+        "SELECT owner_id, quiz_id, status, expires_at FROM studies WHERE id = $1"
+    };
+    let lifecycle = sqlx::query(lifecycle_query)
+        .bind(study_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(Error::missing)?;
+    let owner_id: String = lifecycle.get("owner_id");
+    require_owner(caller, &owner_id)?;
+    let study_status: String = lifecycle.get("status");
+    if study_status == "expired" {
+        return Err(Error(
+            axum::http::StatusCode::GONE,
+            "study_expired: Study draft expired".into(),
+        ));
+    }
+
+    let quiz_id = match lifecycle.try_get::<String, _>("quiz_id").ok().filter(|s| !s.is_empty()) {
+        Some(qid) => qid,
+        None => return Err(Error::missing()),
+    };
+
+    let quiz_query = if store.postgres() {
+        "SELECT owner_id, visibility, active_version_id FROM quizzes WHERE id = $1 FOR UPDATE"
+    } else {
+        "SELECT owner_id, visibility, active_version_id FROM quizzes WHERE id = $1"
+    };
+    let quiz_row = sqlx::query(quiz_query)
+        .bind(&quiz_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(Error::missing)?;
+    let quiz_visibility: String = quiz_row.get("visibility");
+    if quiz_visibility == "public" {
+        return Err(Error::conflict(
+            "quiz_already_published: Cannot mutate visuals on a published quiz",
+        ));
+    }
+
+    let (_, items) = current_quiz_version_questions_in_tx(&mut tx, &quiz_id).await?;
+    let item = match items.iter().find(|item| item.question_id == question_id) {
+        Some(it) => it,
+        None => return Err(Error::missing()),
+    };
+    if item.source_scope == REUSED_PUBLIC_VERSION {
+        return Err(Error::conflict(
+            "reused_question_immutable: Visuals cannot be added to a publicly reused question version",
+        ));
+    }
+    if item.question_version_id != job_qv_id {
+        return Err(Error::conflict(
+            "conflict: question_version_id does not match current question version",
+        ));
+    }
+
+    // In-transaction check for concurrent insert race
+    let in_tx_existing: Option<(String, String, String, String, String, i64)> = sqlx::query_as(
+        "SELECT id, question_version_id, fsm_ref, mime_type, payload_sha256, created_at FROM question_visuals WHERE id = $1",
+    )
+    .bind(&visual_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if let Some((ex_id, ex_qv, ex_fsm, ex_mime, ex_hash, ex_ts)) = in_tx_existing {
+        if ex_qv != job_qv_id {
+            return Err(Error::conflict(
+                "conflict: render_job_id already used for different question version",
+            ));
+        }
+        if ex_hash != payload_sha256 {
+            return Err(Error::conflict(
+                "conflict: conflicting PNG payload for same visual render job",
+            ));
+        }
+        tx.commit().await?;
+        let cleanup_res = store
+            .reports
+            .delete_render_job(&caller.user_id, &input.render_job_id, true)
+            .await;
+        if cleanup_res.is_ok() {
+            let _ = sqlx::query(
+                "UPDATE question_visual_jobs SET cleanup_status = 'cleaned', cleanup_error = '' WHERE render_job_id = $1",
+            )
+            .bind(&input.render_job_id)
+            .execute(&store.db)
+            .await;
+        }
+        return Ok(QuestionVisual {
+            id: ex_id,
+            fsm_ref: ex_fsm,
+            mime_type: ex_mime,
+            created_at: ex_ts,
+        });
+    }
+
+    // 4. Upload blob to FSM
+    let ref_key = format!("visuals/{job_qv_id}/{}.png", new_id());
+    let fsm_ref = store.fsm.put_bytes(&ref_key, &raw_bytes).await?;
+
+    // 5. Persist visual in question_visuals
     let ts = now();
     let insert_res = sqlx::query(
         "INSERT INTO question_visuals(id, question_version_id, fsm_ref, mime_type, payload_sha256, created_at)
@@ -1454,14 +1531,48 @@ pub async fn upload_question_visual(
     .execute(&mut *tx)
     .await;
 
-    if let Err(err) = insert_res {
+    if let Err(_insert_err) = insert_res {
+        let _ = tx.rollback().await;
+        // Compensate newly uploaded blob outside SQL transaction
         let _ = store.fsm.delete_ref(&fsm_ref).await;
-        return Err(Error::bad(format!("visual_insert_failed: {}", err)));
+
+        // Check if concurrent race already inserted identical visual
+        let race_existing: Option<(String, String, String, String, String, i64)> = sqlx::query_as(
+            "SELECT id, question_version_id, fsm_ref, mime_type, payload_sha256, created_at FROM question_visuals WHERE id = $1",
+        )
+        .bind(&visual_id)
+        .fetch_optional(&store.db)
+        .await?;
+
+        if let Some((ex_id, ex_qv, ex_fsm, ex_mime, ex_hash, ex_ts)) = race_existing {
+            if ex_qv == job_qv_id && ex_hash == payload_sha256 {
+                let cleanup_res = store
+                    .reports
+                    .delete_render_job(&caller.user_id, &input.render_job_id, true)
+                    .await;
+                if cleanup_res.is_ok() {
+                    let _ = sqlx::query(
+                        "UPDATE question_visual_jobs SET cleanup_status = 'cleaned', cleanup_error = '' WHERE render_job_id = $1",
+                    )
+                    .bind(&input.render_job_id)
+                    .execute(&store.db)
+                    .await;
+                }
+                return Ok(QuestionVisual {
+                    id: ex_id,
+                    fsm_ref: ex_fsm,
+                    mime_type: ex_mime,
+                    created_at: ex_ts,
+                });
+            }
+            return Err(Error::conflict("visual_conflict: Conflicting visual payload or version"));
+        }
+        return Err(Error::bad("visual_insert_failed: Could not persist question visual"));
     }
 
-    if let Err(err) = tx.commit().await {
+    if let Err(commit_err) = tx.commit().await {
         let _ = store.fsm.delete_ref(&fsm_ref).await;
-        return Err(err.into());
+        return Err(commit_err.into());
     }
 
     let cleanup_res = store
@@ -1472,7 +1583,7 @@ pub async fn upload_question_visual(
     match cleanup_res {
         Ok(_) => {
             let _ = sqlx::query(
-                "UPDATE question_visual_jobs SET cleanup_status = 'cleaned' WHERE render_job_id = $1",
+                "UPDATE question_visual_jobs SET cleanup_status = 'cleaned', cleanup_error = '' WHERE render_job_id = $1",
             )
             .bind(&input.render_job_id)
             .execute(&store.db)

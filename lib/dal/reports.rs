@@ -235,6 +235,7 @@ impl ReportsClient for DisabledReports {
 
 pub struct HttpReports {
     base_url: String,
+    service_key: String,
     http: reqwest::Client,
 }
 
@@ -243,13 +244,14 @@ impl HttpReports {
     const MAX_DATASET_ROWS: usize = 5000;
     const DATASET_PAGE_ROWS: usize = 5000;
     const MAX_DATASET_BYTES: usize = 25 * 1024 * 1024;
-    pub fn client(base_url: &str, http: reqwest::Client) -> Arc<dyn ReportsClient> {
+    pub fn client(base_url: &str, service_key: &str, http: reqwest::Client) -> Arc<dyn ReportsClient> {
         let base = base_url.trim().trim_end_matches('/');
         if base.is_empty() {
             return Arc::new(DisabledReports);
         }
         Arc::new(Self {
             base_url: base.to_string(),
+            service_key: service_key.trim().to_string(),
             http,
         })
     }
@@ -643,10 +645,14 @@ impl ReportsClient for HttpReports {
         input: &'a CreateRenderJobInput,
     ) -> BoxFuture<'a, Result<RenderJobDescriptor>> {
         Box::pin(async move {
-            let resp = self
+            let mut req = self
                 .http
                 .post(format!("{}/render_jobs", self.base_url))
-                .header("x-uuid", user_id)
+                .header("x-uuid", user_id);
+            if !self.service_key.is_empty() {
+                req = req.header("x-reports-service-key", &self.service_key);
+            }
+            let resp = req
                 .json(input)
                 .send()
                 .await
@@ -667,13 +673,17 @@ impl ReportsClient for HttpReports {
         confirmed: bool,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let resp = self
+            let mut req = self
                 .http
                 .delete(format!(
                     "{}/render_jobs/{}?confirmed={}",
                     self.base_url, job_id, confirmed
                 ))
-                .header("x-uuid", user_id)
+                .header("x-uuid", user_id);
+            if !self.service_key.is_empty() {
+                req = req.header("x-reports-service-key", &self.service_key);
+            }
+            let resp = req
                 .send()
                 .await
                 .map_err(|_| Error::unavailable())?;

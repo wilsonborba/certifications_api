@@ -121,6 +121,7 @@ fn test_settings() -> Settings {
         cortex_url: String::new(),
         reports_url: String::new(),
         gateway_url: String::new(),
+        reports_service_key: String::new(),
         certifications_service_key: String::new(),
         clamav: Default::default(),
     }
@@ -791,4 +792,378 @@ async fn create_question_rejects_visual_spec_without_side_effects() {
         qver_count_before, qver_count_after,
         "no quiz_version rows created"
     );
+}
+
+#[tokio::test]
+async fn test_schema_016_upgrade_preserves_historical_visuals_with_unknown_payload_sha256() {
+    sqlx::any::install_default_drivers();
+    let pool = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+
+    // Run historical baseline migrations up to 004 (which has question_visuals without payload_sha256)
+    for migration in &certifications_api::dal::SQLITE_MIGRATIONS[..4] {
+        sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+    }
+
+    // Insert baseline schema_version, question and question_version
+    sqlx::query("INSERT INTO schema_versions(schema_name, version, status, description, created_at, published_at) VALUES('question', 1, 'published', '', 1, 1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO questions(id, owner_id, origin, created_at) VALUES('q1', 'u1', 'supplied_by_creator', 1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO question_versions(id, question_id, version_num, language, schema_name, schema_version, couch_doc_id, created_at) VALUES('qv1', 'q1', 1, 'en', 'question', 1, 'doc1', 1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Insert historical question_visual row without payload_sha256 column
+    sqlx::query("INSERT INTO question_visuals(id, question_version_id, fsm_ref, mime_type, created_at) VALUES('vis-hist-1', 'qv1', 'visuals/qv1/blob1.png', 'image/png', 1000)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Run remaining migrations up to 016
+    for migration in &certifications_api::dal::SQLITE_MIGRATIONS[4..] {
+        sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+    }
+
+    // Verify existing row survived and payload_sha256 defaulted to 'unknown' (not empty SHA)
+    let (id, payload_sha256, fsm_ref): (String, String, String) = sqlx::query_as(
+        "SELECT id, payload_sha256, fsm_ref FROM question_visuals WHERE id = 'vis-hist-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(id, "vis-hist-1");
+    assert_eq!(payload_sha256, "unknown");
+    assert_eq!(fsm_ref, "visuals/qv1/blob1.png");
+}
+
+#[tokio::test]
+async fn test_visual_publication_serialization_and_rejection() {
+    let (app, store, _) = setup_app().await;
+
+    let (st, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        "author-pub-guard",
+        None,
+        Some(json!({ "title": "Publication Guard Study" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sid = study["id"].as_str().unwrap().to_string();
+
+    let (st, question) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions"),
+        "author-pub-guard",
+        None,
+        Some(json!({
+            "language": "en",
+            "prompt": "Test publication lock",
+            "alternatives": [
+                { "id": "a", "text": "1" },
+                { "id": "b", "text": "2" }
+            ],
+            "correct_id": "a",
+            "explanation": "Exp"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let qid = question["id"].as_str().unwrap().to_string();
+    let qv_id = question["version_id"].as_str().unwrap().to_string();
+
+    // Prepare visual job while private
+    let (st, prep) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visual_jobs"),
+        "author-pub-guard",
+        None,
+        Some(json!({
+            "template_id": "chart_template",
+            "template_version": 1,
+            "mapping": {},
+            "config": {},
+            "rows": [],
+            "width": 800,
+            "height": 480,
+            "scale": 2,
+            "ttl_seconds": 600
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let job_id = prep["render_job"]["job_id"].as_str().unwrap().to_string();
+
+    // Publish the quiz directly
+    sqlx::query("UPDATE quizzes SET visibility = 'public' WHERE study_id = $1")
+        .bind(&sid)
+        .execute(&store.db)
+        .await
+        .unwrap();
+
+    // Stage 1 prepare visual job must fail with 409 quiz_already_published
+    let (st, resp) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visual_jobs"),
+        "author-pub-guard",
+        None,
+        Some(json!({
+            "template_id": "chart_template",
+            "template_version": 1,
+            "mapping": {},
+            "config": {},
+            "rows": [],
+            "width": 800,
+            "height": 480,
+            "scale": 2,
+            "ttl_seconds": 600
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert!(resp["error"].as_str().unwrap_or_default().contains("quiz_already_published"));
+
+    // Stage 2 visual upload must also fail with 409 quiz_already_published
+    let valid_png = make_test_png(1600, 960);
+    let (st, resp) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-pub-guard",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert!(resp["error"].as_str().unwrap_or_default().contains("quiz_already_published"));
+}
+
+#[tokio::test]
+async fn test_visual_concurrent_identical_replay_without_active_job() {
+    let (app, store, _) = setup_app().await;
+
+    let (st, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        "author-replay",
+        None,
+        Some(json!({ "title": "Replay Study" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sid = study["id"].as_str().unwrap().to_string();
+
+    let (st, question) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions"),
+        "author-replay",
+        None,
+        Some(json!({
+            "language": "en",
+            "prompt": "Test replay",
+            "alternatives": [
+                { "id": "a", "text": "1" },
+                { "id": "b", "text": "2" }
+            ],
+            "correct_id": "a",
+            "explanation": "Exp"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let qid = question["id"].as_str().unwrap().to_string();
+    let qv_id = question["version_id"].as_str().unwrap().to_string();
+
+    let (st, prep) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visual_jobs"),
+        "author-replay",
+        None,
+        Some(json!({
+            "template_id": "chart_template",
+            "template_version": 1,
+            "mapping": {},
+            "config": {},
+            "rows": [],
+            "width": 800,
+            "height": 480,
+            "scale": 2,
+            "ttl_seconds": 600
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let job_id = prep["render_job"]["job_id"].as_str().unwrap().to_string();
+
+    let valid_png = make_test_png(1600, 960);
+    let (st, vis_first) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-replay",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let first_vis_id = vis_first["id"].as_str().unwrap().to_string();
+
+    // Expire/delete temporary job record
+    sqlx::query("DELETE FROM question_visual_jobs WHERE render_job_id = $1")
+        .bind(&job_id)
+        .execute(&store.db)
+        .await
+        .unwrap();
+
+    // Replay identical upload: should succeed with existing visual receipt even without active job
+    let (st, vis_replay) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-replay",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(vis_replay["id"], first_vis_id);
+}
+
+#[tokio::test]
+async fn test_visual_fsm_compensation_outside_sql_transaction() {
+    let (app, store, fsm) = setup_app().await;
+
+    let (st, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        "author-compensate",
+        None,
+        Some(json!({ "title": "Compensation Study" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sid = study["id"].as_str().unwrap().to_string();
+
+    let (st, question) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions"),
+        "author-compensate",
+        None,
+        Some(json!({
+            "language": "en",
+            "prompt": "Test compensation",
+            "alternatives": [
+                { "id": "a", "text": "1" },
+                { "id": "b", "text": "2" }
+            ],
+            "correct_id": "a",
+            "explanation": "Exp"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let qid = question["id"].as_str().unwrap().to_string();
+    let qv_id = question["version_id"].as_str().unwrap().to_string();
+
+    let (st, prep) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visual_jobs"),
+        "author-compensate",
+        None,
+        Some(json!({
+            "template_id": "chart_template",
+            "template_version": 1,
+            "mapping": {},
+            "config": {},
+            "rows": [],
+            "width": 800,
+            "height": 480,
+            "scale": 2,
+            "ttl_seconds": 600
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let job_id = prep["render_job"]["job_id"].as_str().unwrap().to_string();
+
+    let puts_before = fsm.put_count();
+
+    // Create trigger that forces INSERT on question_visuals to fail
+    sqlx::query("CREATE TRIGGER abort_qv_insert BEFORE INSERT ON question_visuals BEGIN SELECT RAISE(ABORT, 'forced insert failure'); END;")
+        .execute(&store.db)
+        .await
+        .unwrap();
+
+    let valid_png = make_test_png(1600, 960);
+    let (st, err_resp) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-compensate",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+
+    // Must return 400 with sanitized message, not raw database error
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(err_resp["error"], "visual_insert_failed");
+
+    // Verify FSM put was attempted, but compensated (deleted) so no orphan blob remains
+    let puts_after = fsm.put_count();
+    assert_eq!(puts_after, puts_before + 1);
+
+    // Drop trigger
+    sqlx::query("DROP TRIGGER abort_qv_insert;")
+        .execute(&store.db)
+        .await
+        .unwrap();
 }
