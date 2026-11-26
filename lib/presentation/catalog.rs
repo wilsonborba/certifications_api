@@ -31,6 +31,7 @@ pub fn routes() -> Router<App> {
             "/me/quizzes/{quiz_id}/statistics",
             get(get_my_quiz_statistics),
         )
+        .route("/me/quizzes/{quiz_id}/summary", get(get_my_quiz_summary))
         .route("/studies/{study_id}/tags/suggestions", get(suggest_tags))
         .route("/studies/{study_id}/publication", post(publish_quiz))
 }
@@ -86,6 +87,15 @@ async fn get_my_quiz_statistics(
         .and_then(|value| value.to_str().ok());
     let stats = catalog::get_owner_quiz_statistics(&app.store, &caller, &quiz_id, language).await?;
     Ok(Json(json!(stats)))
+}
+
+async fn get_my_quiz_summary(
+    State(app): State<App>,
+    SessionUser(caller): SessionUser,
+    Path(quiz_id): Path<String>,
+) -> Result<Json<Value>> {
+    let summary = catalog::get_owner_quiz_summary(&app.store, &caller, &quiz_id).await?;
+    Ok(Json(json!(summary)))
 }
 
 async fn suggest_tags(
