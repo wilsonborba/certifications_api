@@ -2145,7 +2145,10 @@ fn selection_grammar_validates_pages_passages_and_ms_intervals() {
 async fn prepared_study_preserves_external_ref_and_rejects_oversized() {
     let mut store = Store::fixture().await;
     let fsm = MemoryFsm::new();
-    fsm.seed("annotations/u1/file-ext", b"sample content for external ref test");
+    fsm.seed(
+        "annotations/u1/file-ext",
+        b"sample content for external ref test",
+    );
     store.fsm = fsm.clone() as Arc<dyn certifications_api::dal::fsm::FsmClient>;
 
     let mut settings = test_settings();
@@ -2158,7 +2161,8 @@ async fn prepared_study_preserves_external_ref_and_rejects_oversized() {
     });
 
     // Valid external_ref round-trips
-    let canonical_ref = "annotations:note:018f9210e7b47000832049e29a990001:typed:018f9210e7b47000832049e29a990002";
+    let canonical_ref =
+        "annotations:note:018f9210e7b47000832049e29a990001:typed:018f9210e7b47000832049e29a990002";
     let (st, prepared) = call_with_service_key(
         &app,
         "POST",

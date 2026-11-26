@@ -399,7 +399,10 @@ async fn reports_render_job_sends_trusted_service_key_and_dataset_query_does_not
         originating_scope: None,
     };
 
-    let desc = client.create_render_job("author-owner", &input).await.unwrap();
+    let desc = client
+        .create_render_job("author-owner", &input)
+        .await
+        .unwrap();
     assert_eq!(desc.job_id, "job-123");
     assert_eq!(
         auth_seen_clone.render_job_key.lock().unwrap().as_deref(),
@@ -410,7 +413,10 @@ async fn reports_render_job_sends_trusted_service_key_and_dataset_query_does_not
         Some("author-owner")
     );
 
-    client.delete_render_job("author-owner", "job-123", true).await.unwrap();
+    client
+        .delete_render_job("author-owner", "job-123", true)
+        .await
+        .unwrap();
     assert_eq!(
         auth_seen_clone.delete_job_key.lock().unwrap().as_deref(),
         Some("trusted-reports-secret-999")
@@ -420,12 +426,12 @@ async fn reports_render_job_sends_trusted_service_key_and_dataset_query_does_not
         Some("author-owner")
     );
 
-    let mat = client.fetch_report_dataset("author-owner", "p", "r", "d").await.unwrap();
+    let mat = client
+        .fetch_report_dataset("author-owner", "p", "r", "d")
+        .await
+        .unwrap();
     assert_eq!(mat.row_count, 1);
-    assert_eq!(
-        auth_seen_clone.dataset_key.lock().unwrap().as_deref(),
-        None
-    );
+    assert_eq!(auth_seen_clone.dataset_key.lock().unwrap().as_deref(), None);
 
     server.abort();
 }

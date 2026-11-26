@@ -244,7 +244,11 @@ impl HttpReports {
     const MAX_DATASET_ROWS: usize = 5000;
     const DATASET_PAGE_ROWS: usize = 5000;
     const MAX_DATASET_BYTES: usize = 25 * 1024 * 1024;
-    pub fn client(base_url: &str, service_key: &str, http: reqwest::Client) -> Arc<dyn ReportsClient> {
+    pub fn client(
+        base_url: &str,
+        service_key: &str,
+        http: reqwest::Client,
+    ) -> Arc<dyn ReportsClient> {
         let base = base_url.trim().trim_end_matches('/');
         if base.is_empty() {
             return Arc::new(DisabledReports);
@@ -683,10 +687,7 @@ impl ReportsClient for HttpReports {
             if !self.service_key.is_empty() {
                 req = req.header("x-reports-service-key", &self.service_key);
             }
-            let resp = req
-                .send()
-                .await
-                .map_err(|_| Error::unavailable())?;
+            let resp = req.send().await.map_err(|_| Error::unavailable())?;
             if !resp.status().is_success() && resp.status() != StatusCode::NOT_FOUND {
                 return Err(Error::unavailable());
             }

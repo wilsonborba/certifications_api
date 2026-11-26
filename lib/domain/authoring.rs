@@ -1,8 +1,8 @@
 use crate::{
-    core::{now, Error, Result},
-    dal::{new_id, Store},
+    core::{Error, Result, now},
+    dal::{Store, new_id},
     domain::{
-        auth::{require_owner, CallerIdentity},
+        auth::{CallerIdentity, require_owner},
         catalog::{self, public_question_version_sources_in_tx},
         generations::{QUESTION_SCHEMA_NAME, QUESTION_SCHEMA_VERSION},
         guardrail,
@@ -10,7 +10,7 @@ use crate::{
     },
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sqlx::Row;
 use std::collections::HashSet;
 

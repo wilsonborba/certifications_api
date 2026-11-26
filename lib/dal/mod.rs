@@ -86,7 +86,11 @@ impl Store {
                 Some(std::path::PathBuf::from(&settings.clamav.certs_dir)),
             )),
             cortex: cortex::HttpCortex::client(&settings.cortex_url, http.clone()),
-            reports: reports::HttpReports::client(&settings.reports_url, &settings.reports_service_key, http),
+            reports: reports::HttpReports::client(
+                &settings.reports_url,
+                &settings.reports_service_key,
+                http,
+            ),
         })
     }
 
