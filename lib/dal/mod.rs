@@ -18,7 +18,7 @@ pub(crate) enum DatabaseBackend {
     Sqlite,
 }
 
-pub const SQLITE_MIGRATIONS: [&str; 15] = [
+pub const SQLITE_MIGRATIONS: [&str; 16] = [
     include_str!("../../migrations/001_v2_schema.sql"),
     include_str!("../../tests/sqlite/002_v2_studies_sources.sql"),
     include_str!("../../tests/sqlite/003_v2_generation_events.sql"),
@@ -34,6 +34,7 @@ pub const SQLITE_MIGRATIONS: [&str; 15] = [
     include_str!("../../tests/sqlite/013_v2_generation_source_external_ref.sql"),
     include_str!("../../tests/sqlite/014_v2_report_source_snapshot.sql"),
     include_str!("../../tests/sqlite/015_v2_one_active_generation_per_owner.sql"),
+    include_str!("../../tests/sqlite/016_v2_question_visual_jobs.sql"),
 ];
 
 #[derive(Clone)]
@@ -85,7 +86,7 @@ impl Store {
                 Some(std::path::PathBuf::from(&settings.clamav.certs_dir)),
             )),
             cortex: cortex::HttpCortex::client(&settings.cortex_url, http.clone()),
-            reports: reports::HttpReports::client(&settings.reports_url, http),
+            reports: reports::HttpReports::client(&settings.reports_url, &settings.reports_service_key, http),
         })
     }
 

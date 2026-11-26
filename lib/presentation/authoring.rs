@@ -8,7 +8,7 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::StatusCode,
     routing::{get, patch, post},
 };
@@ -21,11 +21,6 @@ struct CsvImportBody {
     #[serde(default)]
     confirm: bool,
     origin: Option<Value>,
-}
-
-#[derive(Deserialize)]
-struct VisualRenderBody {
-    visual_spec: Value,
 }
 
 pub fn routes() -> Router<App> {
@@ -44,8 +39,20 @@ pub fn routes() -> Router<App> {
             patch(update_question).delete(remove_question),
         )
         .route(
+            "/studies/{study_id}/questions/{question_id}/visual_jobs",
+            post(prepare_visual_job),
+        )
+        .route(
+            "/studies/{study_id}/questions/{question_id}/visuals",
+            post(upload_visual).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route(
+            "/studies/{study_id}/questions/{question_id}/visuals/{visual_id}",
+            get(get_question_visual),
+        )
+        .route(
             "/studies/{study_id}/questions/{question_id}/visual",
-            post(render_visual),
+            post(legacy_visual_reject),
         )
 }
 
@@ -119,19 +126,53 @@ async fn import_questions(
     Ok(Json(json!(res)))
 }
 
-async fn render_visual(
+async fn prepare_visual_job(
     State(app): State<App>,
     SessionUser(caller): SessionUser,
     Path((study_id, question_id)): Path<(String, String)>,
-    Json(body): Json<VisualRenderBody>,
+    Json(body): Json<authoring::PrepareVisualJobInput>,
 ) -> Result<(StatusCode, Json<Value>)> {
-    let v = authoring::render_question_visual(
-        &app.store,
-        &caller,
-        &study_id,
-        &question_id,
-        body.visual_spec,
-    )
-    .await?;
+    let res =
+        authoring::prepare_question_visual_job(&app.store, &caller, &study_id, &question_id, body)
+            .await?;
+    Ok((StatusCode::CREATED, Json(json!(res))))
+}
+
+async fn upload_visual(
+    State(app): State<App>,
+    SessionUser(caller): SessionUser,
+    Path((study_id, question_id)): Path<(String, String)>,
+    Json(body): Json<authoring::UploadVisualInput>,
+) -> Result<(StatusCode, Json<Value>)> {
+    let v = authoring::upload_question_visual(&app.store, &caller, &study_id, &question_id, body)
+        .await?;
     Ok((StatusCode::CREATED, Json(json!(v))))
+}
+
+async fn get_question_visual(
+    State(app): State<App>,
+    SessionUser(caller): SessionUser,
+    Path((study_id, question_id, visual_id)): Path<(String, String, String)>,
+) -> Result<axum::response::Response> {
+    let (bytes, mime_type) =
+        authoring::get_question_visual(&app.store, &caller, &study_id, &question_id, &visual_id)
+            .await?;
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, mime_type)
+        .header(axum::http::header::CACHE_CONTROL, "private, max-age=300")
+        .body(axum::body::Body::from(bytes))
+        .map_err(|_| Error::unavailable())
+}
+
+async fn legacy_visual_reject(
+    State(app): State<App>,
+    SessionUser(caller): SessionUser,
+    Path((study_id, question_id)): Path<(String, String)>,
+) -> Result<(StatusCode, Json<Value>)> {
+    authoring::check_reused_question_rejection(&app.store, &caller, &study_id, &question_id)
+        .await?;
+    Err(Error::unprocessable(
+        "deprecated_visual_endpoint: direct visual_spec rendering is obsolete; use 2-stage prepare (/visual_jobs) and upload (/visuals)",
+    ))
 }

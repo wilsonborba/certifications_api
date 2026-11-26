@@ -39,7 +39,7 @@ use std::sync::{
 use tokio::sync::{Barrier, Notify};
 use tower::ServiceExt;
 
-const POSTGRES_MIGRATIONS: [&str; 15] = [
+const POSTGRES_MIGRATIONS: [&str; 16] = [
     include_str!("../migrations/001_v2_schema.sql"),
     include_str!("../migrations/002_v2_studies_sources.sql"),
     include_str!("../migrations/003_v2_generation_events.sql"),
@@ -55,6 +55,7 @@ const POSTGRES_MIGRATIONS: [&str; 15] = [
     include_str!("../migrations/013_v2_generation_source_external_ref.sql"),
     include_str!("../migrations/014_v2_report_source_snapshot.sql"),
     include_str!("../migrations/015_v2_one_active_generation_per_owner.sql"),
+    include_str!("../migrations/016_v2_question_visual_jobs.sql"),
 ];
 
 struct CortexGate {
@@ -349,6 +350,7 @@ fn test_settings() -> Settings {
         cortex_url: String::new(),
         reports_url: String::new(),
         gateway_url: String::new(),
+        reports_service_key: String::new(),
         certifications_service_key: String::new(),
         clamav: Default::default(),
     }

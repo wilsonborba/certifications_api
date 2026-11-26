@@ -35,7 +35,8 @@ krilla = "=0.7.0"
 icu_segmenter = "=2.4.0"
 ttf-parser = "=0.25.1"
 
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 rqrr = "=0.11.0"
-image = { version = "=0.25.10", default-features = false, features = ["png"] }

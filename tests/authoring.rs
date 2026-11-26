@@ -9,8 +9,8 @@ use certifications_api::{
         Store,
         fsm::MemoryFsm,
         reports::{
-            BoxFuture, ReadableReportDataset, RenderedVisual, ReportDatasetMaterial,
-            ReportPickerItem, ReportsClient,
+            BoxFuture, CreateRenderJobInput, ReadableReportDataset, RenderJobDescriptor,
+            RenderedVisual, ReportDatasetMaterial, ReportPickerItem, ReportsClient,
         },
         schemas::{self, DraftSchema, SchemaField},
     },
@@ -75,6 +75,33 @@ impl ReportsClient for MockReports {
             })
         })
     }
+    fn create_render_job<'a>(
+        &'a self,
+        _user_id: &'a str,
+        input: &'a CreateRenderJobInput,
+    ) -> BoxFuture<'a, CoreResult<RenderJobDescriptor>> {
+        let desc = RenderJobDescriptor {
+            job_id: format!("test-render-job-{}", certifications_api::dal::new_id()),
+            template_id: input.template_id.clone(),
+            template_version: input.template_version,
+            mapping: input.mapping.clone(),
+            config: input.config.clone(),
+            rows: input.rows.clone(),
+            width: input.width,
+            height: input.height,
+            scale: input.scale,
+            expires_at: certifications_api::core::now() + 600,
+        };
+        Box::pin(async move { Ok(desc) })
+    }
+    fn delete_render_job<'a>(
+        &'a self,
+        _user_id: &'a str,
+        _job_id: &'a str,
+        _confirmed: bool,
+    ) -> BoxFuture<'a, CoreResult<()>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 fn test_settings() -> Settings {
@@ -94,6 +121,7 @@ fn test_settings() -> Settings {
         cortex_url: String::new(),
         reports_url: String::new(),
         gateway_url: String::new(),
+        reports_service_key: String::new(),
         certifications_service_key: String::new(),
         clamav: Default::default(),
     }
@@ -191,6 +219,90 @@ async fn call(
     (status, val)
 }
 
+async fn call_raw(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    user: &str,
+    level: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-uuid", user);
+    if let Some(l) = level {
+        req = req.header("x-access-level", l);
+    }
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, headers, bytes)
+}
+
+fn to_base64_str(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = if chunk.len() > 1 {
+            chunk[1] as usize
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            chunk[2] as usize
+        } else {
+            0
+        };
+        out.push(TABLE[b0 >> 2] as char);
+        out.push(TABLE[((b0 & 3) << 4) | (b1 >> 4)] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((b1 & 15) << 2) | (b2 >> 6)] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[b2 & 63] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn make_test_png(width: u32, height: u32) -> String {
+    let img = image::RgbaImage::new(width, height);
+    let mut bytes = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut bytes),
+        image::ImageFormat::Png,
+    )
+    .unwrap();
+    to_base64_str(&bytes)
+}
+
+fn make_colored_test_png(width: u32, height: u32, color: [u8; 4]) -> String {
+    let img = image::RgbaImage::from_pixel(width, height, image::Rgba(color));
+    let mut bytes = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut bytes),
+        image::ImageFormat::Png,
+    )
+    .unwrap();
+    to_base64_str(&bytes)
+}
+
 #[tokio::test]
 async fn manual_authoring_edit_delete_visual_and_origin_guards() {
     let (app, store, fsm) = setup_app().await;
@@ -269,8 +381,8 @@ async fn manual_authoring_edit_delete_visual_and_origin_guards() {
     assert_eq!(q_v2["version_num"], 2);
     assert_eq!(q_v2["origin"], "supplied_by_creator");
 
-    // Render visual in author review flow via Reports temp job and save to FSM.
-    let (st, vis) = call(
+    // Legacy direct visual endpoint is rejected with 422.
+    let (st, _) = call(
         &app,
         "POST",
         &format!("/studies/{sid}/questions/{qid}/visual"),
@@ -279,9 +391,198 @@ async fn manual_authoring_edit_delete_visual_and_origin_guards() {
         Some(json!({ "visual_spec": { "chart": "bar" } })),
     )
     .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Stage 1: Prepare visual render job through Reports descriptor API.
+    let (st, prep) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visual_jobs"),
+        "author-1",
+        None,
+        Some(json!({
+            "template_id": "chart_template",
+            "template_version": 1,
+            "mapping": { "x": ["label"], "y": ["val"] },
+            "config": {},
+            "rows": [{ "label": "A", "val": 10 }],
+            "width": 800,
+            "height": 480,
+            "scale": 2,
+            "ttl_seconds": 600
+        })),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(prep["question_id"], qid);
+    let qv_id = prep["question_version_id"].as_str().unwrap().to_string();
+    assert_eq!(qv_id, q_v2["version_id"].as_str().unwrap());
+    let job_id = prep["render_job"]["job_id"].as_str().unwrap().to_string();
+
+    // Stage 2a: Decoded dimension mismatch rejected with 422 (100x100 vs expected 1600x960).
+    let bad_png = make_test_png(100, 100);
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-1",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": bad_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Stage 2b: Valid PNG upload persists to FSM and records in question_visuals.
+    let valid_png = make_test_png(1600, 960);
+    let (st, vis) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-1",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let vis_id = vis["id"].as_str().unwrap().to_string();
     let fsm_ref = vis["fsm_ref"].as_str().unwrap().to_string();
     assert!(fsm.has_blob(&fsm_ref));
+
+    // Stage 2c: Idempotent replay returns same visual descriptor.
+    let (st, vis_retry) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-1",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(vis_retry["id"], vis_id);
+    assert_eq!(vis_retry["fsm_ref"], fsm_ref);
+
+    // Stage 3a: Author reads visual preview bytes.
+    let (st, headers, body_bytes) = call_raw(
+        &app,
+        "GET",
+        &format!("/studies/{sid}/questions/{qid}/visuals/{vis_id}"),
+        "author-1",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(headers.get("content-type").unwrap(), "image/png");
+    assert!(!body_bytes.is_empty());
+
+    // Stage 3b: Unauthorized caller receives FORBIDDEN.
+    let (st, _, _) = call_raw(
+        &app,
+        "GET",
+        &format!("/studies/{sid}/questions/{qid}/visuals/{vis_id}"),
+        "author-2",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // Conflict: Stale or mismatched question version ID is rejected with 409.
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-1",
+        None,
+        Some(json!({
+            "question_version_id": "stale-version-id",
+            "render_job_id": job_id,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+
+    // Conflict: Conflicting PNG payload for same render_job_id is rejected with 409.
+    let conflicting_png = make_colored_test_png(1600, 960, [255, 0, 0, 255]);
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-1",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": conflicting_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+
+    // Unprocessable: Unknown render job ID is rejected with 422.
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-1",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": "unknown-nonexistent-job",
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Forbidden: Upload by non-owner is rejected with 403.
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-2",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
 
     // Quiz id for admin origin override.
     let quiz_id: String = sqlx::query_scalar("SELECT quiz_id FROM studies WHERE id = $1")
@@ -409,4 +710,855 @@ en,Capital of France?,Paris,Lyon,Nice,Marseille,a,Paris is the capital,p.1
     assert_eq!(imported["preview_only"], false);
     assert_eq!(imported["imported_count"], 1);
     assert_eq!(imported["questions"][0]["origin"], "supplied_by_creator");
+}
+
+#[tokio::test]
+async fn create_question_rejects_visual_spec_without_side_effects() {
+    let (app, store, _) = setup_app().await;
+
+    let (st, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        "author-side-effects",
+        None,
+        Some(json!({ "title": "Side Effects Guard Study" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sid = study["id"].as_str().unwrap().to_string();
+
+    let q_count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM questions")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let qv_count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM question_versions")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let quiz_count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quizzes")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let qver_count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quiz_versions")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions"),
+        "author-side-effects",
+        None,
+        Some(json!({
+            "prompt": "What is 2 + 2?",
+            "alternatives": [
+                { "id": "a", "text": "4" },
+                { "id": "b", "text": "5" }
+            ],
+            "correct_id": "a",
+            "explanation": "Basic math",
+            "visual_spec": { "chart": "bar" }
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let q_count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM questions")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let qv_count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM question_versions")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let quiz_count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quizzes")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let qver_count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quiz_versions")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+
+    assert_eq!(q_count_before, q_count_after, "no question rows created");
+    assert_eq!(
+        qv_count_before, qv_count_after,
+        "no question_version rows created"
+    );
+    assert_eq!(quiz_count_before, quiz_count_after, "no quiz rows created");
+    assert_eq!(
+        qver_count_before, qver_count_after,
+        "no quiz_version rows created"
+    );
+}
+
+#[tokio::test]
+async fn test_schema_016_upgrade_preserves_historical_visuals_with_unknown_payload_sha256() {
+    sqlx::any::install_default_drivers();
+    let pool = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+
+    // Run historical baseline migrations up to 004 (which has question_visuals without payload_sha256)
+    for migration in &certifications_api::dal::SQLITE_MIGRATIONS[..4] {
+        sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+    }
+
+    // Insert baseline schema_version, question and question_version
+    sqlx::query("INSERT INTO schema_versions(schema_name, version, status, description, created_at, published_at) VALUES('question', 1, 'published', '', 1, 1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO questions(id, owner_id, origin, created_at) VALUES('q1', 'u1', 'supplied_by_creator', 1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO question_versions(id, question_id, version_num, language, schema_name, schema_version, couch_doc_id, created_at) VALUES('qv1', 'q1', 1, 'en', 'question', 1, 'doc1', 1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Insert historical question_visual row without payload_sha256 column
+    sqlx::query("INSERT INTO question_visuals(id, question_version_id, fsm_ref, mime_type, created_at) VALUES('vis-hist-1', 'qv1', 'visuals/qv1/blob1.png', 'image/png', 1000)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Run remaining migrations up to 016
+    for migration in &certifications_api::dal::SQLITE_MIGRATIONS[4..] {
+        sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+    }
+
+    // Verify existing row survived and payload_sha256 defaulted to 'unknown' (not empty SHA)
+    let (id, payload_sha256, fsm_ref): (String, String, String) = sqlx::query_as(
+        "SELECT id, payload_sha256, fsm_ref FROM question_visuals WHERE id = 'vis-hist-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(id, "vis-hist-1");
+    assert_eq!(payload_sha256, "unknown");
+    assert_eq!(fsm_ref, "visuals/qv1/blob1.png");
+}
+
+#[tokio::test]
+async fn test_visual_publication_serialization_and_rejection() {
+    let (app, store, _) = setup_app().await;
+
+    let (st, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        "author-pub-guard",
+        None,
+        Some(json!({ "title": "Publication Guard Study" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sid = study["id"].as_str().unwrap().to_string();
+
+    let (st, question) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions"),
+        "author-pub-guard",
+        None,
+        Some(json!({
+            "language": "en",
+            "prompt": "Test publication lock",
+            "alternatives": [
+                { "id": "a", "text": "1" },
+                { "id": "b", "text": "2" }
+            ],
+            "correct_id": "a",
+            "explanation": "Exp"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let qid = question["id"].as_str().unwrap().to_string();
+    let qv_id = question["version_id"].as_str().unwrap().to_string();
+
+    // Prepare visual job while private
+    let (st, prep) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visual_jobs"),
+        "author-pub-guard",
+        None,
+        Some(json!({
+            "template_id": "chart_template",
+            "template_version": 1,
+            "mapping": {},
+            "config": {},
+            "rows": [],
+            "width": 800,
+            "height": 480,
+            "scale": 2,
+            "ttl_seconds": 600
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let job_id = prep["render_job"]["job_id"].as_str().unwrap().to_string();
+
+    // Publish the quiz directly
+    sqlx::query("UPDATE quizzes SET visibility = 'public' WHERE study_id = $1")
+        .bind(&sid)
+        .execute(&store.db)
+        .await
+        .unwrap();
+
+    // Stage 1 prepare visual job must fail with 409 quiz_already_published
+    let (st, resp) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visual_jobs"),
+        "author-pub-guard",
+        None,
+        Some(json!({
+            "template_id": "chart_template",
+            "template_version": 1,
+            "mapping": {},
+            "config": {},
+            "rows": [],
+            "width": 800,
+            "height": 480,
+            "scale": 2,
+            "ttl_seconds": 600
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("quiz_already_published")
+    );
+
+    // Stage 2 visual upload must also fail with 409 quiz_already_published
+    let valid_png = make_test_png(1600, 960);
+    let (st, resp) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-pub-guard",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("quiz_already_published")
+    );
+}
+
+#[tokio::test]
+async fn test_visual_durable_identical_replay_without_active_job() {
+    let (app, store, _) = setup_app().await;
+
+    let (st, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        "author-replay",
+        None,
+        Some(json!({ "title": "Replay Study" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sid = study["id"].as_str().unwrap().to_string();
+
+    let (st, question) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions"),
+        "author-replay",
+        None,
+        Some(json!({
+            "language": "en",
+            "prompt": "Test replay",
+            "alternatives": [
+                { "id": "a", "text": "1" },
+                { "id": "b", "text": "2" }
+            ],
+            "correct_id": "a",
+            "explanation": "Exp"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let qid = question["id"].as_str().unwrap().to_string();
+    let qv_id = question["version_id"].as_str().unwrap().to_string();
+
+    let (st, prep) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visual_jobs"),
+        "author-replay",
+        None,
+        Some(json!({
+            "template_id": "chart_template",
+            "template_version": 1,
+            "mapping": {},
+            "config": {},
+            "rows": [],
+            "width": 800,
+            "height": 480,
+            "scale": 2,
+            "ttl_seconds": 600
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let job_id = prep["render_job"]["job_id"].as_str().unwrap().to_string();
+
+    let valid_png = make_test_png(1600, 960);
+    let (st, vis_first) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-replay",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let first_vis_id = vis_first["id"].as_str().unwrap().to_string();
+
+    // Expire/delete temporary job record
+    sqlx::query("DELETE FROM question_visual_jobs WHERE render_job_id = $1")
+        .bind(&job_id)
+        .execute(&store.db)
+        .await
+        .unwrap();
+
+    // Replay identical upload: should succeed with existing visual receipt even without active job
+    let (st, vis_replay) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-replay",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(vis_replay["id"], first_vis_id);
+}
+
+#[tokio::test]
+async fn test_visual_fsm_compensation_outside_sql_transaction() {
+    let (app, store, fsm) = setup_app().await;
+
+    let (st, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        "author-compensate",
+        None,
+        Some(json!({ "title": "Compensation Study" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sid = study["id"].as_str().unwrap().to_string();
+
+    let (st, question) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions"),
+        "author-compensate",
+        None,
+        Some(json!({
+            "language": "en",
+            "prompt": "Test compensation",
+            "alternatives": [
+                { "id": "a", "text": "1" },
+                { "id": "b", "text": "2" }
+            ],
+            "correct_id": "a",
+            "explanation": "Exp"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let qid = question["id"].as_str().unwrap().to_string();
+    let qv_id = question["version_id"].as_str().unwrap().to_string();
+
+    let (st, prep) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visual_jobs"),
+        "author-compensate",
+        None,
+        Some(json!({
+            "template_id": "chart_template",
+            "template_version": 1,
+            "mapping": {},
+            "config": {},
+            "rows": [],
+            "width": 800,
+            "height": 480,
+            "scale": 2,
+            "ttl_seconds": 600
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let job_id = prep["render_job"]["job_id"].as_str().unwrap().to_string();
+
+    let puts_before = fsm.put_count();
+
+    // Create trigger that forces INSERT on question_visuals to fail
+    sqlx::query("CREATE TRIGGER abort_qv_insert BEFORE INSERT ON question_visuals BEGIN SELECT RAISE(ABORT, 'forced insert failure'); END;")
+        .execute(&store.db)
+        .await
+        .unwrap();
+
+    let valid_png = make_test_png(1600, 960);
+    let (st, err_resp) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-compensate",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+
+    // Must return 400 with sanitized message, not raw database error
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(err_resp["error"], "visual_insert_failed");
+
+    // Verify FSM put was attempted, but compensated (deleted) so no orphan blob remains
+    let puts_after = fsm.put_count();
+    assert_eq!(puts_after, puts_before + 1);
+    assert_eq!(fsm.blob_count(), 0);
+
+    // Drop trigger
+    sqlx::query("DROP TRIGGER abort_qv_insert;")
+        .execute(&store.db)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_visual_replay_scoping_and_draft_expiry_regressions() {
+    let (app, store, fsm) = setup_app().await;
+
+    // 1. Setup Study A with Question A1 and Question A2
+    let (st, study_a) = call(
+        &app,
+        "POST",
+        "/studies",
+        "author-a",
+        None,
+        Some(json!({ "title": "Study A" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sid_a = study_a["id"].as_str().unwrap().to_string();
+
+    let (st, q_a1) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_a}/questions"),
+        "author-a",
+        None,
+        Some(json!({
+            "language": "en",
+            "prompt": "Q A1",
+            "alternatives": [{ "id": "a", "text": "1" }, { "id": "b", "text": "2" }],
+            "correct_id": "a",
+            "explanation": "Exp"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let qid_a1 = q_a1["id"].as_str().unwrap().to_string();
+    let qv_a1 = q_a1["version_id"].as_str().unwrap().to_string();
+
+    let (st, q_a2) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_a}/questions"),
+        "author-a",
+        None,
+        Some(json!({
+            "language": "en",
+            "prompt": "Q A2",
+            "alternatives": [{ "id": "a", "text": "1" }, { "id": "b", "text": "2" }],
+            "correct_id": "a",
+            "explanation": "Exp"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let qid_a2 = q_a2["id"].as_str().unwrap().to_string();
+
+    // Prepare and upload visual for Question A1
+    let (st, prep_a1) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_a}/questions/{qid_a1}/visual_jobs"),
+        "author-a",
+        None,
+        Some(json!({
+            "template_id": "chart_template",
+            "template_version": 1,
+            "mapping": {},
+            "config": {},
+            "rows": [],
+            "width": 800,
+            "height": 480,
+            "scale": 2,
+            "ttl_seconds": 600
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let job_id_a1 = prep_a1["render_job"]["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let valid_png = make_test_png(1600, 960);
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_a}/questions/{qid_a1}/visuals"),
+        "author-a",
+        None,
+        Some(json!({
+            "question_version_id": qv_a1,
+            "render_job_id": job_id_a1,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+
+    // Negative Regression 1: Wrong question path (replaying A1 receipt on A2)
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_a}/questions/{qid_a2}/visuals"),
+        "author-a",
+        None,
+        Some(json!({
+            "question_version_id": qv_a1,
+            "render_job_id": job_id_a1,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert!(st == StatusCode::CONFLICT || st == StatusCode::NOT_FOUND);
+
+    // Setup Study A2 (second study owned by Author A)
+    let (st, study_a2) = call(
+        &app,
+        "POST",
+        "/studies",
+        "author-a",
+        None,
+        Some(json!({ "title": "Study A2" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sid_a2 = study_a2["id"].as_str().unwrap().to_string();
+
+    // Negative Regression 2: Wrong owned study (calling Study A2 with Question A1 and A1 receipt)
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_a2}/questions/{qid_a1}/visuals"),
+        "author-a",
+        None,
+        Some(json!({
+            "question_version_id": qv_a1,
+            "render_job_id": job_id_a1,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert!(st == StatusCode::NOT_FOUND || st == StatusCode::CONFLICT);
+
+    // Setup Study B owned by User B with Question B
+    let (st, study_b) = call(
+        &app,
+        "POST",
+        "/studies",
+        "author-b",
+        None,
+        Some(json!({ "title": "Study B" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sid_b = study_b["id"].as_str().unwrap().to_string();
+
+    let (st, q_b) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_b}/questions"),
+        "author-b",
+        None,
+        Some(json!({
+            "language": "en",
+            "prompt": "Q B",
+            "alternatives": [{ "id": "a", "text": "1" }, { "id": "b", "text": "2" }],
+            "correct_id": "a",
+            "explanation": "Exp"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let qid_b = q_b["id"].as_str().unwrap().to_string();
+
+    // Negative Regression 3: B-study with A-receipt (User B attempts to replay User A's visual receipt)
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_b}/questions/{qid_b}/visuals"),
+        "author-b",
+        None,
+        Some(json!({
+            "question_version_id": qv_a1,
+            "render_job_id": job_id_a1,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert!(
+        st == StatusCode::CONFLICT || st == StatusCode::FORBIDDEN || st == StatusCode::NOT_FOUND
+    );
+
+    // Negative Regression 4: Timestamp-expired draft
+    let past_ts = chrono::Utc::now().timestamp() - 1000;
+    sqlx::query("UPDATE studies SET expires_at = $1 WHERE id = $2")
+        .bind(past_ts)
+        .bind(&sid_b)
+        .execute(&store.db)
+        .await
+        .unwrap();
+
+    // Prepare on expired draft must return 410 GONE
+    let (st, exp_prep) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_b}/questions/{qid_b}/visual_jobs"),
+        "author-b",
+        None,
+        Some(json!({
+            "template_id": "chart_template",
+            "template_version": 1,
+            "mapping": {},
+            "config": {},
+            "rows": [],
+            "width": 800,
+            "height": 480,
+            "scale": 2,
+            "ttl_seconds": 600
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::GONE);
+    assert!(
+        exp_prep["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("study_expired")
+    );
+
+    // Upload on expired draft must return 410 GONE
+    let (st, exp_upload) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_b}/questions/{qid_b}/visuals"),
+        "author-b",
+        None,
+        Some(json!({
+            "question_version_id": "nonexistent_qv",
+            "render_job_id": "new_job_id",
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::GONE);
+    assert!(
+        exp_upload["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("study_expired")
+    );
+
+    // Direct upload on timestamp-expired draft regression:
+    // Setup Study C with Question C while draft is valid
+    let (st, study_c) = call(
+        &app,
+        "POST",
+        "/studies",
+        "author-c",
+        None,
+        Some(json!({ "title": "Study C" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let sid_c = study_c["id"].as_str().unwrap().to_string();
+
+    let (st, q_c) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_c}/questions"),
+        "author-c",
+        None,
+        Some(json!({
+            "language": "en",
+            "prompt": "Q C",
+            "alternatives": [{ "id": "a", "text": "1" }, { "id": "b", "text": "2" }],
+            "correct_id": "a",
+            "explanation": "Exp"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let qid_c = q_c["id"].as_str().unwrap().to_string();
+    let qv_c = q_c["version_id"].as_str().unwrap().to_string();
+
+    // Prepare a valid visual job while Study C is valid draft
+    let (st, prep_c) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_c}/questions/{qid_c}/visual_jobs"),
+        "author-c",
+        None,
+        Some(json!({
+            "template_id": "chart_template",
+            "template_version": 1,
+            "mapping": {},
+            "config": {},
+            "rows": [],
+            "width": 800,
+            "height": 480,
+            "scale": 2,
+            "ttl_seconds": 600
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let job_id_c = prep_c["render_job"]["job_id"].as_str().unwrap().to_string();
+
+    // Verify stored status is 'draft' before expiry mutation
+    let status_before: String = sqlx::query_scalar("SELECT status FROM studies WHERE id = $1")
+        .bind(&sid_c)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(status_before, "draft");
+
+    // Mutate expires_at to past while status is STILL draft
+    sqlx::query("UPDATE studies SET expires_at = $1 WHERE id = $2")
+        .bind(past_ts)
+        .bind(&sid_c)
+        .execute(&store.db)
+        .await
+        .unwrap();
+
+    let status_still_draft: String = sqlx::query_scalar("SELECT status FROM studies WHERE id = $1")
+        .bind(&sid_c)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(status_still_draft, "draft");
+
+    let fsm_blobs_before = fsm.blob_count();
+    let fsm_puts_before = fsm.put_count();
+
+    // Directly call upload without calling prepare after expiry
+    let (st, direct_exp_upload) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid_c}/questions/{qid_c}/visuals"),
+        "author-c",
+        None,
+        Some(json!({
+            "question_version_id": qv_c,
+            "render_job_id": job_id_c,
+            "png_base64": valid_png,
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::GONE);
+    assert!(
+        direct_exp_upload["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("study_expired")
+    );
+
+    // Assert zero new FSM blobs created and zero attempted FSM puts
+    assert_eq!(fsm.blob_count(), fsm_blobs_before);
+    assert_eq!(fsm.put_count(), fsm_puts_before);
+
+    // Assert status transitioned from 'draft' to 'expired' directly by upload
+    let status_after: String = sqlx::query_scalar("SELECT status FROM studies WHERE id = $1")
+        .bind(&sid_c)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(status_after, "expired");
 }

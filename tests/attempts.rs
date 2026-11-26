@@ -38,6 +38,7 @@ fn test_settings() -> Settings {
         cortex_url: String::new(),
         reports_url: String::new(),
         gateway_url: String::new(),
+        reports_service_key: String::new(),
         certifications_service_key: String::new(),
         clamav: Default::default(),
     }
