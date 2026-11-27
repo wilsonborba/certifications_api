@@ -213,6 +213,60 @@ async fn couch_delete(
     StatusCode::OK
 }
 
+async fn immutable_conflict_put() -> StatusCode {
+    StatusCode::CONFLICT
+}
+
+async fn immutable_conflict_get(
+    State(document): State<Value>,
+    Path((_database, doc_id)): Path<(String, String)>,
+) -> (StatusCode, Json<Value>) {
+    let mut document = document;
+    if doc_id == "extra-metadata" {
+        document["_extra"] = json!(true);
+    }
+    (StatusCode::OK, Json(document))
+}
+
+#[tokio::test]
+async fn remote_immutable_put_accepts_couch_metadata_but_rejects_changed_content() {
+    let document = json!({"_id":"stable-question","_rev":"2-abc","prompt":"same"});
+    let couch = Router::new()
+        .route(
+            "/{database}/{doc_id}",
+            put(immutable_conflict_put).get(immutable_conflict_get),
+        )
+        .with_state(document);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, couch).await.unwrap() });
+    let mut settings = test_settings();
+    settings.couch_url = format!("http://{address}");
+    let docs =
+        certifications_api::dal::documents::Documents::remote(&settings, reqwest::Client::new());
+    assert!(
+        docs.put_immutable("stable-question", &json!({"prompt":"same"}))
+            .await
+            .is_ok()
+    );
+    assert!(
+        docs.put_immutable("stable-question", &json!({"prompt":"changed"}))
+            .await
+            .is_err()
+    );
+    assert!(
+        docs.put_immutable("other-id", &json!({"prompt":"same"}))
+            .await
+            .is_err()
+    );
+    assert!(
+        docs.put_immutable("extra-metadata", &json!({"prompt":"same"}))
+            .await
+            .is_err()
+    );
+    server.abort();
+}
+
 struct MockCortex {
     calls: AtomicUsize,
     emit_cjk_first: AtomicBool,

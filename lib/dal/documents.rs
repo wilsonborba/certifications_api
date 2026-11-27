@@ -102,7 +102,9 @@ impl Documents {
                 }
                 if resp.status() == StatusCode::CONFLICT {
                     let existing = self.get(doc_id).await.ok();
-                    if existing.as_ref() == Some(body) {
+                    if existing.as_ref().is_some_and(|document| {
+                        immutable_remote_body_matches(doc_id, document, body)
+                    }) {
                         return Ok(());
                     }
                     return Err(Error::conflict(
@@ -170,4 +172,25 @@ impl Documents {
             }
         }
     }
+}
+
+fn immutable_remote_body_matches(doc_id: &str, existing: &Value, expected: &Value) -> bool {
+    let Some(object) = existing.as_object() else {
+        return false;
+    };
+    if object.get("_id").and_then(Value::as_str) != Some(doc_id)
+        || object
+            .get("_rev")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return false;
+    }
+    let mut content = existing.clone();
+    let Some(content) = content.as_object_mut() else {
+        return false;
+    };
+    content.remove("_id");
+    content.remove("_rev");
+    &Value::Object(content.clone()) == expected
 }

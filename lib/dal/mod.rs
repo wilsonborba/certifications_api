@@ -43,6 +43,7 @@ pub struct Store {
     pub db: AnyPool,
     pub(crate) database_backend: DatabaseBackend,
     pub(crate) sqlite_worker_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) question_visual_operation_slots: Arc<tokio::sync::Semaphore>,
     pub docs: documents::Documents,
     pub fsm: Arc<dyn fsm::FsmClient>,
     pub scanner: Arc<dyn scanner::VirusScanner>,
@@ -78,6 +79,7 @@ impl Store {
             db,
             database_backend,
             sqlite_worker_lock: Arc::new(tokio::sync::Mutex::new(())),
+            question_visual_operation_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             docs: documents::Documents::remote(settings, http.clone()),
             fsm: fsm::HttpFsm::client(&settings.fsm_url, &settings.fsm_key, http.clone()),
             scanner: Arc::new(scanner::ClamScanner::with_runtime(
@@ -113,6 +115,7 @@ impl Store {
             db,
             database_backend: DatabaseBackend::Sqlite,
             sqlite_worker_lock: Arc::new(tokio::sync::Mutex::new(())),
+            question_visual_operation_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             docs: documents::Documents::Memory(documents::Documents::memory()),
             fsm: fsm::MemoryFsm::new(),
             scanner: Arc::new(CleanFixtureScanner),

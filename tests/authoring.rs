@@ -24,7 +24,7 @@ use certifications_api::{
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::Row;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::Ordering};
 use tower::ServiceExt;
 
 struct MockReports;
@@ -1362,8 +1362,64 @@ async fn test_visual_fsm_compensation_outside_sql_transaction() {
         .await
         .unwrap();
 
+    // Force both compensations into the durable cleanup queue. A same-job
+    // retry must be able to reuse these exact reserved resources safely.
+    fsm.fail_delete.store(true, Ordering::SeqCst);
+    certifications_api::dal::memory_docs(&store.docs)
+        .unwrap()
+        .fail_delete
+        .store(true, Ordering::SeqCst);
+
     let valid_png = make_test_png(1600, 960);
     let (st, err_resp) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-compensate",
+        None,
+        Some(json!({
+            "question_version_id": qv_id,
+            "render_job_id": job_id,
+            "png_base64": valid_png.clone(),
+            "expected_width": 800,
+            "expected_height": 480,
+            "expected_scale": 2
+        })),
+    )
+    .await;
+
+    // Must return 400 with sanitized message, not raw database error
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(err_resp["error"], "visual_insert_failed");
+
+    // Failed compensation remains pending rather than deleting a reserved key.
+    let puts_after = fsm.put_count();
+    assert_eq!(puts_after, puts_before + 1);
+    assert_eq!(fsm.blob_count(), 1);
+    assert_eq!(
+        certifications_api::dal::memory_docs(&store.docs)
+            .unwrap()
+            .len(),
+        docs_before + 1
+    );
+    let failed_assets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM question_visuals")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(failed_assets, 0);
+
+    // Drop trigger
+    sqlx::query("DROP TRIGGER abort_qv_insert;")
+        .execute(&store.db)
+        .await
+        .unwrap();
+
+    fsm.fail_delete.store(false, Ordering::SeqCst);
+    certifications_api::dal::memory_docs(&store.docs)
+        .unwrap()
+        .fail_delete
+        .store(false, Ordering::SeqCst);
+    let (retry_status, retry_receipt) = call(
         &app,
         "POST",
         &format!("/studies/{sid}/questions/{qid}/visuals"),
@@ -1379,32 +1435,38 @@ async fn test_visual_fsm_compensation_outside_sql_transaction() {
         })),
     )
     .await;
+    assert_eq!(retry_status, StatusCode::CREATED);
 
-    // Must return 400 with sanitized message, not raw database error
-    assert_eq!(st, StatusCode::BAD_REQUEST);
-    assert_eq!(err_resp["error"], "visual_insert_failed");
-
-    // Verify FSM put was attempted, but compensated (deleted) so no orphan blob remains
-    let puts_after = fsm.put_count();
-    assert_eq!(puts_after, puts_before + 1);
-    assert_eq!(fsm.blob_count(), 0);
-    assert_eq!(
+    let cleanup_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM cleanup_tasks WHERE status = 'pending' ORDER BY created_at, id",
+    )
+    .fetch_all(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(cleanup_ids.len(), 2);
+    for cleanup_id in cleanup_ids {
+        assert!(
+            certifications_api::domain::cleanup::retry_one(&store, &cleanup_id)
+                .await
+                .unwrap()
+        );
+    }
+    assert_eq!(fsm.blob_count(), 1);
+    assert!(
         certifications_api::dal::memory_docs(&store.docs)
             .unwrap()
-            .len(),
-        docs_before
+            .contains(
+                sqlx::query_scalar::<_, String>(
+                    "SELECT result_document_id FROM question_visual_jobs WHERE render_job_id = $1",
+                )
+                .bind(job_id)
+                .fetch_one(&store.db)
+                .await
+                .unwrap()
+                .as_str(),
+            )
     );
-    let failed_assets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM question_visuals")
-        .fetch_one(&store.db)
-        .await
-        .unwrap();
-    assert_eq!(failed_assets, 0);
-
-    // Drop trigger
-    sqlx::query("DROP TRIGGER abort_qv_insert;")
-        .execute(&store.db)
-        .await
-        .unwrap();
+    assert!(!retry_receipt["id"].as_str().unwrap().is_empty());
 }
 
 #[tokio::test]

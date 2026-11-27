@@ -1418,6 +1418,20 @@ pub async fn upload_question_visual(
     question_id: &str,
     input: UploadVisualInput,
 ) -> Result<UploadVisualReceipt> {
+    let render_job_id = input.render_job_id.clone();
+    crate::domain::cleanup::with_question_visual_operation_lock(store, &render_job_id, || async {
+        upload_question_visual_locked(store, caller, study_id, question_id, input).await
+    })
+    .await
+}
+
+async fn upload_question_visual_locked(
+    store: &Store,
+    caller: &CallerIdentity,
+    study_id: &str,
+    question_id: &str,
+    input: UploadVisualInput,
+) -> Result<UploadVisualReceipt> {
     if input.render_job_id.trim().is_empty() {
         return Err(Error::unprocessable(
             "render_job_id_required: render_job_id is required",
@@ -2033,7 +2047,8 @@ pub async fn upload_question_visual(
         if tx.rollback().await.is_err() {
             return Err(Error::unavailable());
         }
-        guardrail::cleanup_orphan_document(store, &doc_id).await;
+        // A conflicting immutable put may be the same stable reserved result
+        // from an earlier attempt. Preserve it until the retry resolves it.
         return Err(error);
     }
 
@@ -2045,8 +2060,13 @@ pub async fn upload_question_visual(
             if tx.rollback().await.is_err() {
                 return Err(Error::unavailable());
             }
-            guardrail::cleanup_orphan_document(store, &doc_id).await;
-            if crate::domain::cleanup::delete_fsm_or_queue(store, &reserved_fsm_key)
+            if guardrail::cleanup_orphan_document_with_visual_operation_lock_held(store, &doc_id)
+                .await
+                .is_err()
+                || crate::domain::cleanup::delete_fsm_or_queue_with_visual_operation_lock_held(
+                    store,
+                    &reserved_fsm_key,
+                )
                 .await
                 .is_err()
             {
@@ -2106,8 +2126,17 @@ pub async fn upload_question_visual(
             if tx.rollback().await.is_err() {
                 return Err(Error::unavailable());
             }
-            guardrail::cleanup_orphan_document(store, &doc_id).await;
-            let _ = crate::domain::cleanup::delete_fsm_or_queue(store, &fsm_ref).await;
+            let cleanup_doc =
+                guardrail::cleanup_orphan_document_with_visual_operation_lock_held(store, &doc_id)
+                    .await;
+            let cleanup_fsm =
+                crate::domain::cleanup::delete_fsm_or_queue_with_visual_operation_lock_held(
+                    store, &fsm_ref,
+                )
+                .await;
+            if cleanup_doc.is_err() || cleanup_fsm.is_err() {
+                return Err(Error::unavailable());
+            }
             tracing::error!(module = "authoring", question_id, error = ?err, "Question visual publication failed");
             return Err(Error::bad(
                 "visual_insert_failed: Could not publish question visual version",
@@ -2116,9 +2145,10 @@ pub async fn upload_question_visual(
     };
     let mut committed_result_qv_id = next_qv_id.clone();
     let mut committed_result_quiz_version_id = result_quiz_version_id.clone();
+    let mut committed_created_at = ts;
     if let Err(commit_err) = tx.commit().await {
         let committed = sqlx::query(
-            "SELECT id, payload_sha256, owner_id, study_id, quiz_id, question_id, prepared_question_version_id, result_question_version_id, result_quiz_version_id FROM question_visuals WHERE id = $1",
+            "SELECT id, mime_type, created_at, fsm_ref, payload_sha256, owner_id, study_id, quiz_id, question_id, prepared_question_version_id, result_question_version_id, result_quiz_version_id FROM question_visuals WHERE id = $1",
         )
         .bind(&visual_id)
         .fetch_one(&store.db)
@@ -2130,10 +2160,13 @@ pub async fn upload_question_visual(
                     && receipt.get::<String, _>("study_id") == study_id
                     && receipt.get::<String, _>("quiz_id") == quiz_id
                     && receipt.get::<String, _>("question_id") == question_id
-                    && receipt.get::<String, _>("prepared_question_version_id") == job_qv_id =>
+                    && receipt.get::<String, _>("prepared_question_version_id") == job_qv_id
+                    && receipt.get::<String, _>("mime_type") == "image/png"
+                    && receipt.get::<String, _>("fsm_ref") == reserved_fsm_key =>
             {
                 committed_result_qv_id = receipt.get("result_question_version_id");
                 committed_result_quiz_version_id = receipt.get("result_quiz_version_id");
+                committed_created_at = receipt.get("created_at");
                 if committed_result_qv_id.is_empty() || committed_result_quiz_version_id.is_empty()
                 {
                     return Err(Error::unavailable());
@@ -2209,7 +2242,7 @@ pub async fn upload_question_visual(
     Ok(UploadVisualReceipt {
         id: visual_id,
         mime_type: "image/png".into(),
-        created_at: ts,
+        created_at: committed_created_at,
         prepared_question_version_id: job_qv_id,
         result_question_version_id: committed_result_qv_id,
         result_quiz_version_id: committed_result_quiz_version_id,
