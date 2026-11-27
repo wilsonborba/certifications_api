@@ -101,6 +101,35 @@ async fn reserved_visual_job_for_resource(
         .await?)
 }
 
+async fn visual_document_reservation_is_retryable(store: &Store, doc_id: &str) -> Result<bool> {
+    let expires_at: Option<i64> = sqlx::query_scalar(
+        "SELECT expires_at FROM question_visual_jobs WHERE result_document_id = $1 AND operation_fingerprint <> '' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(doc_id)
+    .fetch_optional(&store.db)
+    .await?;
+    // Uploads remain valid through the expiry second (`now() <= expires_at`).
+    Ok(expires_at.is_some_and(|expires_at| now() <= expires_at))
+}
+
+pub(crate) async fn queue_question_document_cleanup_with_visual_operation_lock_held(
+    store: &Store,
+    doc_id: &str,
+) -> Result<()> {
+    let ts = now();
+    sqlx::query(
+        "INSERT INTO cleanup_tasks(id, target_kind, target_ref, status, attempts, last_error, created_at, updated_at)
+         SELECT $1, 'couch_doc', $2, 'pending', 0, 'reserved visual document cleanup deferred until reservation expiry', $3, $3
+         WHERE NOT EXISTS (SELECT 1 FROM cleanup_tasks WHERE target_kind = 'couch_doc' AND target_ref = $2 AND status IN ('pending', 'failed'))",
+    )
+    .bind(new_id())
+    .bind(doc_id)
+    .bind(ts)
+    .execute(&store.db)
+    .await?;
+    Ok(())
+}
+
 async fn delete_fsm_or_queue_locked(store: &Store, fsm_ref: &str) -> Result<()> {
     if is_fsm_ref_in_use(store, fsm_ref).await? {
         return Ok(());
@@ -136,6 +165,10 @@ async fn delete_question_document_locked(
 ) -> Result<()> {
     if is_question_document_in_use(store, doc_id).await? {
         return Ok(());
+    }
+    if visual_document_reservation_is_retryable(store, doc_id).await? {
+        return queue_question_document_cleanup_with_visual_operation_lock_held(store, doc_id)
+            .await;
     }
     if let Err(err) = store.docs.delete(doc_id).await {
         if !queue_on_failure {
@@ -297,16 +330,16 @@ async fn execute_cleanup_task(
             {
                 with_question_visual_operation_lock(store, &render_job_id, || async {
                     if is_fsm_ref_in_use(store, target_ref).await? {
-                        Ok(())
+                        Ok(true)
                     } else {
-                        store.fsm.delete_ref(target_ref).await
+                        store.fsm.delete_ref(target_ref).await.map(|()| true)
                     }
                 })
                 .await
             } else if is_fsm_ref_in_use(store, target_ref).await? {
-                Ok(())
+                Ok(true)
             } else {
-                store.fsm.delete_ref(target_ref).await
+                store.fsm.delete_ref(target_ref).await.map(|()| true)
             }
         }
         "couch_doc" => {
@@ -314,18 +347,29 @@ async fn execute_cleanup_task(
                 reserved_visual_job_for_resource(store, "result_document_id", target_ref).await?
             {
                 with_question_visual_operation_lock(store, &render_job_id, || async {
-                    delete_question_document_locked(store, target_ref, false).await
+                    if is_question_document_in_use(store, target_ref).await? {
+                        return Ok(true);
+                    }
+                    if visual_document_reservation_is_retryable(store, target_ref).await? {
+                        return Ok(false);
+                    }
+                    delete_question_document_locked(store, target_ref, false)
+                        .await
+                        .map(|()| true)
                 })
                 .await
             } else {
-                delete_question_document_locked(store, target_ref, false).await
+                delete_question_document_locked(store, target_ref, false)
+                    .await
+                    .map(|()| true)
             }
         }
-        _ => Ok(()),
+        _ => Ok(true),
     };
 
     match outcome {
-        Ok(()) => {
+        Ok(false) => Ok(false),
+        Ok(true) => {
             sqlx::query("DELETE FROM cleanup_tasks WHERE id = $1")
                 .bind(id)
                 .execute(&store.db)

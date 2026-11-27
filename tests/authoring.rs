@@ -1,12 +1,14 @@
 use axum::{
-    Router,
+    Json, Router,
     body::Body,
+    extract::{Path, State},
     http::{Request, StatusCode},
 };
 use certifications_api::{
     core::{Error as CoreError, Result as CoreResult, Settings},
     dal::{
         Store,
+        documents::Documents,
         fsm::MemoryFsm,
         reports::{
             BoxFuture, CreateRenderJobInput, ReadableReportDataset, RenderJobDescriptor,
@@ -24,10 +26,66 @@ use certifications_api::{
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::Row;
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use tower::ServiceExt;
 
 struct MockReports;
+
+#[derive(Clone, Default)]
+struct CouchTombstoneFixture {
+    documents: Arc<Mutex<std::collections::HashMap<String, Value>>>,
+    tombstones: Arc<Mutex<std::collections::HashMap<String, Value>>>,
+    delete_count: Arc<AtomicUsize>,
+}
+
+async fn couch_fixture_put(
+    State(couch): State<CouchTombstoneFixture>,
+    Path((_database, doc_id)): Path<(String, String)>,
+    Json(mut body): Json<Value>,
+) -> StatusCode {
+    if couch.documents.lock().unwrap().contains_key(&doc_id)
+        || couch.tombstones.lock().unwrap().contains_key(&doc_id)
+    {
+        return StatusCode::CONFLICT;
+    }
+    body["_id"] = json!(doc_id);
+    body["_rev"] = json!("1-created");
+    couch.documents.lock().unwrap().insert(doc_id, body);
+    StatusCode::CREATED
+}
+
+async fn couch_fixture_get(
+    State(couch): State<CouchTombstoneFixture>,
+    Path((_database, doc_id)): Path<(String, String)>,
+) -> (StatusCode, Json<Value>) {
+    if let Some(body) = couch.documents.lock().unwrap().get(&doc_id).cloned() {
+        return (StatusCode::OK, Json(body));
+    }
+    if couch.tombstones.lock().unwrap().contains_key(&doc_id) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"not_found","reason":"deleted","id":doc_id})),
+        );
+    }
+    (StatusCode::NOT_FOUND, Json(json!({"error":"not_found"})))
+}
+
+async fn couch_fixture_delete(
+    State(couch): State<CouchTombstoneFixture>,
+    Path((_database, doc_id)): Path<(String, String)>,
+) -> StatusCode {
+    let Some(mut body) = couch.documents.lock().unwrap().remove(&doc_id) else {
+        return StatusCode::NOT_FOUND;
+    };
+    body["_rev"] = json!("2-deleted");
+    body["_deleted"] = json!(true);
+    couch.tombstones.lock().unwrap().insert(doc_id, body);
+    couch.delete_count.fetch_add(1, Ordering::SeqCst);
+    StatusCode::OK
+}
 
 impl ReportsClient for MockReports {
     fn list_readable_reports<'a>(
@@ -1467,6 +1525,257 @@ async fn test_visual_fsm_compensation_outside_sql_transaction() {
             )
     );
     assert!(!retry_receipt["id"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn remote_couch_retry_preserves_reserved_document_until_expiry() {
+    let couch = CouchTombstoneFixture::default();
+    let couch_app = Router::new()
+        .route(
+            "/{database}/{doc_id}",
+            axum::routing::put(couch_fixture_put)
+                .get(couch_fixture_get)
+                .delete(couch_fixture_delete),
+        )
+        .with_state(couch.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let couch_server = tokio::spawn(async move {
+        axum::serve(listener, couch_app).await.unwrap();
+    });
+
+    let mut settings = test_settings();
+    settings.couch_url = format!("http://{address}");
+    let mut store = Store::fixture().await;
+    let fsm = MemoryFsm::new();
+    store.docs = Documents::remote(&settings, reqwest::Client::new());
+    store.fsm = fsm.clone();
+    store.reports = Arc::new(MockReports);
+    publish_question_schema(&store).await;
+    let app = presentation::router(App {
+        store: store.clone(),
+        settings,
+        quotas: QuotaCache::default(),
+        signatures: Default::default(),
+    });
+
+    let (status, study) = call(
+        &app,
+        "POST",
+        "/studies",
+        "couch-retry",
+        None,
+        Some(json!({"title":"Couch visual retry"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let study_id = study["id"].as_str().unwrap().to_string();
+    let (status, question) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/questions"),
+        "couch-retry",
+        None,
+        Some(json!({
+            "language":"en",
+            "prompt":"Couch retry question",
+            "alternatives":[{"id":"a","text":"One"},{"id":"b","text":"Two"}],
+            "correct_id":"a",
+            "explanation":"Reason.",
+            "citation_ref":""
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{question}");
+    let question_id = question["id"].as_str().unwrap().to_string();
+    let question_version_id = question["version_id"].as_str().unwrap().to_string();
+    let (status, prepared) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/questions/{question_id}/visual_jobs"),
+        "couch-retry",
+        None,
+        Some(json!({
+            "template_id":"chart_template","template_version":1,"mapping":{},
+            "config":{},"rows":[],"width":800,"height":480,"scale":2,
+            "ttl_seconds":600
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let job_id = prepared["render_job"]["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let png = make_test_png(1600, 960);
+
+    sqlx::query("CREATE TRIGGER abort_couch_retry BEFORE INSERT ON question_visuals BEGIN SELECT RAISE(ABORT, 'forced insert failure'); END;")
+        .execute(&store.db)
+        .await
+        .unwrap();
+    let upload = json!({
+        "question_version_id":question_version_id,
+        "render_job_id":job_id,
+        "png_base64":png.clone(),
+        "expected_width":800,"expected_height":480,"expected_scale":2
+    });
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/questions/{question_id}/visuals"),
+        "couch-retry",
+        None,
+        Some(upload.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "visual_insert_failed");
+
+    let reserved_doc: String = sqlx::query_scalar(
+        "SELECT result_document_id FROM question_visual_jobs WHERE render_job_id = $1",
+    )
+    .bind(&job_id)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    let cleanup_id: String = sqlx::query_scalar(
+        "SELECT id FROM cleanup_tasks WHERE target_kind='couch_doc' AND target_ref=$1",
+    )
+    .bind(&reserved_doc)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert!(couch.documents.lock().unwrap().contains_key(&reserved_doc));
+    assert_eq!(couch.delete_count.load(Ordering::SeqCst), 0);
+    assert!(
+        !certifications_api::domain::cleanup::retry_one(&store, &cleanup_id)
+            .await
+            .unwrap()
+    );
+    assert!(couch.documents.lock().unwrap().contains_key(&reserved_doc));
+    let task_state: String = sqlx::query_scalar("SELECT status FROM cleanup_tasks WHERE id=$1")
+        .bind(&cleanup_id)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(task_state, "pending");
+
+    sqlx::query("DROP TRIGGER abort_couch_retry")
+        .execute(&store.db)
+        .await
+        .unwrap();
+    let (status, receipt) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/questions/{question_id}/visuals"),
+        "couch-retry",
+        None,
+        Some(upload),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        receipt["result_question_version_id"],
+        sqlx::query_scalar::<_, String>(
+            "SELECT result_question_version_id FROM question_visual_jobs WHERE render_job_id=$1"
+        )
+        .bind(&job_id)
+        .fetch_one(&store.db)
+        .await
+        .unwrap()
+    );
+    assert!(
+        certifications_api::domain::cleanup::retry_one(&store, &cleanup_id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(couch.delete_count.load(Ordering::SeqCst), 0);
+    assert!(couch.documents.lock().unwrap().contains_key(&reserved_doc));
+
+    // A separate failed reservation becomes nonretryable after its expiry.
+    // Its queued cleanup now performs the real Couch DELETE/tombstone path.
+    let (status, next_prepared) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/questions/{question_id}/visual_jobs"),
+        "couch-retry",
+        None,
+        Some(json!({
+            "template_id":"chart_template","template_version":1,"mapping":{},
+            "config":{},"rows":[],"width":800,"height":480,"scale":2,
+            "ttl_seconds":600
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let expired_job = next_prepared["render_job"]["job_id"].as_str().unwrap();
+    let current_qv = next_prepared["question_version_id"].as_str().unwrap();
+    sqlx::query("CREATE TRIGGER abort_couch_expired BEFORE INSERT ON question_visuals BEGIN SELECT RAISE(ABORT, 'forced insert failure'); END;")
+        .execute(&store.db)
+        .await
+        .unwrap();
+    let (status, _) = call(
+        &app,
+        "POST",
+        &format!("/studies/{study_id}/questions/{question_id}/visuals"),
+        "couch-retry",
+        None,
+        Some(json!({
+            "question_version_id":current_qv,"render_job_id":expired_job,
+            "png_base64":png,"expected_width":800,"expected_height":480,"expected_scale":2
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    sqlx::query("DROP TRIGGER abort_couch_expired")
+        .execute(&store.db)
+        .await
+        .unwrap();
+    let expired_doc: String = sqlx::query_scalar(
+        "SELECT result_document_id FROM question_visual_jobs WHERE render_job_id=$1",
+    )
+    .bind(expired_job)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    let expired_cleanup: String = sqlx::query_scalar(
+        "SELECT id FROM cleanup_tasks WHERE target_kind='couch_doc' AND target_ref=$1",
+    )
+    .bind(&expired_doc)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE question_visual_jobs SET expires_at=0 WHERE render_job_id=$1")
+        .bind(expired_job)
+        .execute(&store.db)
+        .await
+        .unwrap();
+    assert!(
+        certifications_api::domain::cleanup::retry_one(&store, &expired_cleanup)
+            .await
+            .unwrap()
+    );
+    assert_eq!(couch.delete_count.load(Ordering::SeqCst), 1);
+    assert!(couch.tombstones.lock().unwrap().contains_key(&expired_doc));
+    assert!(store.docs.get(&expired_doc).await.is_err());
+    let mut tombstone_body = couch
+        .tombstones
+        .lock()
+        .unwrap()
+        .get(&expired_doc)
+        .unwrap()
+        .clone();
+    tombstone_body.as_object_mut().unwrap().remove("_id");
+    tombstone_body.as_object_mut().unwrap().remove("_rev");
+    tombstone_body.as_object_mut().unwrap().remove("_deleted");
+    assert!(
+        store
+            .docs
+            .put_immutable(&expired_doc, &tombstone_body)
+            .await
+            .is_err()
+    );
+    couch_server.abort();
 }
 
 #[tokio::test]
