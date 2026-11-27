@@ -1,7 +1,7 @@
 use crate::{
-    core::{Error, Result, now},
+    core::{Error, Result},
     dal::{
-        Store, new_id,
+        Store,
         schemas::{self, PublishedSchema},
     },
 };
@@ -117,16 +117,13 @@ pub async fn store_validated_document(
 }
 
 pub async fn cleanup_orphan_document(store: &Store, doc_id: &str) {
-    if let Err(err) = store.docs.delete(doc_id).await {
-        let ts = now();
-        let _ = sqlx::query(
-            "INSERT INTO cleanup_tasks(id, target_kind, target_ref, status, attempts, last_error, created_at, updated_at) VALUES($1, 'couch_doc', $2, 'pending', 1, $3, $4, $4)",
-        )
-        .bind(new_id())
-        .bind(doc_id)
-        .bind(err.to_string())
-        .bind(ts)
-        .execute(&store.db)
-        .await;
-    }
+    let _ = crate::domain::cleanup::cleanup_question_document(store, doc_id).await;
+}
+
+pub(crate) async fn cleanup_orphan_document_with_visual_operation_lock_held(
+    store: &Store,
+    doc_id: &str,
+) -> Result<()> {
+    crate::domain::cleanup::cleanup_question_document_with_visual_operation_lock_held(store, doc_id)
+        .await
 }

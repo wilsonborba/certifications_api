@@ -50,6 +50,10 @@ pub fn routes() -> Router<App> {
         .route("/attempts/{attempt_id}/events", post(record_events))
         .route("/attempts/{attempt_id}/submit", post(submit_attempt))
         .route("/attempts/{attempt_id}/results", get(get_results))
+        .route(
+            "/attempts/{attempt_id}/question_versions/{question_version_id}/visuals/{visual_id}",
+            get(get_attempt_question_visual),
+        )
 }
 
 async fn start_attempt(
@@ -145,4 +149,26 @@ async fn get_results(
 ) -> Result<Json<Value>> {
     let res = attempts::get_results(&app.store, &caller, &attempt_id).await?;
     Ok(Json(json!(res)))
+}
+
+async fn get_attempt_question_visual(
+    State(app): State<App>,
+    SessionUser(caller): SessionUser,
+    Path((attempt_id, question_version_id, visual_id)): Path<(String, String, String)>,
+) -> crate::core::Result<axum::response::Response> {
+    let (bytes, mime_type) = attempts::get_attempt_question_visual(
+        &app.store,
+        &caller,
+        &attempt_id,
+        &question_version_id,
+        &visual_id,
+    )
+    .await?;
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, mime_type)
+        .header(axum::http::header::CACHE_CONTROL, "private, no-store")
+        .header(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .body(axum::body::Body::from(bytes))
+        .map_err(|_| crate::core::Error::unavailable())
 }

@@ -39,7 +39,7 @@ use std::sync::{
 use tokio::sync::{Barrier, Notify};
 use tower::ServiceExt;
 
-const POSTGRES_MIGRATIONS: [&str; 16] = [
+const POSTGRES_MIGRATIONS: [&str; 17] = [
     include_str!("../migrations/001_v2_schema.sql"),
     include_str!("../migrations/002_v2_studies_sources.sql"),
     include_str!("../migrations/003_v2_generation_events.sql"),
@@ -56,6 +56,7 @@ const POSTGRES_MIGRATIONS: [&str; 16] = [
     include_str!("../migrations/014_v2_report_source_snapshot.sql"),
     include_str!("../migrations/015_v2_one_active_generation_per_owner.sql"),
     include_str!("../migrations/016_v2_question_visual_jobs.sql"),
+    include_str!("../migrations/017_v2_canonical_question_visuals.sql"),
 ];
 
 struct CortexGate {
@@ -210,6 +211,61 @@ async fn couch_delete(
 ) -> StatusCode {
     gate.documents.lock().unwrap().remove(&doc_id);
     StatusCode::OK
+}
+
+async fn immutable_conflict_put() -> StatusCode {
+    StatusCode::CONFLICT
+}
+
+async fn immutable_conflict_get(
+    State(document): State<Value>,
+    Path((_database, doc_id)): Path<(String, String)>,
+) -> (StatusCode, Json<Value>) {
+    let mut document = document;
+    if doc_id == "extra-metadata" {
+        document["_id"] = json!(doc_id);
+        document["_extra"] = json!(true);
+    }
+    (StatusCode::OK, Json(document))
+}
+
+#[tokio::test]
+async fn remote_immutable_put_accepts_couch_metadata_but_rejects_changed_content() {
+    let document = json!({"_id":"stable-question","_rev":"2-abc","prompt":"same"});
+    let couch = Router::new()
+        .route(
+            "/{database}/{doc_id}",
+            put(immutable_conflict_put).get(immutable_conflict_get),
+        )
+        .with_state(document);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, couch).await.unwrap() });
+    let mut settings = test_settings();
+    settings.couch_url = format!("http://{address}");
+    let docs =
+        certifications_api::dal::documents::Documents::remote(&settings, reqwest::Client::new());
+    assert!(
+        docs.put_immutable("stable-question", &json!({"prompt":"same"}))
+            .await
+            .is_ok()
+    );
+    assert!(
+        docs.put_immutable("stable-question", &json!({"prompt":"changed"}))
+            .await
+            .is_err()
+    );
+    assert!(
+        docs.put_immutable("other-id", &json!({"prompt":"same"}))
+            .await
+            .is_err()
+    );
+    assert!(
+        docs.put_immutable("extra-metadata", &json!({"prompt":"same"}))
+            .await
+            .is_err()
+    );
+    server.abort();
 }
 
 struct MockCortex {
@@ -391,6 +447,12 @@ async fn publish_question_schema(store: &Store) {
                 field_type: "string".into(),
                 is_required: true,
                 description: "".into(),
+            },
+            SchemaField {
+                field_path: "visual_ids".into(),
+                field_type: "array".into(),
+                is_required: true,
+                description: "Canonical visual references".into(),
             },
         ],
     };

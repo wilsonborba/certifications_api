@@ -18,7 +18,7 @@ pub(crate) enum DatabaseBackend {
     Sqlite,
 }
 
-pub const SQLITE_MIGRATIONS: [&str; 16] = [
+pub const SQLITE_MIGRATIONS: [&str; 17] = [
     include_str!("../../migrations/001_v2_schema.sql"),
     include_str!("../../tests/sqlite/002_v2_studies_sources.sql"),
     include_str!("../../tests/sqlite/003_v2_generation_events.sql"),
@@ -35,6 +35,7 @@ pub const SQLITE_MIGRATIONS: [&str; 16] = [
     include_str!("../../tests/sqlite/014_v2_report_source_snapshot.sql"),
     include_str!("../../tests/sqlite/015_v2_one_active_generation_per_owner.sql"),
     include_str!("../../tests/sqlite/016_v2_question_visual_jobs.sql"),
+    include_str!("../../tests/sqlite/017_v2_canonical_question_visuals.sql"),
 ];
 
 #[derive(Clone)]
@@ -42,6 +43,7 @@ pub struct Store {
     pub db: AnyPool,
     pub(crate) database_backend: DatabaseBackend,
     pub(crate) sqlite_worker_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) question_visual_operation_slots: Arc<tokio::sync::Semaphore>,
     pub docs: documents::Documents,
     pub fsm: Arc<dyn fsm::FsmClient>,
     pub scanner: Arc<dyn scanner::VirusScanner>,
@@ -77,6 +79,7 @@ impl Store {
             db,
             database_backend,
             sqlite_worker_lock: Arc::new(tokio::sync::Mutex::new(())),
+            question_visual_operation_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             docs: documents::Documents::remote(settings, http.clone()),
             fsm: fsm::HttpFsm::client(&settings.fsm_url, &settings.fsm_key, http.clone()),
             scanner: Arc::new(scanner::ClamScanner::with_runtime(
@@ -112,6 +115,7 @@ impl Store {
             db,
             database_backend: DatabaseBackend::Sqlite,
             sqlite_worker_lock: Arc::new(tokio::sync::Mutex::new(())),
+            question_visual_operation_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             docs: documents::Documents::Memory(documents::Documents::memory()),
             fsm: fsm::MemoryFsm::new(),
             scanner: Arc::new(CleanFixtureScanner),

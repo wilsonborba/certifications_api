@@ -167,6 +167,12 @@ async fn publish_question_schema(store: &Store) {
                 is_required: true,
                 description: "".into(),
             },
+            SchemaField {
+                field_path: "visual_ids".into(),
+                field_type: "array".into(),
+                is_required: true,
+                description: "Canonical visual references".into(),
+            },
         ],
     };
     schemas::save_draft(&store.db, &draft).await.unwrap();

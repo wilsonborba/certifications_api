@@ -53,7 +53,8 @@ async fn record_worker_step(
 }
 
 pub const QUESTION_SCHEMA_NAME: &str = "question-v2";
-pub const QUESTION_SCHEMA_VERSION: i64 = 1;
+pub const LEGACY_QUESTION_SCHEMA_VERSION: i64 = 1;
+pub const QUESTION_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct GenerationJobSummary {
@@ -1337,6 +1338,7 @@ async fn process_job_with_worker_connection(
             "correct_id": q.correct_id,
             "explanation": q.explanation,
             "citation_ref": q.citation_ref,
+            "visual_ids": [],
         });
         if let Err(error) = guardrail::store_validated_document(
             store,
@@ -1385,10 +1387,28 @@ async fn process_job_with_worker_connection(
             return Ok(false);
         }
 
+        // Follow the same study-then-quiz lock order as visual and author edits.
+        let study_lock_query = if store.postgres() {
+            "SELECT id FROM studies WHERE id = $1 FOR UPDATE"
+        } else {
+            "SELECT id FROM studies WHERE id = $1"
+        };
+        if sqlx::query(study_lock_query)
+            .bind(&job.study_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_none()
+        {
+            return Err(Error::missing());
+        }
+
         if job.quiz_id.as_deref().is_some_and(|qid| !qid.trim().is_empty()) {
-            let target_exists = sqlx::query(
-                "SELECT id FROM quizzes WHERE id = $1 AND owner_id = $2 AND study_id = $3 AND visibility = 'private'",
-            )
+            let target_query = if store.postgres() {
+                "SELECT id FROM quizzes WHERE id = $1 AND owner_id = $2 AND study_id = $3 AND visibility = 'private' FOR UPDATE"
+            } else {
+                "SELECT id FROM quizzes WHERE id = $1 AND owner_id = $2 AND study_id = $3 AND visibility = 'private'"
+            };
+            let target_exists = sqlx::query(target_query)
             .bind(&quiz_id)
             .bind(&caller.user_id)
             .bind(&job.study_id)
