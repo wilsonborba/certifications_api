@@ -39,6 +39,8 @@ struct CouchTombstoneFixture {
     documents: Arc<Mutex<std::collections::HashMap<String, Value>>>,
     tombstones: Arc<Mutex<std::collections::HashMap<String, Value>>>,
     delete_count: Arc<AtomicUsize>,
+    fail_delete_ack: Arc<std::sync::atomic::AtomicBool>,
+    fail_get: Arc<std::sync::atomic::AtomicBool>,
 }
 
 async fn couch_fixture_put(
@@ -61,6 +63,12 @@ async fn couch_fixture_get(
     State(couch): State<CouchTombstoneFixture>,
     Path((_database, doc_id)): Path<(String, String)>,
 ) -> (StatusCode, Json<Value>) {
+    if couch.fail_get.load(Ordering::SeqCst) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"fixture_unavailable"})),
+        );
+    }
     if let Some(body) = couch.documents.lock().unwrap().get(&doc_id).cloned() {
         return (StatusCode::OK, Json(body));
     }
@@ -84,7 +92,11 @@ async fn couch_fixture_delete(
     body["_deleted"] = json!(true);
     couch.tombstones.lock().unwrap().insert(doc_id, body);
     couch.delete_count.fetch_add(1, Ordering::SeqCst);
-    StatusCode::OK
+    if couch.fail_delete_ack.load(Ordering::SeqCst) {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    }
 }
 
 impl ReportsClient for MockReports {
@@ -1750,14 +1762,46 @@ async fn remote_couch_retry_preserves_reserved_document_until_expiry() {
         .execute(&store.db)
         .await
         .unwrap();
+    couch.fail_delete_ack.store(true, Ordering::SeqCst);
     assert!(
-        certifications_api::domain::cleanup::retry_one(&store, &expired_cleanup)
+        !certifications_api::domain::cleanup::retry_one(&store, &expired_cleanup)
             .await
             .unwrap()
     );
     assert_eq!(couch.delete_count.load(Ordering::SeqCst), 1);
     assert!(couch.tombstones.lock().unwrap().contains_key(&expired_doc));
     assert!(store.docs.get(&expired_doc).await.is_err());
+    let task_state: String = sqlx::query_scalar("SELECT status FROM cleanup_tasks WHERE id=$1")
+        .bind(&expired_cleanup)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(task_state, "failed");
+
+    couch.fail_delete_ack.store(false, Ordering::SeqCst);
+    couch.fail_get.store(true, Ordering::SeqCst);
+    assert!(
+        !certifications_api::domain::cleanup::retry_one(&store, &expired_cleanup)
+            .await
+            .unwrap()
+    );
+    assert_eq!(couch.delete_count.load(Ordering::SeqCst), 1);
+
+    couch.fail_get.store(false, Ordering::SeqCst);
+    assert!(
+        certifications_api::domain::cleanup::retry_one(&store, &expired_cleanup)
+            .await
+            .unwrap()
+    );
+    assert_eq!(couch.delete_count.load(Ordering::SeqCst), 1);
+    assert!(
+        sqlx::query_scalar::<_, String>("SELECT id FROM cleanup_tasks WHERE id=$1")
+            .bind(&expired_cleanup)
+            .fetch_optional(&store.db)
+            .await
+            .unwrap()
+            .is_none()
+    );
     let mut tombstone_body = couch
         .tombstones
         .lock()

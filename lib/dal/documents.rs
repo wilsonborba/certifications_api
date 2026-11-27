@@ -153,7 +153,11 @@ impl Documents {
                 if remote.base_url.is_empty() {
                     return Err(Error::unavailable());
                 }
-                let doc = self.get(doc_id).await?;
+                let doc = match self.get(doc_id).await {
+                    Ok(doc) => doc,
+                    Err(err) if err.0 == StatusCode::NOT_FOUND => return Ok(()),
+                    Err(err) => return Err(err),
+                };
                 let rev = doc["_rev"].as_str().ok_or_else(Error::unavailable)?;
                 let url = format!(
                     "{}/{}/{}?rev={}",
