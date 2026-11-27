@@ -34,13 +34,14 @@ const TABLES: [&str; 22] = [
     "owner_activity",
 ];
 
-const EXTRA_TABLES: [&str; 6] = [
+const EXTRA_TABLES: [&str; 7] = [
     "attempt_statistics",
     "estimation_statistics",
     "certificate_holders",
     "certificates",
     "cleanup_tasks",
     "public_question_search",
+    "question_version_visual_refs",
 ];
 
 #[tokio::test]
@@ -59,6 +60,7 @@ async fn migrations_apply_cleanly_rerun_safely_and_have_no_json_or_array_columns
                     && !l.starts_with("ALTER TABLE quiz_version_questions")
                     && !l.starts_with("ALTER TABLE certificates ADD COLUMN ")
                     && !l.starts_with("ALTER TABLE question_visuals ADD COLUMN ")
+                    && !l.starts_with("ALTER TABLE question_visual_jobs ADD COLUMN ")
             })
             .collect::<Vec<_>>()
             .join("\n");

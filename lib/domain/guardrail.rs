@@ -117,6 +117,17 @@ pub async fn store_validated_document(
 }
 
 pub async fn cleanup_orphan_document(store: &Store, doc_id: &str) {
+    let retained = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM question_versions WHERE couch_doc_id = $1",
+    )
+    .bind(doc_id)
+    .fetch_one(&store.db)
+    .await;
+    match retained {
+        Ok(0) => {}
+        // Preserve documents when the database cannot prove that no version references them.
+        _ => return,
+    }
     if let Err(err) = store.docs.delete(doc_id).await {
         let ts = now();
         let _ = sqlx::query(

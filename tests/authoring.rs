@@ -163,6 +163,12 @@ async fn publish_question_schema(store: &Store) {
                 is_required: true,
                 description: "".into(),
             },
+            SchemaField {
+                field_path: "visual_ids".into(),
+                field_type: "array".into(),
+                is_required: true,
+                description: "Canonical visual references".into(),
+            },
         ],
     };
     schemas::save_draft(&store.db, &draft).await.unwrap();
@@ -418,6 +424,22 @@ async fn manual_authoring_edit_delete_visual_and_origin_guards() {
     let qv_id = prep["question_version_id"].as_str().unwrap().to_string();
     assert_eq!(qv_id, q_v2["version_id"].as_str().unwrap());
     let job_id = prep["render_job"]["job_id"].as_str().unwrap().to_string();
+    let old_quiz_id: String = sqlx::query_scalar("SELECT quiz_id FROM studies WHERE id = $1")
+        .bind(&sid)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let (st, old_attempt) = call(
+        &app,
+        "POST",
+        &format!("/quizzes/{old_quiz_id}/attempts"),
+        "author-1",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let old_attempt_id = old_attempt["id"].as_str().unwrap().to_string();
 
     // Stage 2a: Decoded dimension mismatch rejected with 422 (100x100 vs expected 1600x960).
     let bad_png = make_test_png(100, 100);
@@ -459,7 +481,45 @@ async fn manual_authoring_edit_delete_visual_and_origin_guards() {
     .await;
     assert_eq!(st, StatusCode::CREATED);
     let vis_id = vis["id"].as_str().unwrap().to_string();
-    let fsm_ref = vis["fsm_ref"].as_str().unwrap().to_string();
+    assert_eq!(vis["prepared_question_version_id"], qv_id);
+    let result_qv_id = vis["result_question_version_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let reserved_receipt = sqlx::query("SELECT operation_fingerprint, result_question_version_id, result_quiz_version_id, result_document_id, result_fsm_ref_key FROM question_visual_jobs WHERE render_job_id = $1")
+        .bind(&job_id).fetch_one(&store.db).await.unwrap();
+    assert!(
+        !reserved_receipt
+            .get::<String, _>("operation_fingerprint")
+            .is_empty()
+    );
+    assert_eq!(
+        reserved_receipt.get::<String, _>("result_question_version_id"),
+        result_qv_id
+    );
+    assert_eq!(
+        reserved_receipt.get::<String, _>("result_quiz_version_id"),
+        vis["result_quiz_version_id"]
+    );
+    let fsm_ref: String = sqlx::query_scalar("SELECT fsm_ref FROM question_visuals WHERE id = $1")
+        .bind(&vis_id)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let result_doc_id: String =
+        sqlx::query_scalar("SELECT couch_doc_id FROM question_versions WHERE id = $1")
+            .bind(&result_qv_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        reserved_receipt.get::<String, _>("result_document_id"),
+        result_doc_id
+    );
+    assert_eq!(
+        reserved_receipt.get::<String, _>("result_fsm_ref_key"),
+        fsm_ref
+    );
     assert!(fsm.has_blob(&fsm_ref));
 
     // Stage 2c: Idempotent replay returns same visual descriptor.
@@ -481,7 +541,8 @@ async fn manual_authoring_edit_delete_visual_and_origin_guards() {
     .await;
     assert_eq!(st, StatusCode::CREATED);
     assert_eq!(vis_retry["id"], vis_id);
-    assert_eq!(vis_retry["fsm_ref"], fsm_ref);
+    assert_eq!(vis_retry["result_question_version_id"], result_qv_id);
+    assert!(vis_retry.get("fsm_ref").is_none());
 
     // Stage 3a: Author reads visual preview bytes.
     let (st, headers, body_bytes) = call_raw(
@@ -494,7 +555,12 @@ async fn manual_authoring_edit_delete_visual_and_origin_guards() {
     .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(headers.get("content-type").unwrap(), "image/png");
+    assert_eq!(headers.get("cache-control").unwrap(), "no-store");
     assert!(!body_bytes.is_empty());
+    let old_attempt_visual_path =
+        format!("/attempts/{old_attempt_id}/question_versions/{qv_id}/visuals/{vis_id}");
+    let (st, _, _) = call_raw(&app, "GET", &old_attempt_visual_path, "author-1", None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 
     // Stage 3b: Unauthorized caller receives FORBIDDEN.
     let (st, _, _) = call_raw(
@@ -506,6 +572,154 @@ async fn manual_authoring_edit_delete_visual_and_origin_guards() {
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // The upload publishes a successor question document and leaves the prepared version unchanged.
+    let old_doc_id: String =
+        sqlx::query_scalar("SELECT couch_doc_id FROM question_versions WHERE id = $1")
+            .bind(&qv_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap();
+    let old_doc = store.docs.get(&old_doc_id).await.unwrap();
+    assert_eq!(old_doc["visual_ids"], json!([]));
+    let result_doc_id: String =
+        sqlx::query_scalar("SELECT couch_doc_id FROM question_versions WHERE id = $1")
+            .bind(&result_qv_id)
+            .fetch_one(&store.db)
+            .await
+            .unwrap();
+    let result_doc = store.docs.get(&result_doc_id).await.unwrap();
+    assert_eq!(result_doc["visual_ids"], json!([vis_id]));
+    let visual_ref_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM question_version_visual_refs WHERE question_version_id = $1 AND visual_id = $2",
+    )
+    .bind(&result_qv_id)
+    .bind(&vis_id)
+    .fetch_one(&store.db)
+    .await
+    .unwrap();
+    assert_eq!(visual_ref_count, 1);
+    assert!(
+        sqlx::query("DELETE FROM question_visuals WHERE id = $1")
+            .bind(&vis_id)
+            .execute(&store.db)
+            .await
+            .is_err()
+    );
+
+    // A later text edit carries the exact visual reference into a new immutable version.
+    let (st, _) = call(
+        &app,
+        "PATCH",
+        &format!("/studies/{sid}/questions/{qid}"),
+        "author-1",
+        None,
+        Some(json!({"prompt": "Edited after image publication"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let latest_qv: String = sqlx::query_scalar(
+        "SELECT question_version_id FROM quiz_version_questions WHERE quiz_version_id = (SELECT active_version_id FROM quizzes WHERE id = (SELECT quiz_id FROM studies WHERE id = $1)) AND question_version_id <> $2 ORDER BY position LIMIT 1",
+    )
+    .bind(&sid).bind(&result_qv_id).fetch_one(&store.db).await.unwrap();
+    let latest_doc_id: String =
+        sqlx::query_scalar("SELECT couch_doc_id FROM question_versions WHERE id = $1")
+            .bind(&latest_qv)
+            .fetch_one(&store.db)
+            .await
+            .unwrap();
+    let latest_doc = store.docs.get(&latest_doc_id).await.unwrap();
+    assert_eq!(latest_doc["visual_ids"], json!([vis_id]));
+
+    // A lost success response can replay after local job deletion and a later text edit.
+    sqlx::query("DELETE FROM question_visual_jobs WHERE render_job_id = $1")
+        .bind(&job_id)
+        .execute(&store.db)
+        .await
+        .unwrap();
+    let before_replay_qvs: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM question_versions WHERE question_id = $1")
+            .bind(&qid)
+            .fetch_one(&store.db)
+            .await
+            .unwrap();
+    let before_replay_quiz_versions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quiz_versions WHERE quiz_id = (SELECT quiz_id FROM studies WHERE id = $1)")
+        .bind(&sid).fetch_one(&store.db).await.unwrap();
+    let puts_before_replay = fsm.put_count();
+    let (st, replayed) = call(
+        &app,
+        "POST",
+        &format!("/studies/{sid}/questions/{qid}/visuals"),
+        "author-1",
+        None,
+        Some(
+            json!({"question_version_id": qv_id, "render_job_id": job_id, "png_base64": valid_png,
+            "expected_width": 800, "expected_height": 480, "expected_scale": 2}),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(replayed["id"], vis_id);
+    assert_eq!(replayed["result_question_version_id"], result_qv_id);
+    assert_eq!(fsm.put_count(), puts_before_replay);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM question_versions WHERE question_id = $1"
+        )
+        .bind(&qid)
+        .fetch_one(&store.db)
+        .await
+        .unwrap(),
+        before_replay_qvs
+    );
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM quiz_versions WHERE quiz_id = (SELECT quiz_id FROM studies WHERE id = $1)").bind(&sid).fetch_one(&store.db).await.unwrap(), before_replay_quiz_versions);
+
+    // Attempts expose only safe visual metadata and use the exact pinned question version for PNG reads.
+    let active_quiz_id: String = sqlx::query_scalar("SELECT quiz_id FROM studies WHERE id = $1")
+        .bind(&sid)
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    let (st, attempt) = call(
+        &app,
+        "POST",
+        &format!("/quizzes/{active_quiz_id}/attempts"),
+        "author-1",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let attempt_id = attempt["id"].as_str().unwrap();
+    let (st, taking) = call(
+        &app,
+        "GET",
+        &format!("/attempts/{attempt_id}"),
+        "author-1",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let pinned_qv = taking["questions"][0]["question_version_id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(taking["questions"][0]["visuals"][0]["id"], vis_id);
+    assert!(taking["questions"][0].get("correct_id").is_none());
+    assert!(taking["questions"][0].get("explanation").is_none());
+    let attempt_visual_path =
+        format!("/attempts/{attempt_id}/question_versions/{pinned_qv}/visuals/{vis_id}");
+    let (st, headers, body_bytes) =
+        call_raw(&app, "GET", &attempt_visual_path, "author-1", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(headers.get("cache-control").unwrap(), "private, no-store");
+    assert!(!body_bytes.is_empty());
+    let (st, _, _) = call_raw(&app, "GET", &attempt_visual_path, "author-2", None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let stale_attempt_visual_path =
+        format!("/attempts/{attempt_id}/question_versions/{result_qv_id}/visuals/{vis_id}");
+    let (st, _, _) = call_raw(&app, "GET", &stale_attempt_visual_path, "author-1", None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 
     // Conflict: Stale or mismatched question version ID is rejected with 409.
     let (st, _) = call(
@@ -640,7 +854,7 @@ async fn manual_authoring_edit_delete_visual_and_origin_guards() {
             .fetch_one(&store.db)
             .await
             .unwrap();
-    assert_eq!(ver_count, 2);
+    assert_eq!(ver_count, 4);
 }
 
 #[tokio::test]
@@ -1138,6 +1352,9 @@ async fn test_visual_fsm_compensation_outside_sql_transaction() {
     let job_id = prep["render_job"]["job_id"].as_str().unwrap().to_string();
 
     let puts_before = fsm.put_count();
+    let docs_before = certifications_api::dal::memory_docs(&store.docs)
+        .unwrap()
+        .len();
 
     // Create trigger that forces INSERT on question_visuals to fail
     sqlx::query("CREATE TRIGGER abort_qv_insert BEFORE INSERT ON question_visuals BEGIN SELECT RAISE(ABORT, 'forced insert failure'); END;")
@@ -1171,6 +1388,17 @@ async fn test_visual_fsm_compensation_outside_sql_transaction() {
     let puts_after = fsm.put_count();
     assert_eq!(puts_after, puts_before + 1);
     assert_eq!(fsm.blob_count(), 0);
+    assert_eq!(
+        certifications_api::dal::memory_docs(&store.docs)
+            .unwrap()
+            .len(),
+        docs_before
+    );
+    let failed_assets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM question_visuals")
+        .fetch_one(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(failed_assets, 0);
 
     // Drop trigger
     sqlx::query("DROP TRIGGER abort_qv_insert;")

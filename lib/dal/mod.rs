@@ -18,7 +18,7 @@ pub(crate) enum DatabaseBackend {
     Sqlite,
 }
 
-pub const SQLITE_MIGRATIONS: [&str; 16] = [
+pub const SQLITE_MIGRATIONS: [&str; 17] = [
     include_str!("../../migrations/001_v2_schema.sql"),
     include_str!("../../tests/sqlite/002_v2_studies_sources.sql"),
     include_str!("../../tests/sqlite/003_v2_generation_events.sql"),
@@ -35,6 +35,7 @@ pub const SQLITE_MIGRATIONS: [&str; 16] = [
     include_str!("../../tests/sqlite/014_v2_report_source_snapshot.sql"),
     include_str!("../../tests/sqlite/015_v2_one_active_generation_per_owner.sql"),
     include_str!("../../tests/sqlite/016_v2_question_visual_jobs.sql"),
+    include_str!("../../tests/sqlite/017_v2_canonical_question_visuals.sql"),
 ];
 
 #[derive(Clone)]

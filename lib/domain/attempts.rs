@@ -7,6 +7,9 @@ use crate::{
     domain::{
         auth::{CallerIdentity, require_owner},
         authoring::{ORIGIN_CORTEX, ORIGIN_CREATOR},
+        generations::{
+            LEGACY_QUESTION_SCHEMA_VERSION, QUESTION_SCHEMA_NAME, QUESTION_SCHEMA_VERSION,
+        },
         guardrail,
         provenance::{QuestionProvenanceStats, REUSED_PUBLIC_VERSION, question_provenance_stats},
     },
@@ -19,6 +22,60 @@ pub const ATTEMPT_STATS_SCHEMA_NAME: &str = "attempt-stats-v1";
 pub const ATTEMPT_STATS_SCHEMA_VERSION: i64 = 1;
 
 #[derive(Clone, Debug, Serialize)]
+pub struct AttemptVisualReference {
+    pub id: String,
+    pub mime_type: String,
+    pub created_at: i64,
+}
+
+async fn attempt_visuals(
+    store: &Store,
+    doc: &Value,
+    question_id: &str,
+    schema_name: &str,
+    schema_version: i64,
+) -> Result<Vec<AttemptVisualReference>> {
+    if schema_name != QUESTION_SCHEMA_NAME
+        || ![LEGACY_QUESTION_SCHEMA_VERSION, QUESTION_SCHEMA_VERSION].contains(&schema_version)
+    {
+        return Err(Error::unavailable());
+    }
+    if schema_version == LEGACY_QUESTION_SCHEMA_VERSION {
+        if doc
+            .get("visual_ids")
+            .is_some_and(|value| value.as_array().is_none_or(|ids| !ids.is_empty()))
+        {
+            return Err(Error::unavailable());
+        }
+        return Ok(Vec::new());
+    }
+    let Some(ids) = doc.get("visual_ids").and_then(Value::as_array) else {
+        return Err(Error::unavailable());
+    };
+    if ids.len() > 64 {
+        return Err(Error::unavailable());
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut visuals = Vec::with_capacity(ids.len());
+    for value in ids {
+        let Some(id) = value.as_str() else {
+            return Err(Error::unavailable());
+        };
+        if id.is_empty() || id.len() > 128 || id.trim() != id || !seen.insert(id) {
+            return Err(Error::unavailable());
+        }
+        let row = sqlx::query("SELECT v.id, v.mime_type, v.created_at FROM question_visuals v JOIN question_versions qv ON qv.id = v.result_question_version_id WHERE v.id = $1 AND v.question_id = $2 AND qv.question_id = $2 AND v.mime_type = 'image/png'")
+            .bind(id).bind(question_id).fetch_optional(&store.db).await?.ok_or_else(Error::missing)?;
+        visuals.push(AttemptVisualReference {
+            id: row.get("id"),
+            mime_type: row.get("mime_type"),
+            created_at: row.get("created_at"),
+        });
+    }
+    Ok(visuals)
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct TakingQuestion {
     pub question_id: String,
     pub question_version_id: String,
@@ -27,6 +84,7 @@ pub struct TakingQuestion {
     pub prompt: String,
     pub alternatives: Value,
     pub selected_option_id: Option<String>,
+    pub visuals: Vec<AttemptVisualReference>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -148,6 +206,7 @@ pub struct ReviewedQuestion {
     pub is_correct: bool,
     pub explanation: String,
     pub citation_ref: String,
+    pub visuals: Vec<AttemptVisualReference>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -229,7 +288,7 @@ async fn load_taking_questions(
     quiz_version_id: &str,
 ) -> Result<Vec<TakingQuestion>> {
     let rows = sqlx::query(
-        "SELECT qu.id AS question_id, qver.id AS qv_id, qver.language, qu.origin, qver.couch_doc_id,
+        "SELECT qu.id AS question_id, qver.id AS qv_id, qver.language, qu.origin, qver.couch_doc_id, qver.schema_name, qver.schema_version,
                 aa.selected_option_id
          FROM quiz_version_questions qvq
          JOIN question_versions qver ON qver.id = qvq.question_version_id
@@ -247,15 +306,25 @@ async fn load_taking_questions(
     for r in rows {
         let doc_id: String = r.get("couch_doc_id");
         let doc = store.docs.get(&doc_id).await?;
+        let question_id: String = r.get("question_id");
+        let visuals = attempt_visuals(
+            store,
+            &doc,
+            &question_id,
+            &r.get::<String, _>("schema_name"),
+            r.get("schema_version"),
+        )
+        .await?;
         // Taking API NEVER returns correct_id or explanation before submission.
         out.push(TakingQuestion {
-            question_id: r.get("question_id"),
+            question_id,
             question_version_id: r.get("qv_id"),
             language: r.get("language"),
             origin: r.get("origin"),
             prompt: doc["prompt"].as_str().unwrap_or("").to_string(),
             alternatives: doc["alternatives"].clone(),
             selected_option_id: r.try_get("selected_option_id").ok(),
+            visuals,
         });
     }
     Ok(out)
@@ -912,7 +981,7 @@ pub async fn get_results(
 
     let quiz_version_id: String = row.get("quiz_version_id");
     let q_rows = sqlx::query(
-        "SELECT qu.id AS question_id, qver.id AS qv_id, qver.language, qu.origin, qver.couch_doc_id,
+        "SELECT qu.id AS question_id, qver.id AS qv_id, qver.language, qu.origin, qver.couch_doc_id, qver.schema_name, qver.schema_version,
                 qvq.source_scope,
                 aa.selected_option_id, aa.is_correct
          FROM quiz_version_questions qvq
@@ -939,6 +1008,15 @@ pub async fn get_results(
         let source_scope: String = r.get("source_scope");
         let selected: Option<String> = r.try_get("selected_option_id").ok();
         let doc = store.docs.get(&doc_id).await?;
+        let question_id: String = r.get("question_id");
+        let visuals = attempt_visuals(
+            store,
+            &doc,
+            &question_id,
+            &r.get::<String, _>("schema_name"),
+            r.get("schema_version"),
+        )
+        .await?;
         let correct_id = doc["correct_id"].as_str().unwrap_or("").to_string();
         let is_correct = selected.as_deref() == Some(correct_id.as_str());
 
@@ -955,7 +1033,7 @@ pub async fn get_results(
         }
 
         questions.push(ReviewedQuestion {
-            question_id: r.get("question_id"),
+            question_id,
             question_version_id: r.get("qv_id"),
             language: r.get("language"),
             origin,
@@ -970,6 +1048,7 @@ pub async fn get_results(
             } else {
                 doc["citation_ref"].as_str().unwrap_or("").to_string()
             },
+            visuals,
         });
     }
 
@@ -996,4 +1075,53 @@ pub async fn get_results(
         activity_summary,
         questions,
     })
+}
+
+pub async fn get_attempt_question_visual(
+    store: &Store,
+    caller: &CallerIdentity,
+    attempt_id: &str,
+    question_version_id: &str,
+    visual_id: &str,
+) -> Result<(Vec<u8>, String)> {
+    let attempt = sqlx::query("SELECT owner_id, quiz_version_id FROM attempts WHERE id = $1")
+        .bind(attempt_id)
+        .fetch_optional(&store.db)
+        .await?
+        .ok_or_else(Error::missing)?;
+    let owner_id: String = attempt.get("owner_id");
+    if owner_id != caller.user_id {
+        return Err(Error::missing());
+    }
+    let quiz_version_id: String = attempt.get("quiz_version_id");
+    let pinned = sqlx::query(
+        "SELECT qv.question_id, qv.couch_doc_id, qv.schema_name, qv.schema_version FROM quiz_version_questions qvq JOIN question_versions qv ON qv.id = qvq.question_version_id WHERE qvq.quiz_version_id = $1 AND qvq.question_version_id = $2",
+    ).bind(&quiz_version_id).bind(question_version_id).fetch_optional(&store.db).await?.ok_or_else(Error::missing)?;
+    let question_id: String = pinned.get("question_id");
+    let doc_id: String = pinned.get("couch_doc_id");
+    let doc = store.docs.get(&doc_id).await?;
+    let visuals = attempt_visuals(
+        store,
+        &doc,
+        &question_id,
+        &pinned.get::<String, _>("schema_name"),
+        pinned.get("schema_version"),
+    )
+    .await?;
+    if !visuals.iter().any(|visual| visual.id == visual_id) {
+        return Err(Error::missing());
+    }
+    let asset = sqlx::query(
+        "SELECT v.fsm_ref, v.mime_type FROM question_visuals v JOIN question_versions qv ON qv.id = v.result_question_version_id WHERE v.id = $1 AND v.question_id = $2 AND qv.question_id = $2 AND v.mime_type = 'image/png'",
+    )
+    .bind(visual_id)
+    .bind(&question_id)
+    .fetch_optional(&store.db)
+    .await?
+    .ok_or_else(Error::missing)?;
+    let bytes = store
+        .fsm
+        .get_bytes(&asset.get::<String, _>("fsm_ref"))
+        .await?;
+    Ok((bytes, asset.get("mime_type")))
 }
