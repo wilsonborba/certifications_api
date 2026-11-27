@@ -223,6 +223,7 @@ async fn immutable_conflict_get(
 ) -> (StatusCode, Json<Value>) {
     let mut document = document;
     if doc_id == "extra-metadata" {
+        document["_id"] = json!(doc_id);
         document["_extra"] = json!(true);
     }
     (StatusCode::OK, Json(document))
