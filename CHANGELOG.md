@@ -47,6 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Combine reviewed attempt filters and owner summaries (#43) ([`8795386`](https://github.com/wilsonborba/certifications_api/commit/8795386234ad3eb1320ad07ba68b2c96ff351866))
 - Integrate reviewed history filters and owner summaries (#43) ([`8aca524`](https://github.com/wilsonborba/certifications_api/commit/8aca52456028e4fb9661ffea8790c89e15618d32))
 - *(authoring)* Align question visuals with Reports render job workflow (#40) ([`ac1e5d3`](https://github.com/wilsonborba/certifications_api/commit/ac1e5d3ba257508b8005304d8f1dd3dc6c1715a9))
+- Add canonical immutable question visuals ([`5aa1efd`](https://github.com/wilsonborba/certifications_api/commit/5aa1efdb35ea7b5c2c8179133ee1fc08495c1e65))
+- *(authoring)* Integrate immutable question visual versions (#50) ([`dadc2ff`](https://github.com/wilsonborba/certifications_api/commit/dadc2ffb822ca0709b8c10b99a84e6f4fba55a6e))
 
 ### 🐛 Bug Fixes
 
@@ -97,6 +99,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(authoring)* Restore migration 004, add migration 016, publication locks, and trusted auth (#40) ([`19d03d5`](https://github.com/wilsonborba/certifications_api/commit/19d03d54e5255306d145682dea95b2c196f0144d))
 - *(authoring)* Enforce durable replay authorization, draft expiry, and negative regressions (#40) ([`2ae816c`](https://github.com/wilsonborba/certifications_api/commit/2ae816cd550ba1339f18aebb9b665e8a6376714a))
 - *(studies)* Preserve source external_ref on prepared studies and enforce 255 character limit ([`4dc8497`](https://github.com/wilsonborba/certifications_api/commit/4dc8497df98d6253903b4052a7d53486c0355c93))
+- Serialize immutable visual retries and cleanup ([`9e018b7`](https://github.com/wilsonborba/certifications_api/commit/9e018b72e5059d61cd954f74d26a699cf34a75aa))
+- Retain reserved couch docs until retry expires ([`4c15c7c`](https://github.com/wilsonborba/certifications_api/commit/4c15c7c9a500a43d321488d57f311b621681f856))
+- Treat missing Couch documents as deleted ([`0ee36d1`](https://github.com/wilsonborba/certifications_api/commit/0ee36d1bb01a6519bf696551b1f28b157dd38858))
+- *(cleanup)* Retain recorded legacy visual assets (#50) ([`3d51194`](https://github.com/wilsonborba/certifications_api/commit/3d5119437b4bc2d36733b6ff2357fa93b72a94be))
 
 ### 💼 Other Changes
 
@@ -169,6 +175,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(generation)* Assert queue ranks after enqueue batch ([`72518ae`](https://github.com/wilsonborba/certifications_api/commit/72518aea08acfbd0ddd6f85799ac60eb5d487492))
 - Add direct upload regression for timestamp-expired study draft ([`ec33652`](https://github.com/wilsonborba/certifications_api/commit/ec33652ffac90971e8fb26f80c8e06cf502b6954))
 - Assert zero attempted FSM puts on direct draft expiry upload ([`03f08d7`](https://github.com/wilsonborba/certifications_api/commit/03f08d72e410f4933403efe0554ccad041b147f2))
+- Distinguish couch metadata from wrong document id ([`baaf2f3`](https://github.com/wilsonborba/certifications_api/commit/baaf2f3677ceb4e134f3ce96cbcfb08f170f4420))
 
 ### ⚙️ Miscellaneous Tasks
 
