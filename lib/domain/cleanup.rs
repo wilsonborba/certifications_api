@@ -244,13 +244,14 @@ pub async fn is_fsm_ref_in_use(store: &Store, fsm_ref: &str) -> Result<bool> {
     if count > 0 {
         return Ok(true);
     }
-    let retained_visual: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM question_visuals v JOIN question_version_visual_refs r ON r.visual_id = v.id WHERE v.fsm_ref = $1",
-    )
-    .bind(fsm_ref)
-    .fetch_one(&store.db)
-    .await?;
-    Ok(retained_visual > 0)
+    // Legacy schema1 assets have no canonical index rows. Their stored asset
+    // record still protects the bytes until that record is legitimately removed.
+    let recorded_visual: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM question_visuals WHERE fsm_ref = $1")
+            .bind(fsm_ref)
+            .fetch_one(&store.db)
+            .await?;
+    Ok(recorded_visual > 0)
 }
 
 async fn is_question_document_in_use(store: &Store, doc_id: &str) -> Result<bool> {
